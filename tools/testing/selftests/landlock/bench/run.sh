@@ -31,6 +31,7 @@ ACCESS=
 TRACED_SYSCALLS=
 MICROBENCH=false
 WORKLOAD=
+CUSTOM_TRACER=false
 SILENCE=false
 TRACE_CMD=
 
@@ -55,6 +56,7 @@ help()
 	echo "Options:"
 	echo "  -e TRACED_SYSCALLS  specify syscalls which would be traced while benchmarking"
 	echo "  -m                  run microbenchmark workload for TRACED_SYSCALLS"
+	echo "  -b                  trace via custom tracer"
 	echo "  -p PERF_BINARY      use PERF_BINARY instead of /usr/bin/perf"
 	echo "  -D MSECS            wait MSECS msecs before tracing sandboxed workload"
 	echo "                      (default: $SANDBOX_DELAY)"
@@ -95,6 +97,7 @@ parse_and_check_arguments()
 		case $arg in
 			e) TRACED_SYSCALLS=$OPTARG ;;
 			m) MICROBENCH=true ;;
+			b) CUSTOM_TRACER=true ;;
 			t) add_sandboxer_args $OPTARG ;;
 			p) PERF_BIN=`realpath $OPTARG` ;;
 			D) SANDBOX_DELAY=$OPTARG ;;
@@ -132,6 +135,10 @@ parse_and_check_arguments()
 	if [ ! -z "$WORKLOAD" ] && [ -z "$SANDBOXER_ARGS" ]; then
 		err Landlock topology is not specified
 	fi
+
+	if [ ! -f "$CUSTOM_TRACER_BIN" ] && $CUSTOM_TRACER ; then
+		err Tracer binary does not exist
+	fi
 }
 
 # perf trace
@@ -141,6 +148,9 @@ header+=';/^   syscall            calls  errors  total       min       avg      
 header+=';/^                                     (msec)    (msec)    (msec)    (msec)        (%)$/d'
 header+=';/^   --------------- --------  ------ -------- --------- --------- ---------     ------$/d'
 header+=';/^ Summary of events:$/d'
+
+# custom tracer
+header+=';/^                                           samples  duration AVG(ns)  duration(ms)     stddev(%)$/d'
 
 rm_headers()
 {
@@ -325,6 +335,12 @@ run_traced_microbench()
 	else
 		output=$LL_TRACE_DUMP
 		sandbox_opt=-s
+	fi
+
+	if $CUSTOM_TRACER; then
+		stddev_col=5
+	else
+		stddev_col=9
 	fi
 
 	echo '' > $output

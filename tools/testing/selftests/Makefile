@@ -50,6 +50,7 @@ TARGETS += kcmp
 TARGETS += kexec
 TARGETS += kvm
 TARGETS += landlock
+TARGETS += landlock/bench
 TARGETS += lib
 TARGETS += livepatch
 TARGETS += lkdtm
