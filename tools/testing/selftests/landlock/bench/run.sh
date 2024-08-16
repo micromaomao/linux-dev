@@ -15,6 +15,8 @@ KSFT_SKIP=4
 REL_DIR=$(dirname $(realpath $0))
 PERF_BIN=/usr/bin/perf
 SANDBOXER_BIN=$REL_DIR/sandboxer
+MICROBENCH_BIN=$REL_DIR/microbench
+CUSTOM_TRACER_BIN=$REL_DIR/tracer
 TASKSET=/usr/bin/taskset
 NICE=/usr/bin/nice
 
@@ -27,6 +29,7 @@ OUTPUT=
 SANDBOXER_ARGS=
 ACCESS=
 TRACED_SYSCALLS=
+MICROBENCH=false
 WORKLOAD=
 SILENCE=false
 TRACE_CMD=
@@ -34,6 +37,8 @@ TRACE_CMD=
 CPU_AFFINITY=0
 SANDBOX_DELAY=300 # msecs
 REPEAT=5
+MICROBENCH_INITIAL_ITERATIONS=10000000
+STDDEV_STABLE=0.1 # %
 
 err()
 {
@@ -44,10 +49,12 @@ err()
 help()
 {
 	echo "Usage: $0 [OPTIONS] [WORKLOAD_CMD]"
+	echo "   or: $0 [OPTIONS] -m"
 	echo "Measure overhead of Landlock hooks for the specified workload."
 	echo
 	echo "Options:"
 	echo "  -e TRACED_SYSCALLS  specify syscalls which would be traced while benchmarking"
+	echo "  -m                  run microbenchmark workload for TRACED_SYSCALLS"
 	echo "  -p PERF_BINARY      use PERF_BINARY instead of /usr/bin/perf"
 	echo "  -D MSECS            wait MSECS msecs before tracing sandboxed workload"
 	echo "                      (default: $SANDBOX_DELAY)"
@@ -83,10 +90,11 @@ add_sandboxer_args()
 
 parse_and_check_arguments()
 {
-	while getopts smp:e:r:o:t:D:c:h arg
+	while getopts smbp:e:r:o:t:D:c:h arg
 	do
 		case $arg in
 			e) TRACED_SYSCALLS=$OPTARG ;;
+			m) MICROBENCH=true ;;
 			t) add_sandboxer_args $OPTARG ;;
 			p) PERF_BIN=`realpath $OPTARG` ;;
 			D) SANDBOX_DELAY=$OPTARG ;;
@@ -105,8 +113,13 @@ parse_and_check_arguments()
 		err Sandboxer binary does not exist
 	fi
 
-	if [ -z "$WORKLOAD" ]; then
-		err Specify workload cmd
+	# At least one must be present.
+	if [ -z "$WORKLOAD" ] && ! $MICROBENCH ; then
+		err Specify workload cmd or -m flag
+	fi
+
+	if [ $MICROBENCH ] && [ ! -f $SANDBOXER_BIN ]; then
+		err Binary of microbenchmarking script does not exist
 	fi
 
 	if [ -z "$TRACED_SYSCALLS" ]; then
@@ -198,14 +211,6 @@ print_overhead()
 	dump_avg_durations $BASE_TRACE_DUMP > $TMP_BUF && mv $TMP_BUF $BASE_TRACE_DUMP
 	dump_avg_durations $LL_TRACE_DUMP > $TMP_BUF && mv $TMP_BUF $LL_TRACE_DUMP
 
-	print "\nTracing results\n"
-	print "===============\n"
-	print "cmd: "
-	print "%s " $WORKLOAD
-	print "\n"
-	print "syscalls: %s\n" $TRACED_SYSCALLS
-	print "access: %s\n" $ACCESS
-
 	print "overhead:\n"
 	print "    %-20s %10s %10s %23s\n" "syscall" "bcalls" "scalls" "duration+overhead(us)"
 	print "    %-20s %10s %10s %23s\n" "=======" "======" "======" "====================="
@@ -237,14 +242,48 @@ print_overhead()
 	done < $BASE_TRACE_DUMP
 }
 
+print_overhead_workload()
+{
+	print "\nTracing results\n"
+	print "===============\n"
+	print "cmd: "
+	print "%s " $WORKLOAD
+	print "\n"
+	print "syscalls: %s\n" $TRACED_SYSCALLS
+	print "access: %s\n" $ACCESS
+
+	print_overhead
+}
+
+print_overhead_microbench()
+{
+	print "\nTracing results\n"
+	print "===============\n"
+	print "cmd: Microbenchmarks\n"
+	print "syscalls: %s\n" $TRACED_SYSCALLS
+
+	print_overhead
+}
+
+form_trace_cmd()
+{
+	trace_cmd=$TRACE_CMD
+	trace_cmd+=" -e $1 -D $SANDBOX_DELAY -o $TMP_BUF"
+	trace_cmd+=" $TASKSET -c $CPU_AFFINITY"
+	trace_cmd+=" $NICE -n -19"
+
+	echo $trace_cmd
+}
+
 run_traced_workload()
 {
+	trace_cmd=$(form_trace_cmd $TRACED_SYSCALLS)
+
 	if [ $1 == 0 ]; then
 		output=$BASE_TRACE_DUMP
-		sandbox_cmd=
 	else
 		output=$LL_TRACE_DUMP
-		sandbox_cmd="$SANDBOXER_BIN $SANDBOXER_ARGS"
+		trace_cmd+="$SANDBOXER_BIN $SANDBOXER_ARGS"
 	fi
 
 	echo '' > $output
@@ -254,9 +293,9 @@ run_traced_workload()
 	for i in $(seq 1 $REPEAT);
 	do
 		if $SILENCE; then
-			$TRACE_CMD $sandbox_cmd $WORKLOAD > /dev/null
+			$trace_cmd $WORKLOAD > /dev/null
 		else
-			$TRACE_CMD $sandbox_cmd $WORKLOAD
+			$trace_cmd $WORKLOAD
 		fi
 
 		res=$?
@@ -278,6 +317,47 @@ run_traced_workload()
 	echo "${sec}.${msec}s elapsed"
 }
 
+run_traced_microbench()
+{
+	if [ $1 == 0 ]; then
+		output=$BASE_TRACE_DUMP
+		sandbox_opt=
+	else
+		output=$LL_TRACE_DUMP
+		sandbox_opt=-s
+	fi
+
+	echo '' > $output
+
+	syscalls_to_parse=$(echo $TRACED_SYSCALLS | sed 's/,/\n/g')
+
+	for syscall in $syscalls_to_parse; do
+		n_iters=$MICROBENCH_INITIAL_ITERATIONS
+		trace_cmd=$(form_trace_cmd $syscall)
+
+		while
+			$trace_cmd $MICROBENCH_BIN -e $syscall -n $n_iters $sandbox_opt
+			res=$?
+			if [ $res != 0 ]; then
+				exit $KSFT_FAIL
+			fi
+
+			rm_headers $TMP_BUF
+			output_avg="$(dump_avg_durations_epoch $TMP_BUF)"
+			echo "$output_avg" > $TMP_BUF2
+
+			stddev=$(cat $TMP_BUF | sed 's/ \+ / /g' | cut -d " " -f $stddev_col)
+			stddev=${stddev::-1}
+
+			echo syscall: $syscall, stddev: $stddev%, iterations: $n_iters
+
+			n_iters=$(bc -l <<< "$n_iters*2")
+		[ $(bc -l <<< "$stddev < $STDDEV_STABLE") == 0 ]
+		do true; done
+		cat $TMP_BUF2 >> $output
+	done
+}
+
 trap "exit $KSFT_SKIP" INT
 
 parse_and_check_arguments $@
@@ -286,9 +366,11 @@ if [ ! -z "$OUTPUT" ]; then
 	echo '' > $OUTPUT
 fi
 
-TRACE_CMD="$PERF_BIN trace -s -e $TRACED_SYSCALLS -D $SANDBOX_DELAY -o $TMP_BUF"
-TRACE_CMD+=" $TASKSET -c $CPU_AFFINITY"
-TRACE_CMD+=" $NICE -n -19"
+if $CUSTOM_TRACER; then
+	TRACE_CMD=$CUSTOM_TRACER_BIN
+else
+	TRACE_CMD="$PERF_BIN trace -s"
+fi
 
 if [ ! -z "$WORKLOAD" ]; then
 	echo "Tracing baseline workload..."
@@ -297,5 +379,15 @@ if [ ! -z "$WORKLOAD" ]; then
 	echo "Tracing sandboxed workload..."
 	run_traced_workload 1
 
-	print_overhead
+	print_overhead_workload
+fi
+
+if $MICROBENCH; then
+	echo "Tracing baseline microbenchmarks..."
+	run_traced_microbench 0
+
+	echo "Tracing sandboxed microbenchmarks..."
+	run_traced_microbench 1
+
+	print_overhead_microbench
 fi

@@ -15,7 +15,8 @@ TEST_GEN_PROGS_EXTENDED := \
 	sandbox-and-launch \
 	wait-pipe \
 	wait-pipe-sandbox \
-	bench/sandboxer
+	bench/sandboxer \
+	bench/microbench
 
 TEST_PROGS_EXTENDED := bench/run.sh
 
@@ -25,6 +26,11 @@ $(TEST_GEN_PROGS_EXTENDED): LDFLAGS += -static
 
 include ../lib.mk
 
+$(OUTPUT)/bench/microbench: bench/microbench.c bench/common.c
+$(OUTPUT)/bench/sandboxer: bench/sandboxer.c bench/common.c
+
 # Targets with $(OUTPUT)/ prefix:
 $(TEST_GEN_PROGS): LDLIBS += -lcap -lpthread
 $(TEST_GEN_PROGS_EXTENDED): LDFLAGS += -static
+
+EXTRA_CLEAN = $(OUTPUT)/common.o
