@@ -14,7 +14,10 @@ TEST_GEN_PROGS_EXTENDED := \
 	true \
 	sandbox-and-launch \
 	wait-pipe \
-	wait-pipe-sandbox
+	wait-pipe-sandbox \
+	bench/sandboxer
+
+TEST_PROGS_EXTENDED := bench/run.sh
 
 # Short targets:
 $(TEST_GEN_PROGS): LDLIBS += -lcap -lpthread
