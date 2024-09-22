@@ -13,7 +13,7 @@
 
 import gdb
 
-from linux import tasks, utils
+from linux import utils
 
 
 task_type = utils.CachedType("struct task_struct")
