@@ -33,7 +33,7 @@ sudo qemu-system-x86_64 \
         -enable-kvm \
         -m 2G \
         -smp 2 \
-        -kernel ../arch/x86/boot/bzImage \
+        -kernel ../vmlinux \
         -virtfs local,path=$ROOTFS_DIR,mount_tag=root,security_model=passthrough,readonly=off \
         -netdev user,id=net0,ipv4=on,net=10.0.0.0/24,host=10.0.0.1,dhcpstart=10.0.0.2,ipv6=off,hostfwd=tcp::2222-:22 \
         -device virtio-net,netdev=net0 \
