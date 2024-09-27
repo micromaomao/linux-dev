@@ -30,8 +30,10 @@ if [ ! -e "$DISK" ]; then
 fi
 
 sudo qemu-system-x86_64 \
+        -machine q35,accel=kvm \
         -enable-kvm \
         -m 2G \
+        -cpu host \
         -smp 2 \
         -kernel ../vmlinux \
         -virtfs local,path=$ROOTFS_DIR,mount_tag=root,security_model=passthrough,readonly=off \
