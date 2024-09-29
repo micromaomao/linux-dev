@@ -29,6 +29,11 @@ if [ ! -e "$DISK" ]; then
     mkfs.ext4 -F "$DISK"
 fi
 
+termsize=(`stty size`)
+termheight=${termsize[0]}
+termwidth=${termsize[1]}
+echo "stty rows $termheight cols $termwidth" > "$ROOTFS_DIR/_termsize.sh"
+
 sudo qemu-system-x86_64 \
         -machine q35,accel=kvm \
         -enable-kvm \

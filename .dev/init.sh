@@ -27,6 +27,7 @@ cp -a /run/* /tmp/run_
 mount --move /tmp/run_ /run
 rmdir /tmp/run_
 hostname -F /etc/hostname
+. /_termsize.sh
 uname -a
 ethName=eth0
 # dhcpcd -d $ethName

@@ -2,6 +2,17 @@
   "C_Cpp.files.exclude": {
     "/usr/include": true,
     "**/.vscode": true,
-    "**/.vs": true
+    "**/.vs": true,
+    ".dev": true,
+  },
+  "files.exclude": {
+    "**/.git": true,
+    "**/.svn": true,
+    "**/.hg": true,
+    "**/CVS": true,
+    "**/.DS_Store": true,
+    "**/Thumbs.db": true,
+    ".dev/rootfs": true,
+    ".dev/rootfs*": true
   }
 }
