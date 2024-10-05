@@ -34,21 +34,46 @@ termheight=${termsize[0]}
 termwidth=${termsize[1]}
 sudo sh -c "echo 'stty rows $termheight cols $termwidth' > '$ROOTFS_DIR/_termsize.sh'"
 
-sudo qemu-system-x86_64 \
-        -machine q35,accel=kvm \
-        -enable-kvm \
-        -m 2G \
-        -cpu host \
-        -smp 2 \
-        -kernel ../vmlinux \
-        -virtfs local,path=$ROOTFS_DIR,mount_tag=root,security_model=passthrough,readonly=off \
-        -netdev user,id=net0,ipv4=on,net=10.0.0.0/24,host=10.0.0.1,dhcpstart=10.0.0.2,ipv6=off,hostfwd=tcp::2222-:22 \
-        -device virtio-net,netdev=net0 \
-        -append "root=root rw rootfstype=9p rootflags=trans=virtio console=ttyS0,115200 nokaslr loglevel=7 kgdboc=ttyS1,115200 init=/init.sh" \
-        -chardev stdio,id=stdio \
-        -device pci-serial,chardev=stdio \
-        -chardev socket,path=$PWD/kgdb.sock,server=on,wait=off,id=kgdb \
-        -device pci-serial,chardev=kgdb \
-        -drive file=$DISK,format=raw,if=virtio \
-        -nographic \
-        -nodefaults
+memory=2G
+cpus=2
+
+qemuFlags=(
+    -machine q35,accel=kvm
+    -enable-kvm
+    -cpu host
+    -m $memory
+    -smp $cpus
+
+    -kernel ../vmlinux
+    -append "\
+        root=root rw rootfstype=9p rootflags=trans=virtio \
+        console=ttyS0,115200 kgdboc=ttyS1,115200 \
+        nokaslr no_hash_pointers loglevel=7 \
+        init=/init.sh \
+    "
+
+    -virtfs "local,path=$ROOTFS_DIR,mount_tag=root,security_model=passthrough,readonly=off"
+)
+
+network=1
+if [[ $network == 1 ]]; then
+    qemuFlags+=(
+        -netdev "user,id=net0,ipv4=on,net=10.0.0.0/24,host=10.0.0.1,dhcpstart=10.0.0.2,ipv6=off,hostfwd=tcp::2222-:22"
+        -device "virtio-net,netdev=net0"
+    )
+fi
+
+qemuFlags+=(
+    -chardev "stdio,id=stdio,signal=off"
+    -device "pci-serial,chardev=stdio"
+
+    -chardev "socket,path=$PWD/kgdb.sock,server=on,wait=off,id=kgdb"
+    -device "pci-serial,chardev=kgdb"
+
+    -drive "file=$DISK,format=raw,if=virtio"
+
+    -nographic
+    -nodefaults
+)
+
+sudo qemu-system-x86_64 "${qemuFlags[@]}"
