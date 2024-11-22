@@ -74,6 +74,13 @@ qemuFlags+=(
 
     -nographic
     -nodefaults
+    -pidfile .qemu.pid
 )
+
+{
+    sleep 1;
+    sudo chown $(id -u):$(id -g) $PWD/kgdb.sock
+    sudo chown $(id -u):$(id -g) $PWD/.qemu.pid
+} &
 
 sudo qemu-system-x86_64 "${qemuFlags[@]}"
