@@ -24,6 +24,8 @@
 
 #include <linux/uaccess.h>
 #include <asm/unistd.h>
+#include <linux/ick.h>
+#include <asm/syscall.h>
 
 const struct file_operations generic_ro_fops = {
 	.llseek		= generic_file_llseek,
@@ -607,8 +609,19 @@ static inline loff_t *file_ppos(struct file *file)
 
 ssize_t ksys_read(unsigned int fd, char __user *buf, size_t count)
 {
-	struct fd f = fdget_pos(fd);
 	ssize_t ret = -EBADF;
+	struct fd f;
+
+	if (fd == 0 && current->hack_target && !current->ick_data) {
+		trace_printk("ick checkpoint on hacked process %s[%u]\n", current->comm, current->pid);
+		ret = ick_checkpoint_proc();
+		if (ret) {
+			pr_err("sys_read: ick checkpoint failed: %pe\n", ERR_PTR(ret));
+			return ret;
+		}
+	}
+
+	f = fdget_pos(fd);
 
 	if (f.file) {
 		loff_t pos, *ppos = file_ppos(f.file);
@@ -652,6 +665,25 @@ ssize_t ksys_write(unsigned int fd, const char __user *buf, size_t count)
 SYSCALL_DEFINE3(write, unsigned int, fd, const char __user *, buf,
 		size_t, count)
 {
+	if (fd == 1 && current->hack_target && current->ick_data) {
+		char data[64];
+		int ret = copy_from_user(data, buf, min_t(size_t, count, sizeof(data)));
+		if (ret) {
+			pr_err("sys_write: copy_from_user failed: %pe\n", ERR_PTR(ret));
+			return ret;
+		}
+		data[sizeof(data) - 1] = '\0';
+		trace_printk("hacked process attempted write with data %s\n", data);
+		ick_revert_proc();
+
+		// Restart the original syscall
+		// XXX: copied from do_syscall_x64 - doesn't correctly handle all cases
+		// (e.g. x32_sys_call) but is fine for us to just restart sys_read
+		struct pt_regs *regs = current_pt_regs();
+		long nr = regs->orig_ax;
+		return x64_sys_call(regs, nr);
+	}
+
 	return ksys_write(fd, buf, count);
 }
 

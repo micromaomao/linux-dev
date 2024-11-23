@@ -693,6 +693,11 @@ static int do_mprotect_pkey(unsigned long start, size_t len,
 	struct mmu_gather tlb;
 	struct vma_iterator vmi;
 
+	if (current->ick_data) {
+		pr_err("do_mprotect_pkey: mprotect blocked while process in ick\n");
+		return -EPERM;
+	}
+
 	start = untagged_addr(start);
 
 	prot &= ~(PROT_GROWSDOWN|PROT_GROWSUP);

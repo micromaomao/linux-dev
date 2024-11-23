@@ -30,3 +30,9 @@ source "lib/Kconfig"
 source "lib/Kconfig.debug"
 
 source "Documentation/Kconfig"
+
+config ICK
+	bool "ick"
+	default y
+	help
+		instant checkpoint

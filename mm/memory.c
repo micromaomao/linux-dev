@@ -92,6 +92,8 @@
 #include "internal.h"
 #include "swap.h"
 
+#include <linux/ick.h>
+
 #if defined(LAST_CPUPID_NOT_IN_PAGE_FLAGS) && !defined(CONFIG_COMPILE_TEST)
 #warning Unfortunate NUMA and NUMA Balancing config, growing page-frame for last_cpupid.
 #endif
@@ -3694,6 +3696,18 @@ static vm_fault_t do_wp_page(struct vm_fault *vmf)
 
 	if (vmf->page)
 		folio = page_folio(vmf->page);
+
+#ifdef CONFIG_ICK
+			if (current->ick_data) {
+				vm_fault_t ret = ick_do_wp_page(vmf);
+				if (ret & (VM_FAULT_ERROR|VM_FAULT_OOM|VM_FAULT_NOPAGE)) {
+					pr_alert("ick_do_wp_page failed on address %px, ret = (vm_fault_t)0x%x\n", (void *)vmf->address, ret);
+					if (!(ret & VM_FAULT_LOCKED))
+						pte_unmap_unlock(vmf->pte, vmf->ptl);
+					return ret;
+				}
+			}
+#endif
 
 	/*
 	 * Shared mapping: we are guaranteed to have VM_WRITE and
