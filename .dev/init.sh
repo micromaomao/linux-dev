@@ -21,6 +21,9 @@ mount -t securityfs none /sys/kernel/security
 mount -t cgroup2 none /sys/fs/cgroup
 mount -t bpf none /sys/fs/bpf
 mount -t tracefs none /sys/kernel/tracing
+pushd /sys/kernel/tracing
+echo 1 > events/printk/enable
+popd
 mkdir /tmp/run_
 mount -t tmpfs none /tmp/run_
 cp -a /run/* /tmp/run_
