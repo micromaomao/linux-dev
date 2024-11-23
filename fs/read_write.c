@@ -674,14 +674,7 @@ SYSCALL_DEFINE3(write, unsigned int, fd, const char __user *, buf,
 		}
 		data[sizeof(data) - 1] = '\0';
 		trace_printk("hacked process attempted write with data %s\n", data);
-		ick_revert_proc();
-
-		// Restart the original syscall
-		// XXX: copied from do_syscall_x64 - doesn't correctly handle all cases
-		// (e.g. x32_sys_call) but is fine for us to just restart sys_read
-		struct pt_regs *regs = current_pt_regs();
-		long nr = regs->orig_ax;
-		return x64_sys_call(regs, nr);
+		ick_revert_proc(false);
 	}
 
 	return ksys_write(fd, buf, count);
@@ -733,7 +726,7 @@ ssize_t ksys_pwrite64(unsigned int fd, const char __user *buf,
 	f = fdget(fd);
 	if (f.file) {
 		ret = -ESPIPE;
-		if (f.file->f_mode & FMODE_PWRITE)  
+		if (f.file->f_mode & FMODE_PWRITE)
 			ret = vfs_write(f.file, buf, count, &pos);
 		fdput(f);
 	}

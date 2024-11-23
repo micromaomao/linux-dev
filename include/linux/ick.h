@@ -23,8 +23,9 @@ struct ick_modified_page {
 
 #ifdef CONFIG_ICK
 int ick_checkpoint_proc(void);
-int ick_revert_proc(void);
+int ick_revert_proc(bool reset_ick);
 vm_fault_t ick_do_wp_page(struct vm_fault *vmf);
+void ick_cleanup(struct task_struct *task);
 #endif
 
 #endif

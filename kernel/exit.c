@@ -70,6 +70,7 @@
 #include <linux/sysfs.h>
 #include <linux/user_events.h>
 #include <linux/uaccess.h>
+#include <linux/ick.h>
 
 #include <uapi/linux/wait.h>
 
@@ -823,6 +824,10 @@ void __noreturn do_exit(long code)
 	int group_dead;
 
 	WARN_ON(irqs_disabled());
+
+#ifdef CONFIG_ICK
+	ick_cleanup(tsk);
+#endif
 
 	synchronize_group_exit(tsk, code);
 
