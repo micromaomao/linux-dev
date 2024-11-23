@@ -1383,6 +1383,11 @@ int do_vmi_munmap(struct vma_iterator *vmi, struct mm_struct *mm,
 	unsigned long end;
 	struct vm_area_struct *vma;
 
+	if (current->ick_data) {
+		pr_err("do_vmi_unmap: munmap blocked while process in ick\n");
+		return -EPERM;
+	}
+
 	if ((offset_in_page(start)) || start > TASK_SIZE || len > TASK_SIZE-start)
 		return -EINVAL;
 

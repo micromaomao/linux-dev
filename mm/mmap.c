@@ -295,6 +295,11 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 	if (!len)
 		return -EINVAL;
 
+	if (current->ick_data) {
+		pr_err("do_mmap: mmap blocked while process in ick\n");
+		return -EPERM;
+	}
+
 	/*
 	 * Does the application expect PROT_READ to imply PROT_EXEC?
 	 *

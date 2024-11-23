@@ -1196,6 +1196,10 @@ static struct task_struct *dup_task_struct(struct task_struct *orig, int node)
 	tsk->mm_cid_active = 0;
 	tsk->migrate_from_cpu = -1;
 #endif
+
+	// ick doesn't support multiple tasks, and should prevent fork calls
+	BUG_ON(tsk->ick_data);
+
 	return tsk;
 
 free_stack:
