@@ -137,7 +137,6 @@ static int __ick_mark_pages(struct task_struct *task,
                             struct ick_checked_process *ick_data) {
   struct mm_struct *mm;
   struct vm_area_struct *vma;
-  int ret = 0;
   struct mmu_gather tlb;
   MA_STATE(mas, &task->mm->mm_mt, 0, ULONG_MAX);
 
@@ -176,19 +175,11 @@ static int __ick_mark_pages(struct task_struct *task,
 
     vma_set_page_prot(vma);
     change_protection(&tlb, vma, vma->vm_start, vma->vm_end, 0);
-
-    if (ret) {
-      pr_alert("%s[%d]: ick: Failed to mark VMA pages as read-only\n", __func__,
-               current->pid);
-      send_sig(SIGKILL, task, 0);
-      goto unlock_and_ret;
-    }
   }
 
-unlock_and_ret:
   tlb_finish_mmu(&tlb);
   mmap_write_unlock(mm); // Calls vma_end_write_all
-  return ret;
+  return 0;
 }
 
 vm_fault_t ick_do_wp_page(struct vm_fault *vmf) {
@@ -203,6 +194,10 @@ vm_fault_t ick_do_wp_page(struct vm_fault *vmf) {
 
   BUG_ON(!ick_data);
   BUG_ON(!(vmf->flags & FAULT_FLAG_WRITE));
+
+  if (READ_ONCE(ick_data->reverting)) {
+    return VM_FAULT_LOCKED;
+  }
 
   spin_lock(&ick_data->tree_lock);
   new = &ick_data->modified_pages_tree.rb_node;
@@ -354,8 +349,8 @@ static int __ick_revert_process(struct task_struct *task) {
   int ret = 0;
   struct pt_regs *regs;
 
-  BUG_ON(task !=
-         current); // TODO: we should probably just get rid of the task argument
+  BUG_ON(task != current);
+  // TODO: we should probably just get rid of the task argument
 
   ick_data = task->ick_data;
   BUG_ON(!ick_data);
@@ -365,6 +360,9 @@ static int __ick_revert_process(struct task_struct *task) {
     return -EINVAL;
   }
 
+  BUG_ON(xchg(&ick_data->reverting, true));
+
+  spin_lock(&ick_data->tree_lock);
   // Do it in order for better cache locality
   for (node = rb_first(&ick_data->modified_pages_tree); node;
         node = rb_next(node)) {
@@ -375,9 +373,13 @@ static int __ick_revert_process(struct task_struct *task) {
     ret = copy_to_user_nofault((void *)addr, orig_page_content, PAGE_SIZE);
     if (ret) {
       pr_alert("ick: Failed to copy page content for 0x%px back: %pe\n", (void*)addr, ERR_PTR(ret));
+      spin_unlock(&ick_data->tree_lock);
       return ret;
     }
   }
+  spin_unlock(&ick_data->tree_lock);
+
+  WRITE_ONCE(ick_data->reverting, false);
 
   // Restore registers
 #if defined(__x86_64__)
@@ -385,17 +387,20 @@ static int __ick_revert_process(struct task_struct *task) {
     regs = task_pt_regs(task);
     memcpy(regs, &ick_data->saved_regs, sizeof(struct pt_regs));
 
-    current_save_fsgs();
-    x86_fsgsbase_load(&task->thread, &ick_data->saved_state);
-    task->thread.fsindex = ick_data->saved_state.fsindex;
-    task->thread.fsbase = ick_data->saved_state.fsbase;
-    task->thread.gsindex = ick_data->saved_state.gsindex;
-    task->thread.gsbase = ick_data->saved_state.gsbase;
+    // XXX: there is some issue with this code which causes recursive page
+    // faults when spin_unlock above is preempted for some reason???
 
-    task->thread.es = ick_data->saved_state.es;
-    loadsegment(es, ick_data->saved_state.es);
-    task->thread.ds = ick_data->saved_state.ds;
-    loadsegment(ds, ick_data->saved_state.ds);
+    // current_save_fsgs();
+    // x86_fsgsbase_load(&task->thread, &ick_data->saved_state);
+    // task->thread.fsindex = ick_data->saved_state.fsindex;
+    // task->thread.fsbase = ick_data->saved_state.fsbase;
+    // task->thread.gsindex = ick_data->saved_state.gsindex;
+    // task->thread.gsbase = ick_data->saved_state.gsbase;
+
+    // task->thread.es = ick_data->saved_state.es;
+    // loadsegment(es, ick_data->saved_state.es);
+    // task->thread.ds = ick_data->saved_state.ds;
+    // loadsegment(ds, ick_data->saved_state.ds);
   }
 #else
 #error "Unsupported architecture"
@@ -415,6 +420,7 @@ void ick_cleanup(struct task_struct *task) {
 
   trace_printk("Cleaning up ick data for %s[%d]\n", task->comm, task->pid);
 
+  spin_lock(&ick_data->tree_lock);
   if (!RB_EMPTY_ROOT(&ick_data->modified_pages_tree)) {
     struct ick_modified_page *mod_page, *tmp;
     rbtree_postorder_for_each_entry_safe(mod_page, tmp, &ick_data->modified_pages_tree, node) {
@@ -422,6 +428,7 @@ void ick_cleanup(struct task_struct *task) {
       vfree(mod_page);
     }
   }
+  spin_unlock(&ick_data->tree_lock);
 
   kfree(ick_data);
   task->ick_data = NULL;
