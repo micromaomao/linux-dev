@@ -164,15 +164,6 @@ static int __ick_mark_pages(struct task_struct *task,
         vma->vm_end, (vma->vm_end - vma->vm_start) / 1024,
         vma->vm_file ? (char *)vma->vm_file->f_path.dentry->d_iname : "anon");
 
-    // TODO: we can't do this - kernel will just treat this as an access error and not call our fault handler...
-    // See access_error(error_code, vma)
-    // Even when page is read-only, if the VMA is "supposed" to be written, it
-    // should be marked VM_WRITE | VM_MAYWRITE (VM_MAYWRITE might not be set if
-    // the page is CoW, which is not the case here)
-
-    // vm_flags_clear(vma, VM_WRITE | VM_MAYWRITE); // calls vma_start_write
-    // vma_set_page_prot(vma);
-
     vma_set_page_prot(vma);
     change_protection(&tlb, vma, vma->vm_start, vma->vm_end, 0);
   }
