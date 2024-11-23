@@ -48,7 +48,6 @@
 static int __ick_mark_pages(struct task_struct *task,
                             struct ick_checked_process *ick_data);
 static int __ick_revert_process(struct task_struct *task);
-static void __ick_cleanup(struct task_struct *task);
 
 int ick_checkpoint_proc(void) {
   struct ick_checked_process *ick_data;
@@ -114,7 +113,7 @@ free_ickdata:
 }
 
 // Stop monitoring a process
-int ick_revert_proc(void) {
+int ick_revert_proc(bool reset_ick) {
   struct task_struct *curr_task = current;
 
   pid_t pid = curr_task->pid;
@@ -125,7 +124,10 @@ int ick_revert_proc(void) {
   }
 
   __ick_revert_process(curr_task);
-  __ick_cleanup(curr_task);
+
+  if (reset_ick) {
+    ick_cleanup(curr_task);
+  }
 
   return 0;
 }
@@ -345,7 +347,8 @@ static __always_inline void x86_fsgsbase_load(struct thread_struct *prev,
 // Restore the process to the checkpointed state
 static int __ick_revert_process(struct task_struct *task) {
   struct ick_checked_process *ick_data;
-  struct ick_modified_page *mod_page, *tmp;
+  struct ick_modified_page *mod_page;
+  struct rb_node *node;
   struct mm_struct *mm;
   unsigned long addr;
   int ret = 0;
@@ -362,7 +365,10 @@ static int __ick_revert_process(struct task_struct *task) {
     return -EINVAL;
   }
 
-  rbtree_postorder_for_each_entry_safe(mod_page, tmp, &ick_data->modified_pages_tree, node) {
+  // Do it in order for better cache locality
+  for (node = rb_first(&ick_data->modified_pages_tree); node;
+        node = rb_next(node)) {
+    mod_page = rb_entry(node, struct ick_modified_page, node);
     addr = mod_page->addr;
     u8 *orig_page_content = mod_page->orig_page_content;
     trace_printk("Restoring CoW'd page at 0x%px\n", (void*)addr);
@@ -371,11 +377,7 @@ static int __ick_revert_process(struct task_struct *task) {
       pr_alert("ick: Failed to copy page content for 0x%px back: %pe\n", (void*)addr, ERR_PTR(ret));
       return ret;
     }
-    vfree(orig_page_content);
-    vfree(mod_page);
   }
-
-  ick_data->modified_pages_tree = RB_ROOT;
 
   // Restore registers
 #if defined(__x86_64__)
@@ -404,13 +406,14 @@ static int __ick_revert_process(struct task_struct *task) {
   return 0;
 }
 
-// Cleanup function called when the task_struct is freed
-static void __ick_cleanup(struct task_struct *task) {
+void ick_cleanup(struct task_struct *task) {
   struct ick_checked_process *ick_data = task->ick_data;
 
   if (!ick_data) {
     return;
   }
+
+  trace_printk("Cleaning up ick data for %s[%d]\n", task->comm, task->pid);
 
   if (!RB_EMPTY_ROOT(&ick_data->modified_pages_tree)) {
     struct ick_modified_page *mod_page, *tmp;
