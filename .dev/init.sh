@@ -47,7 +47,19 @@ fi
 if [ -e /dev/vda ]; then
     mount /dev/vda /mnt
 fi
-/bin/bash || true
+set +ex
+exec_args="${@:2}" # Remove the `-`
+if [ -z "$exec_args" ]; then
+    /bin/bash || true
+else
+    eval "$exec_args"
+    ret=$?
+    if [ $ret -ne 0 ]; then
+        echo "Command exited with code $ret"
+    fi
+    /bin/bash || true
+fi
+set -ex
 umount /mnt
 sync
 echo o > /proc/sysrq-trigger

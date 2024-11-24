@@ -33,6 +33,7 @@ termsize=(`stty size`)
 termheight=${termsize[0]}
 termwidth=${termsize[1]}
 sudo sh -c "echo 'stty rows $termheight cols $termwidth' > '$ROOTFS_DIR/_termsize.sh'"
+exec_args="${@:1}"
 
 memory=2G
 cpus=2
@@ -49,7 +50,8 @@ qemuFlags=(
         root=root rw rootfstype=9p rootflags=trans=virtio \
         console=ttyS0,115200 kgdboc=ttyS1,115200 \
         nokaslr no_hash_pointers loglevel=7 \
-        init=/init.sh \
+        init=/init.sh - \
+        $exec_args
     "
 
     -virtfs "local,path=$ROOTFS_DIR,mount_tag=root,security_model=passthrough,readonly=off"
