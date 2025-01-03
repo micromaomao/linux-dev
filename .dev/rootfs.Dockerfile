@@ -1,4 +1,4 @@
-FROM debian:sid
+FROM debian:stable
 
 # echo ... | string replace -a ' ' \n | sort | string join ' '
 RUN dpkg --add-architecture i386 && apt update && apt install -y \

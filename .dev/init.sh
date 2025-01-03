@@ -42,6 +42,7 @@ if [ -e "/sys/class/net/$ethName" ]; then
     ip link set dev $ethName up
     ip addr add 10.0.0.2/24 dev $ethName
     ip route add default via 10.0.0.1 dev $ethName
+    mkdir -p /run/sshd
     /usr/sbin/sshd
 fi
 if [ -e /dev/vda ]; then
