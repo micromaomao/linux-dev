@@ -84,14 +84,9 @@ int ick_checkpoint_proc(void) {
   // However we do not need to store fpus as this is a syscall kernel entry and
   // fpus are caller-saved.
 
-  current_save_fsgs();
-  ick_data->saved_state.fsindex = current->thread.fsindex;
-  ick_data->saved_state.fsbase = current->thread.fsbase;
-  ick_data->saved_state.gsindex = current->thread.gsindex;
-  ick_data->saved_state.gsbase = current->thread.gsbase;
-
-  savesegment(es, ick_data->saved_state.es);
-  savesegment(ds, ick_data->saved_state.ds);
+  // Notably, we ideally should also save/restore the segment registers
+  // The code which does the save used to be here, but because I was having
+  // trouble restoring it (see FIXME comment below), I removed it.
 #else
 #error "Unsupported architecture"
 #endif
@@ -232,104 +227,6 @@ vm_fault_t ick_do_wp_page(struct vm_fault *vmf) {
   return VM_FAULT_LOCKED;
 }
 
-// copied from process_64.c
-enum which_selector { FS, GS };
-
-// copied from process_64.c
-static __always_inline void loadseg(enum which_selector which,
-                                    unsigned short sel) {
-  if (which == FS)
-    loadsegment(fs, sel);
-  else
-    load_gs_index(sel);
-}
-
-// copied from process_64.c
-static __always_inline void load_seg_legacy(unsigned short prev_index,
-                                            unsigned long prev_base,
-                                            unsigned short next_index,
-                                            unsigned long next_base,
-                                            enum which_selector which) {
-  if (likely(next_index <= 3)) {
-    /*
-     * The next task is using 64-bit TLS, is not using this
-     * segment at all, or is having fun with arcane CPU features.
-     */
-    if (next_base == 0) {
-      /*
-       * Nasty case: on AMD CPUs, we need to forcibly zero
-       * the base.
-       */
-      if (static_cpu_has_bug(X86_BUG_NULL_SEG)) {
-        loadseg(which, __USER_DS);
-        loadseg(which, next_index);
-      } else {
-        /*
-         * We could try to exhaustively detect cases
-         * under which we can skip the segment load,
-         * but there's really only one case that matters
-         * for performance: if both the previous and
-         * next states are fully zeroed, we can skip
-         * the load.
-         *
-         * (This assumes that prev_base == 0 has no
-         * false positives.  This is the case on
-         * Intel-style CPUs.)
-         */
-        if (likely(prev_index | next_index | prev_base))
-          loadseg(which, next_index);
-      }
-    } else {
-      if (prev_index != next_index)
-        loadseg(which, next_index);
-      wrmsrl(which == FS ? MSR_FS_BASE : MSR_KERNEL_GS_BASE, next_base);
-    }
-  } else {
-    /*
-     * The next task is using a real segment.  Loading the selector
-     * is sufficient.
-     */
-    loadseg(which, next_index);
-  }
-}
-
-// copied from process_64.c
-static noinstr void __wrgsbase_inactive(unsigned long gsbase) {
-  lockdep_assert_irqs_disabled();
-
-  if (!cpu_feature_enabled(X86_FEATURE_FRED) &&
-      !cpu_feature_enabled(X86_FEATURE_XENPV)) {
-    native_swapgs();
-    wrgsbase(gsbase);
-    native_swapgs();
-  } else {
-    instrumentation_begin();
-    wrmsrl(MSR_KERNEL_GS_BASE, gsbase);
-    instrumentation_end();
-  }
-}
-
-// copied from process_64.c
-static __always_inline void x86_fsgsbase_load(struct thread_struct *prev,
-                                              struct thread_struct *next) {
-  if (static_cpu_has(X86_FEATURE_FSGSBASE)) {
-    /* Update the FS and GS selectors if they could have changed. */
-    if (unlikely(prev->fsindex || next->fsindex))
-      loadseg(FS, next->fsindex);
-    if (unlikely(prev->gsindex || next->gsindex))
-      loadseg(GS, next->gsindex);
-
-    /* Update the bases. */
-    wrfsbase(next->fsbase);
-    __wrgsbase_inactive(next->gsbase);
-  } else {
-    load_seg_legacy(prev->fsindex, prev->fsbase, next->fsindex, next->fsbase,
-                    FS);
-    load_seg_legacy(prev->gsindex, prev->gsbase, next->gsindex, next->gsbase,
-                    GS);
-  }
-}
-
 // Restore the process to the checkpointed state
 static int __ick_revert_process(struct task_struct *task) {
   struct ick_checked_process *ick_data;
@@ -378,20 +275,10 @@ static int __ick_revert_process(struct task_struct *task) {
     regs = task_pt_regs(task);
     memcpy(regs, &ick_data->saved_regs, sizeof(struct pt_regs));
 
-    // XXX: there is some issue with this code which causes recursive page
-    // faults when spin_unlock above is preempted for some reason???
-
-    // current_save_fsgs();
-    // x86_fsgsbase_load(&task->thread, &ick_data->saved_state);
-    // task->thread.fsindex = ick_data->saved_state.fsindex;
-    // task->thread.fsbase = ick_data->saved_state.fsbase;
-    // task->thread.gsindex = ick_data->saved_state.gsindex;
-    // task->thread.gsbase = ick_data->saved_state.gsbase;
-
-    // task->thread.es = ick_data->saved_state.es;
-    // loadsegment(es, ick_data->saved_state.es);
-    // task->thread.ds = ick_data->saved_state.ds;
-    // loadsegment(ds, ick_data->saved_state.ds);
+    // FIXME: we ideally should also save/restore the segment registers
+    // The code which does the restore used to be here, but it had some problems
+    // with recursive page faults when spin_unlock above is preempted for some
+    // reason, and I did not yet figure out why.
   }
 #else
 #error "Unsupported architecture"
