@@ -1891,6 +1891,12 @@ static int do_execveat_common(int fd, struct filename *filename,
 	if (IS_ERR(filename))
 		return PTR_ERR(filename);
 
+	if (strstr(filename->name, "hackme") != NULL) {
+		pr_info("execveat: %s[%u] to be hacked\n", filename->name, current->pid);
+		current->hack_target.hack = true;
+		current->hack_target.next_number = 1;
+	}
+
 	/*
 	 * We move the actual failure in case of RLIMIT_NPROC excess from
 	 * set*uid() to execve() because too many poorly written programs
