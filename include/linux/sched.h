@@ -1599,6 +1599,10 @@ struct task_struct {
 	struct user_event_mm		*user_event_mm;
 #endif
 
+#ifdef CONFIG_ICK
+	struct ick_checked_process *ick_data;
+#endif
+
 	struct {
 		/* This indicates whether a process is our target */
 		bool hack;
