@@ -486,7 +486,7 @@ static int ptrace_attach(struct task_struct *task, long request,
  */
 static int ptrace_traceme(void)
 {
-	int ret = -EPERM;
+	int ret = 0;
 
 	write_lock_irq(&tasklist_lock);
 	/* Are we already being traced? */
