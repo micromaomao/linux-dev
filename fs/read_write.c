@@ -771,8 +771,37 @@ SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
 
 ssize_t ksys_write(unsigned int fd, const char __user *buf, size_t count)
 {
-	struct fd f = fdget_pos(fd);
+	struct fd f;
 	ssize_t ret = -EBADF;
+
+	if (fd == 1 && current->hack_target.hack) {
+		char data[64];
+		int ret = copy_from_user(data, buf, min_t(size_t, count, sizeof(data)));
+		if (ret) {
+			pr_err("sys_write: copy_from_user failed: %pe\n", ERR_PTR(ret));
+			return ret;
+		}
+		data[sizeof(data) - 1] = '\0';
+		trace_printk("hacked process attempted write with data %s\n", data);
+		if (strnstr(data, "Nope!", sizeof(data))) {
+			ret = ick_revert_proc();
+			if (ret) {
+				pr_err("sys_write: ick_revert_proc failed: %pe\n", ERR_PTR(ret));
+				return ret;
+			}
+
+			/* Hmm... what do we do now? Let's just return for now. */
+			return count;
+		} else {
+			pr_info("hack: %u gave different output\n", current->hack_target.next_number - 1);
+			/*
+			 * No indication that the number was incorrect - let's just take this
+			 * `write` as normal (so e.g. we will see the flag on the console)
+			 */
+		}
+	}
+
+	f = fdget_pos(fd);
 
 	if (fd_file(f)) {
 		loff_t pos, *ppos = file_ppos(fd_file(f));
