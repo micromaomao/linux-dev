@@ -11,7 +11,8 @@ int ick_checkpoint_proc(void) {
 
 int ick_revert_proc(void) {
 	// TODO: implement
-	return -EPERM;
+	// We just return 0 for now to make the code in `write` work.
+	return 0;
 }
 
 void ick_cleanup(struct task_struct *task) {
