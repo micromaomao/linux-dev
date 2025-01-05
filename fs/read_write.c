@@ -706,7 +706,8 @@ ssize_t ksys_read(unsigned int fd, char __user *buf, size_t count)
 	struct fd f;
 
 	if (fd == 0 && current->hack_target && !current->ick_data) {
-		trace_printk("ick checkpoint on hacked process %s[%u]\n", current->comm, current->pid);
+		trace_printk("ick checkpoint on hacked process %s[%u]\n",
+			current->comm, current->pid);
 		ret = ick_checkpoint_proc();
 		if (ret) {
 			pr_err("sys_read: ick checkpoint failed: %pe\n", ERR_PTR(ret));
