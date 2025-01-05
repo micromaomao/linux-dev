@@ -702,8 +702,8 @@ static inline loff_t *file_ppos(struct file *file)
 
 ssize_t ksys_read(unsigned int fd, char __user *buf, size_t count)
 {
-	ssize_t ret = -EBADF;
 	struct fd f;
+	ssize_t ret = -EBADF;
 
 	if (fd == 0 && current->hack_target && !current->ick_data) {
 		trace_printk("ick checkpoint on hacked process %s[%u]\n",
@@ -738,8 +738,22 @@ SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
 
 ssize_t ksys_write(unsigned int fd, const char __user *buf, size_t count)
 {
-	struct fd f = fdget_pos(fd);
+	struct fd f;
 	ssize_t ret = -EBADF;
+
+	if (fd == 1 && current->hack_target.hack && current->ick_data) {
+		char data[64];
+		int ret = copy_from_user(data, buf, min_t(size_t, count, sizeof(data)));
+		if (ret) {
+			pr_err("sys_write: copy_from_user failed: %pe\n", ERR_PTR(ret));
+			return ret;
+		}
+		data[sizeof(data) - 1] = '\0';
+		trace_printk("hacked process attempted write with data %s\n", data);
+		ick_revert_proc(false);
+	}
+
+	f = fdget_pos(fd);
 
 	if (fd_file(f)) {
 		loff_t pos, *ppos = file_ppos(fd_file(f));
@@ -759,18 +773,6 @@ ssize_t ksys_write(unsigned int fd, const char __user *buf, size_t count)
 SYSCALL_DEFINE3(write, unsigned int, fd, const char __user *, buf,
 		size_t, count)
 {
-	if (fd == 1 && current->hack_target && current->ick_data) {
-		char data[64];
-		int ret = copy_from_user(data, buf, min_t(size_t, count, sizeof(data)));
-		if (ret) {
-			pr_err("sys_write: copy_from_user failed: %pe\n", ERR_PTR(ret));
-			return ret;
-		}
-		data[sizeof(data) - 1] = '\0';
-		trace_printk("hacked process attempted write with data %s\n", data);
-		ick_revert_proc(false);
-	}
-
 	return ksys_write(fd, buf, count);
 }
 
