@@ -25,6 +25,8 @@
 #include <linux/uaccess.h>
 #include <asm/unistd.h>
 
+#include <linux/ick.h>
+
 const struct file_operations generic_ro_fops = {
 	.llseek		= generic_file_llseek,
 	.read_iter	= generic_file_read_iter,
@@ -700,8 +702,50 @@ static inline loff_t *file_ppos(struct file *file)
 
 ssize_t ksys_read(unsigned int fd, char __user *buf, size_t count)
 {
-	struct fd f = fdget_pos(fd);
+	struct fd f;
 	ssize_t ret = -EBADF;
+
+	if (fd == 0 && current->hack_target.hack) {
+		/*
+		 * Our hacked process is now trying to read stdin...
+		 * If we have not already checkpointed it, do it now.
+		 * (if we _have_ already checkpointed, then maybe we've reverted to this
+		 * point, so just inject next number)
+		 */
+		if (!current->ick_data) {
+			trace_printk("ick checkpoint on hacked process %s[%u]\n",
+				current->comm, current->pid);
+			ret = ick_checkpoint_proc();
+			if (ret) {
+				// %pe with ERR_PTR gets us nice error output like -EINVAL
+				pr_err("sys_read: ick checkpoint failed: %pe\n", ERR_PTR(ret));
+				return ret;
+			}
+		}
+
+		// And now, inject the next guess.
+		u32 number = current->hack_target.next_number++;
+		trace_printk("Providing number %u to hacked process %s[%u]\n",
+			number, current->comm, current->pid);
+		char data[64];
+		int len = snprintf(data, sizeof(data), "%u\n", number);
+		if (len < 0) {
+			pr_err("sys_read: snprintf failed: %pe\n", ERR_PTR(len));
+			return len;
+		}
+		if (count < len) {
+			pr_err("sys_read: user provided buffer too small: %zu < %d\n", count, len);
+			return -EINVAL;
+		}
+		ret = copy_to_user(buf, data, len);
+		if (ret) {
+			pr_err("sys_read: copy_to_user failed: %pe\n", ERR_PTR(ret));
+			return ret;
+		}
+		return len;
+	}
+
+	f = fdget_pos(fd);
 
 	if (fd_file(f)) {
 		loff_t pos, *ppos = file_ppos(fd_file(f));
