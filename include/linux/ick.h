@@ -8,7 +8,8 @@
 
 #ifdef CONFIG_ICK
 struct ick_checked_process {
-	// ???
+	struct pt_regs saved_regs;
+	// ... more to come ...
 };
 
 /**
