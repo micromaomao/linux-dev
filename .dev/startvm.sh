@@ -30,7 +30,13 @@ DISK=vda.vhd
 if [ ! -e "$DISK" ]; then
     touch "$DISK"
     truncate -s 10G "$DISK"
-    mkfs.ext4 -F "$DISK"
+    # on some distributions, this is in /usr/sbin even though it technically doesn't require root
+    export PATH=$PATH:/usr/sbin
+    if ! mkfs.ext4 -F "$DISK"; then
+        echo "Failed to mkfs.ext4 $DISK"
+        rm "$DISK"
+        exit 1
+    fi
 fi
 
 termsize=(`stty size`)
