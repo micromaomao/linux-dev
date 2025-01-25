@@ -13,7 +13,7 @@
 
 import gdb
 
-from linux import utils, lists
+from linux import utils, lists, cpus
 
 
 task_type = utils.CachedType("struct task_struct")
@@ -69,11 +69,18 @@ class LxPs(gdb.Command):
         super(LxPs, self).__init__("lx-ps", gdb.COMMAND_DATA)
 
     def invoke(self, arg, from_tty):
-        gdb.write("{:>10} {:>12} {:>7}\n".format("TASK", "PID", "COMM"))
+        try:
+            current = cpus.get_current_task(-1)
+            current_pid = int(current['pid'])
+        except gdb.error:
+            current_pid = None
+        gdb.write("{:>10} {:>12}  {:>7}\n".format("TASK", "PID", "COMM"))
         for task in task_lists():
-            gdb.write("{} {:^5} {}\n".format(
+            pid = int(task['pid'])
+            gdb.write("{} {: 5} {}{}\n".format(
                 task.format_string().split()[0],
-                task["pid"].format_string(),
+                pid,
+                "*" if pid == current_pid else " ",
                 task["comm"].string()))
 
 

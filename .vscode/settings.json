@@ -58,5 +58,8 @@
     "arch/x86_64": true,
     "arch/xtensa": true
   },
-  "C_Cpp.codeAnalysis.runAutomatically": false
+  "C_Cpp.codeAnalysis.runAutomatically": false,
+  "python.analysis.extraPaths": [
+    "./scripts/gdb"
+  ]
 }
