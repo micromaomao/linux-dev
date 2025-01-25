@@ -39,7 +39,7 @@ ln -s /proc/self/fd/0 /dev/stdin
 ln -s /proc/self/fd/1 /dev/stdout
 ln -s /proc/self/fd/2 /dev/stderr
 hostname -F /etc/hostname
-. /_termsize.sh
+. /_runtime_init.sh
 uname -a
 ethName=eth0
 if [ -e "/sys/class/net/$ethName" ]; then
