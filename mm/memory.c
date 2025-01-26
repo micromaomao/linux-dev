@@ -3660,6 +3660,13 @@ static vm_fault_t do_wp_page(struct vm_fault *vmf)
 	struct folio *folio = NULL;
 	pte_t pte;
 
+#ifdef CONFIG_ICK
+	if (current->hack_target.hack) {
+		trace_printk("faulting on write-protected page %lx\n", vmf->address);
+		// TODO: add ick checkpoint code here
+	}
+#endif
+
 	if (likely(!unshare)) {
 		if (userfaultfd_pte_wp(vma, ptep_get(vmf->pte))) {
 			if (!userfaultfd_wp_async(vma)) {
@@ -4740,6 +4747,13 @@ static vm_fault_t do_anonymous_page(struct vm_fault *vmf)
 	vm_fault_t ret = 0;
 	int nr_pages = 1;
 	pte_t entry;
+
+#ifdef CONFIG_ICK
+	if (current->hack_target.hack) {
+		trace_printk("faulting on non-present anonymous page %lx\n", addr);
+		// TODO: add ick checkpoint code here
+	}
+#endif
 
 	/* File mapping without ->vm_ops ? */
 	if (vma->vm_flags & VM_SHARED)
