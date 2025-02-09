@@ -4,6 +4,52 @@
 #include <linux/errno.h>
 #include <linux/ptrace.h>
 #include <linux/sched/task_stack.h>
+#include <asm/tlb.h>
+
+// Mark pages as write-protected
+static void mark_pages(void) {
+	struct mm_struct *mm = current->mm;
+	// Kernel threads don't have their own `mm`, and we can't checkpoint a kernel
+	// thread anyway
+	BUG_ON(!mm);
+	struct vm_area_struct *vma;
+	struct mmu_gather tlb;
+	VMA_ITERATOR(vmi, mm, 0);
+	pgprotval_t vm_page_prot;
+
+	if (mmap_write_lock_killable(mm)) {
+		// If we return from here, we're getting killed anyway
+		return;
+	}
+	tlb_gather_mmu(&tlb, mm);
+
+	for_each_vma(vmi, vma) {
+		if (!(vma->vm_flags & VM_WRITE)) {
+			// The VMA can still have VM_MAYWRITE, which means that a future mprotect
+			// call can make it writable (for example because the underlying file is
+			// opened as writable). For now we don't care - we will block all
+			// memory-related syscalls anyway.
+			trace_printk("Skipping non-writable VMA %lx-%lx (%s)\n",
+				vma->vm_start, vma->vm_end,
+				vma->vm_file ? (char *)vma->vm_file->f_path.dentry->d_iname : "anon");
+			continue;
+		}
+
+		trace_printk("Marking VMA %lx-%lx (%lu KiB) as read-only\n",
+			vma->vm_start, vma->vm_end, (vma->vm_end - vma->vm_start) / 1024);
+
+		vma_start_write(vma);
+		// Maybe there's a more standard way to do this? But various useful
+		// functions in mm/memory.c are static
+		vm_page_prot = vma->vm_page_prot.pgprot;
+		vm_page_prot &= ~_PAGE_RW;
+		WRITE_ONCE(vma->vm_page_prot.pgprot, vm_page_prot);
+		change_protection(&tlb, vma, vma->vm_start, vma->vm_end, 0);
+	}
+
+	tlb_finish_mmu(&tlb);
+	mmap_write_unlock(mm);
+}
 
 int ick_checkpoint_proc(void) {
 	struct ick_checked_process *ick_data;
@@ -27,6 +73,8 @@ int ick_checkpoint_proc(void) {
 #else
 #error "Unsupported architecture"
 #endif
+
+	mark_pages();
 
 	// TODO: implement rest
 
