@@ -81,6 +81,7 @@ static void build_check_rule(void)
 		.num_layers = ~0,
 	};
 
+	/* Check that type of num_layers is not too small */
 	BUILD_BUG_ON(rule.num_layers < LANDLOCK_MAX_NUM_LAYERS);
 }
 
@@ -288,6 +289,7 @@ static void build_check_layer(void)
 		.access = ~0,
 	};
 
+	/* Check if any of layer's member's type is too small */
 	BUILD_BUG_ON(layer.level < LANDLOCK_MAX_NUM_LAYERS);
 	BUILD_BUG_ON(layer.access < LANDLOCK_MASK_ACCESS_FS);
 }
@@ -650,7 +652,7 @@ bool landlock_unmask_layers(const struct landlock_rule *const rule,
 		bool is_empty;
 
 		/*
-		 * Records in @layer_masks which layer grants access to each
+		 * Records in @layer_masks which layer denies access to each
 		 * requested access.
 		 */
 		is_empty = true;
