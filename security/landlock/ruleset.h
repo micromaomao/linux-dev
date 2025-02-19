@@ -33,6 +33,14 @@ struct landlock_layer {
 	 * relative to the object type (e.g. %LANDLOCK_ACTION_FS_READ).
 	 */
 	access_mask_t access;
+	/**
+	 * @superviser: If not null, this layer is operating in
+	 * supervisor mode.  In this mode, access denied by only
+	 * supervised layers are forwarded to the supervisor(s), who
+	 * can then make a decision whether to actually deny the
+	 * access, or allow it.
+	 */
+	struct landlock_supervisor *superviser;
 };
 
 /**

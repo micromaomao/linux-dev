@@ -115,9 +115,18 @@ create_rule(const struct landlock_id id,
 	/* Copies the original layer stack. */
 	memcpy(new_rule->layers, layers,
 	       flex_array_size(new_rule, layers, num_layers));
-	if (new_layer)
+	for (u32 i = 0; i < num_layers; i++) {
+		if ((*layers)[i].superviser) {
+			landlock_get_supervisor((*layers)[i].superviser);
+		}
+	}
+	if (new_layer) {
 		/* Adds a copy of @new_layer on the layer stack. */
 		new_rule->layers[new_rule->num_layers - 1] = *new_layer;
+		if (new_layer->superviser) {
+			landlock_get_supervisor(new_layer->superviser);
+		}
+	}
 	return new_rule;
 }
 
@@ -147,6 +156,11 @@ static void free_rule(struct landlock_rule *const rule,
 		return;
 	if (is_object_pointer(key_type))
 		landlock_put_object(rule->key.object);
+	for (u32 i = 0; i < rule->num_layers; i++) {
+		if (rule->layers[i].superviser) {
+			landlock_put_supervisor(rule->layers[i].superviser);
+		}
+	}
 	kfree(rule);
 }
 
@@ -167,7 +181,9 @@ static void build_check_ruleset(void)
  * @ruleset: The ruleset to be updated.
  * @id: The ID to build the new rule with.  The underlying kernel object, if
  *      any, must be held by the caller.
- * @layers: One or multiple layers to be copied into the new rule.
+ * @layers: One or multiple layers to be copied into the new
+ *          rule. Refcount of any supervisors in this array are
+ *          incremented.
  * @num_layers: The number of @layers entries.
  *
  * When user space requests to add a new rule to a ruleset, @layers only
@@ -229,7 +245,13 @@ static int insert_rule(struct landlock_ruleset *const ruleset,
 				return -EINVAL;
 			if (WARN_ON_ONCE(this->layers[0].level != 0))
 				return -EINVAL;
+			if (WARN_ON_ONCE(this->layers[0].superviser !=
+					 ruleset->supervisor))
+				return -EINVAL;
 			this->layers[0].access |= (*layers)[0].access;
+			this->layers[0].superviser = ruleset->supervisor;
+			if (this->layers[0].superviser)
+				landlock_get_supervisor(ruleset->supervisor);
 			return 0;
 		}
 
@@ -283,6 +305,7 @@ int landlock_insert_rule(struct landlock_ruleset *const ruleset,
 		.access = access,
 		/* When @level is zero, insert_rule() extends @ruleset. */
 		.level = 0,
+		.superviser = ruleset->supervisor,
 	} };
 
 	build_check_layer();
@@ -339,6 +362,9 @@ static int merge_tree(struct landlock_ruleset *const dst,
 			return -EINVAL;
 
 		layers[0].access = walker_rule->layers[0].access;
+		layers[0].superviser = walker_rule->layers[0].superviser;
+		if (layers[0].superviser)
+			landlock_get_supervisor(layers[0].superviser);
 
 		err = insert_rule(dst, id, &layers, ARRAY_SIZE(layers));
 		if (err)
@@ -632,16 +658,41 @@ bool landlock_unmask_layers(const struct landlock_rule *const rule,
 		const unsigned long access_req = access_request;
 		unsigned long access_bit;
 		bool is_empty;
+		bool this_layer_access_denied;
 
 		/*
 		 * Records in @layer_masks which layer denies access to each
 		 * requested access.
 		 */
 		is_empty = true;
+		this_layer_access_denied = true;
 		for_each_set_bit(access_bit, &access_req, masks_array_size) {
-			if (layer->access & BIT_ULL(access_bit))
+			if (layer->access & BIT_ULL(access_bit)) {
 				(*layer_masks)[access_bit] &= ~layer_bit;
+				this_layer_access_denied = false;
+			}
 			is_empty = is_empty && !(*layer_masks)[access_bit];
+		}
+		if (this_layer_access_denied && layer->superviser) {
+			/*
+			 * TODO: continue with further layers, and in the end
+			 * if the only layer denying the access are supervised
+			 * layers, ask each layer from top to bottom until all
+			 * says yes.
+			 *
+			 * Might want to do this outside this function, to 1.
+			 * Get access to fs specific data like struct file,
+			 * to open the fd, and 2. to avoid asking the
+			 * supervisor when we have the following situation:
+			 *
+			 * Layer:
+			 *   RW /
+			 *     RO /a
+			 * Request: write
+			 */
+			pr_info("Unimplemented: landlock_unmask_layers: generate event "
+				"and send to supervisor %p\n",
+				layer->superviser);
 		}
 		if (is_empty)
 			return true;
