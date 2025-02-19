@@ -85,23 +85,6 @@ static void build_check_rule(void)
 	BUILD_BUG_ON(rule.num_layers < LANDLOCK_MAX_NUM_LAYERS);
 }
 
-static bool is_object_pointer(const enum landlock_key_type key_type)
-{
-	switch (key_type) {
-	case LANDLOCK_KEY_INODE:
-		return true;
-
-#if IS_ENABLED(CONFIG_INET)
-	case LANDLOCK_KEY_NET_PORT:
-		return false;
-#endif /* IS_ENABLED(CONFIG_INET) */
-
-	default:
-		WARN_ON_ONCE(1);
-		return false;
-	}
-}
-
 static struct landlock_rule *
 create_rule(const struct landlock_id id,
 	    const struct landlock_layer (*const layers)[], const u32 num_layers,
@@ -124,11 +107,7 @@ create_rule(const struct landlock_id id,
 	if (!new_rule)
 		return ERR_PTR(-ENOMEM);
 	RB_CLEAR_NODE(&new_rule->node);
-	if (is_object_pointer(id.type)) {
-		/* This should have been caught by insert_rule(). */
-		WARN_ON_ONCE(!id.key.object);
-		landlock_get_object(id.key.object);
-	}
+	landlock_get_id(id);
 
 	new_rule->key = id.key;
 	new_rule->num_layers = new_num_layers;

@@ -203,6 +203,40 @@ struct landlock_ruleset {
 	};
 };
 
+static inline bool is_object_pointer(const enum landlock_key_type key_type)
+{
+	switch (key_type) {
+	case LANDLOCK_KEY_INODE:
+		return true;
+
+#if IS_ENABLED(CONFIG_INET)
+	case LANDLOCK_KEY_NET_PORT:
+		return false;
+#endif /* IS_ENABLED(CONFIG_INET) */
+
+	default:
+		WARN_ON_ONCE(1);
+		return false;
+	}
+}
+
+static inline void landlock_get_id(const struct landlock_id id)
+{
+	if (is_object_pointer(id.type)) {
+		/* This should have been caught by insert_rule(). */
+		WARN_ON_ONCE(!id.key.object);
+		landlock_get_object(id.key.object);
+	}
+}
+
+static inline void landlock_put_id(const struct landlock_id id)
+{
+	if (is_object_pointer(id.type)) {
+		WARN_ON_ONCE(!id.key.object);
+		landlock_put_object(id.key.object);
+	}
+}
+
 struct landlock_ruleset *
 landlock_create_ruleset(const access_mask_t access_mask_fs,
 			const access_mask_t access_mask_net,
