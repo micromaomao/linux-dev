@@ -61,5 +61,14 @@
   "C_Cpp.codeAnalysis.runAutomatically": false,
   "python.analysis.extraPaths": [
     "./scripts/gdb"
-  ]
+  ],
+  "C_Cpp.clang_format_style": "file",
+  "files.associations": {
+    "*.json": "jsonc",
+    "slab.h": "c",
+    "ruleset.h": "c",
+    "pid.h": "c"
+  },
+  "editor.tabSize": 4,
+  "vim.textwidth": 65
 }

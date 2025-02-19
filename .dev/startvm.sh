@@ -2,8 +2,8 @@
 
 cd $(dirname $0)
 
-memory=2G
-cpus=2
+memory=4G
+cpus=$(nproc)
 network=1
 no_user_aslr=0
 
@@ -121,8 +121,9 @@ qemuFlags=(
     -kernel ../vmlinux
     -append "\
         root=root rw rootfstype=9p rootflags=trans=virtio \
-        console=ttyS0,115200 kgdboc=ttyS1,115200 \
+        earlycon console=hvc0 kgdboc=hvc1 \
         nokaslr no_hash_pointers loglevel=7 \
+        trace_clock=local \
         init=/init.sh - \
         $exec_args
     "
@@ -138,11 +139,12 @@ if [[ $network == 1 ]]; then
 fi
 
 qemuFlags+=(
+    -device "virtio-serial-pci,id=virtio-serial0"
     -chardev "stdio,id=stdio,signal=off"
-    -device "pci-serial,chardev=stdio"
+    -device "virtconsole,chardev=stdio"
 
     -chardev "socket,path=$PWD/kgdb.sock,server=on,wait=off,id=kgdb"
-    -device "pci-serial,chardev=kgdb"
+    -device "virtconsole,chardev=kgdb"
 
     -drive "file=$DISK,format=raw,if=virtio"
 
