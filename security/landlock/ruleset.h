@@ -187,6 +187,12 @@ struct landlock_ruleset {
 			 */
 			u32 num_layers;
 			/**
+			 * @supervisor: For a unmerged ruleset, pointer to an
+			 * allocated supervisor if the user has requested
+			 * supervise mode.
+			 */
+			struct landlock_supervisor *supervisor;
+			/**
 			 * @access_masks: Contains the subset of filesystem and
 			 * network actions that are restricted by a ruleset.
 			 * A domain saves all layers of merged rulesets in a
