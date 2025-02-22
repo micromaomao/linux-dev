@@ -5,6 +5,7 @@
 #include <linux/wait.h>
 #include <linux/path.h>
 #include <linux/pid.h>
+#include <uapi/linux/landlock.h>
 
 #include "access.h"
 #include "ruleset.h"
@@ -15,6 +16,7 @@ struct landlock_supervisor {
 	/* protected by @lock, contains landlock_supervise_event_kernel */
 	struct list_head event_queue;
 	struct wait_queue_head poll_event_wq;
+	atomic_t next_event_id;
 };
 
 enum landlock_supervise_event_state {
@@ -29,7 +31,20 @@ struct landlock_supervise_event_kernel {
 	refcount_t usage;
 	enum landlock_supervise_event_state state;
 
-	/* more fields to come */
+	/* Cookie as presented to user-space */
+	__u32 event_id;
+
+	landlock_supervise_event_type_t type;
+	access_mask_t access_request;
+	struct pid *accessor;
+	union {
+		struct {
+			struct path *target_1, *target_2;
+		};
+		struct {
+			__u16 port;
+		};
+	};
 };
 
 struct landlock_supervisor *landlock_create_supervisor(void);
@@ -46,6 +61,11 @@ static inline void landlock_put_supervise_event(
 	struct landlock_supervise_event_kernel *const event)
 {
 	if (refcount_dec_and_test(&event->usage)) {
+		if (event->target_1)
+			path_put(event->target_1);
+		if (event->target_2)
+			path_put(event->target_2);
+		put_pid(event->accessor);
 		kfree(event);
 	}
 }
