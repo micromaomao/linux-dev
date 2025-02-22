@@ -121,7 +121,7 @@ static void build_check_abi(void)
 	supervise_evt_size = sizeof(event.hdr.type);
 	supervise_evt_size += sizeof(event.hdr.length);
 	supervise_evt_size += sizeof(event.hdr.cookie);
-	supervise_evt_size += sizeof(event.access_mask);
+	supervise_evt_size += sizeof(event.access_request);
 	supervise_evt_size += sizeof(event.accessor);
 	supervise_evt_size += sizeof(event.fd1);
 	supervise_evt_size += sizeof(event.fd2);
@@ -204,8 +204,10 @@ static const char *
 event_state_to_string(enum landlock_supervise_event_state state)
 {
 	switch (state) {
-	case LANDLOCK_SUPERVISE_EVENT_PENDING:
-		return "pending";
+	case LANDLOCK_SUPERVISE_EVENT_NEW:
+		return "new";
+	case LANDLOCK_SUPERVISE_EVENT_NOTIFIED:
+		return "notified";
 	case LANDLOCK_SUPERVISE_EVENT_ALLOWED:
 		return "allowed";
 	case LANDLOCK_SUPERVISE_EVENT_DENIED:
@@ -244,7 +246,7 @@ static void fop_supervisor_fdinfo(struct seq_file *m, struct file *f)
 			WARN(1, "no task in event pid\n");
 		}
 
-		if (event->rule_id.type == LANDLOCK_KEY_INODE) {
+		if (event->type == LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS) {
 			seq_printf(m, "\taccess: filesystem\n");
 			if (event->target_1) {
 				/*
@@ -260,10 +262,10 @@ static void fop_supervisor_fdinfo(struct seq_file *m, struct file *f)
 				seq_path(m, event->target_2, "");
 				seq_printf(m, "\n");
 			}
-		} else if (event->rule_id.type == LANDLOCK_KEY_NET_PORT) {
+		} else if (event->type == LANDLOCK_SUPERVISE_EVENT_TYPE_NET_ACCESS) {
 			seq_printf(m, "\taccess: network\n");
 			seq_printf(m, "\tport: %u\n",
-				   (unsigned int)event->rule_id.key.data);
+				   (unsigned int)event->port);
 		} else {
 			WARN(1, "unknown event key type\n");
 		}

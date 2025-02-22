@@ -34,8 +34,10 @@ void landlock_put_supervisor(struct landlock_supervisor *const supervisor)
 		list_for_each_entry_safe(freeme, next, &supervisor->event_queue,
 					 node) {
 			list_del(&freeme->node);
+			cmpxchg(&freeme->state, LANDLOCK_SUPERVISE_EVENT_NEW,
+				LANDLOCK_SUPERVISE_EVENT_DENIED);
 			cmpxchg(&freeme->state,
-				LANDLOCK_SUPERVISE_EVENT_PENDING,
+				LANDLOCK_SUPERVISE_EVENT_NOTIFIED,
 				LANDLOCK_SUPERVISE_EVENT_DENIED);
 			wake_up_var(freeme);
 			landlock_put_supervise_event(freeme);

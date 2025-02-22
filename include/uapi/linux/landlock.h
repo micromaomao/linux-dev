@@ -351,7 +351,7 @@ struct landlock_supervise_event_hdr {
 
 struct landlock_supervise_event {
 	struct landlock_supervise_event_hdr hdr;
-	__u64 access_mask;
+	__u64 access_request;
 	__kernel_pid_t accessor;
 	union {
 		struct {

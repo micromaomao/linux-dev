@@ -769,7 +769,7 @@ static int process_event(struct landlock_supervise_event *evt)
 				return -1;
 			}
 		}
-		if (evt->access_mask & ACCESS_FS_ROUGHLY_WRITE) {
+		if (evt->access_request & ACCESS_FS_ROUGHLY_WRITE) {
 			access = ACCESS_READWRITE;
 		} else {
 			access = ACCESS_READ;
