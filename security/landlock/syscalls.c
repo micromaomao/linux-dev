@@ -167,6 +167,17 @@ static ssize_t fop_dummy_write(struct file *const filp,
 	return -EINVAL;
 }
 
+static void fop_ruleset_fdinfo(struct seq_file *const m, struct file *const f)
+{
+	struct landlock_ruleset *const ruleset = f->private_data;
+
+	seq_printf(m, "num_rules: %d\n", ruleset->num_rules);
+	if (ruleset->supervisor)
+		seq_printf(m, "supervisor: yes\n");
+	else
+		seq_printf(m, "supervisor: no\n");
+}
+
 /*
  * A ruleset file descriptor enables to build a ruleset by adding (i.e.
  * writing) rule after rule, without relying on the task's context.  This
@@ -177,6 +188,7 @@ static const struct file_operations ruleset_fops = {
 	.release = fop_ruleset_release,
 	.read = fop_dummy_read,
 	.write = fop_dummy_write,
+	.show_fdinfo = fop_ruleset_fdinfo,
 };
 
 static int fop_supervisor_release(struct inode *const inode,
@@ -188,11 +200,89 @@ static int fop_supervisor_release(struct inode *const inode,
 	return 0;
 }
 
+static const char *
+event_state_to_string(enum landlock_supervise_event_state state)
+{
+	switch (state) {
+	case LANDLOCK_SUPERVISE_EVENT_NEW:
+		return "new";
+	case LANDLOCK_SUPERVISE_EVENT_NOTIFIED:
+		return "notified";
+	case LANDLOCK_SUPERVISE_EVENT_ALLOWED:
+		return "allowed";
+	case LANDLOCK_SUPERVISE_EVENT_DENIED:
+		return "denied";
+	default:
+		BUG();
+		return "unknown";
+	}
+}
+
+static void fop_supervisor_fdinfo(struct seq_file *m, struct file *f)
+{
+	struct landlock_supervisor *const supervisor = f->private_data;
+	struct landlock_supervise_event_kernel *event;
+
+	spin_lock(&supervisor->lock);
+
+	size_t cnt = list_count_nodes(&supervisor->event_queue);
+	seq_printf(m, "num_events: %zu\n", cnt);
+	list_for_each_entry(event, &supervisor->event_queue, node) {
+		struct task_struct *task =
+			get_pid_task(event->accessor, PIDTYPE_PID);
+
+		seq_printf(m, "event:\n");
+		if (task) {
+			seq_printf(m, "\taccessor: %s[%d]\n", task->comm,
+				   task->pid);
+			put_task_struct(task);
+		} else {
+			seq_printf(m, "\taccessor: defunct\n");
+			/*
+			 * TODO: we probably shouldn't end up here if we write
+			 * our wait_interruptable / wait_killable code
+			 * correctly
+			 */
+			WARN(1, "no task in event pid\n");
+		}
+
+		if (event->type == LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS) {
+			seq_printf(m, "\taccess: filesystem\n");
+			if (event->target_1) {
+				/*
+				* ok to access since event owns a ref to the path,
+				* and we have event list spin lock.
+				*/
+				seq_printf(m, "\ttarget_1: ");
+				seq_path(m, event->target_1, "");
+				seq_printf(m, "\n");
+			}
+			if (event->target_2) {
+				seq_printf(m, "\ttarget_2: ");
+				seq_path(m, event->target_2, "");
+				seq_printf(m, "\n");
+			}
+		} else if (event->type == LANDLOCK_SUPERVISE_EVENT_TYPE_NET_ACCESS) {
+			seq_printf(m, "\taccess: network\n");
+			seq_printf(m, "\tport: %u\n",
+				   (unsigned int)event->port);
+		} else {
+			WARN(1, "unknown event key type\n");
+		}
+
+		seq_printf(m, "\tstate: %s\n",
+			   event_state_to_string(event->state));
+	}
+
+	spin_unlock(&supervisor->lock);
+}
+
 static const struct file_operations supervisor_fops = {
 	.release = fop_supervisor_release,
 	/* TODO: read, write, poll, dup */
 	.read = fop_dummy_read,
 	.write = fop_dummy_write,
+	.show_fdinfo = fop_supervisor_fdinfo,
 };
 
 static int
