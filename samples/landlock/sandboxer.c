@@ -24,10 +24,15 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 #include <stdbool.h>
+#include <poll.h>
+#include <pthread.h>
+#include <sys/wait.h>
+#include <termios.h>
+#include <linux/limits.h>
 
 #ifndef landlock_create_ruleset
 static inline int
-landlock_create_ruleset(const struct landlock_ruleset_attr *const attr,
+landlock_create_ruleset(struct landlock_ruleset_attr *const attr,
 			const size_t size, const __u32 flags)
 {
 	return syscall(__NR_landlock_create_ruleset, attr, size, flags);
@@ -58,6 +63,7 @@ static inline int landlock_restrict_self(const int ruleset_fd,
 #define ENV_TCP_BIND_NAME "LL_TCP_BIND"
 #define ENV_TCP_CONNECT_NAME "LL_TCP_CONNECT"
 #define ENV_SCOPED_NAME "LL_SCOPED"
+#define ENV_SUPERVISE "LL_SUPERVISE"
 #define ENV_DELIMITER ":"
 
 static int str2num(const char *numstr, __u64 *num_dst)
@@ -295,7 +301,7 @@ out_unset:
 
 /* clang-format on */
 
-#define LANDLOCK_ABI_LAST 6
+#define LANDLOCK_ABI_LAST 7
 
 #define XSTR(s) #s
 #define STR(s) XSTR(s)
@@ -321,6 +327,7 @@ static const char help[] =
 	"* " ENV_SCOPED_NAME ": actions denied on the outside of the landlock domain\n"
 	"  - \"a\" to restrict opening abstract unix sockets\n"
 	"  - \"s\" to restrict sending signals\n"
+	"* " ENV_SUPERVISE ": set to 1 to enable supervisor mode\n"
 	"\n"
 	"Example:\n"
 	ENV_FS_RO_NAME "=\"${PATH}:/lib:/usr:/proc:/etc:/dev/urandom\" "
@@ -335,14 +342,22 @@ static const char help[] =
 
 /* clang-format on */
 
+int verbose_exec(const char *cmd_path, char *const *cmd_argv,
+		 char *const *envp);
+int interactive_sandboxer(int supervisor_fd, int child_stdin, int child_stdout,
+			  int child_stderr, pid_t child_pid);
+
 int main(const int argc, char *const argv[], char *const *const envp)
 {
 	const char *cmd_path;
 	char *const *cmd_argv;
-	int ruleset_fd, abi;
+	int ruleset_fd = -1, supervisor_fd = -1, abi;
 	char *env_port_name;
 	__u64 access_fs_ro = ACCESS_FS_ROUGHLY_READ,
 	      access_fs_rw = ACCESS_FS_ROUGHLY_READ | ACCESS_FS_ROUGHLY_WRITE;
+	bool supervise = false;
+	__u32 flags;
+	char *env_supervise;
 
 	struct landlock_ruleset_attr ruleset_attr = {
 		.handled_access_fs = access_fs_rw,
@@ -350,11 +365,18 @@ int main(const int argc, char *const argv[], char *const *const envp)
 				      LANDLOCK_ACCESS_NET_CONNECT_TCP,
 		.scoped = LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET |
 			  LANDLOCK_SCOPE_SIGNAL,
+		.supervisor_fd = 0,
+		.pad = 0,
 	};
 
 	if (argc < 2) {
 		fprintf(stderr, help, argv[0]);
 		return 1;
+	}
+
+	env_supervise = getenv(ENV_SUPERVISE);
+	if (env_supervise && strcmp(env_supervise, "1") == 0) {
+		supervise = true;
 	}
 
 	abi = landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION);
@@ -422,6 +444,10 @@ int main(const int argc, char *const argv[], char *const *const envp)
 		/* Removes LANDLOCK_SCOPE_* for ABI < 6 */
 		ruleset_attr.scoped &= ~(LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET |
 					 LANDLOCK_SCOPE_SIGNAL);
+		__attribute__((fallthrough));
+	case 6:
+		/* Removes supervisor mode for ABI < 7 */
+		supervise = false;
 		fprintf(stderr,
 			"Hint: You should update the running kernel "
 			"to leverage Landlock features "
@@ -456,10 +482,29 @@ int main(const int argc, char *const argv[], char *const *const envp)
 	if (check_ruleset_scope(ENV_SCOPED_NAME, &ruleset_attr))
 		return 1;
 
-	ruleset_fd =
-		landlock_create_ruleset(&ruleset_attr, sizeof(ruleset_attr), 0);
+	flags = 0;
+	if (supervise)
+		flags |= LANDLOCK_CREATE_RULESET_SUPERVISE;
+
+	ruleset_fd = landlock_create_ruleset(&ruleset_attr,
+					     sizeof(ruleset_attr), flags);
 	if (ruleset_fd < 0) {
 		perror("Failed to create a ruleset");
+		return 1;
+	}
+	if (supervise) {
+		supervisor_fd = ruleset_attr.supervisor_fd;
+		if (supervisor_fd < 0) {
+			fprintf(stderr, "supervisor_fd is invalid");
+			return 1;
+		}
+		if (supervisor_fd == 0) {
+			fprintf(stderr, "supervisor_fd not set by kernel");
+			return 1;
+		}
+	} else if (ruleset_attr.supervisor_fd != 0) {
+		fprintf(stderr,
+			"supervisor_fd should not be set by kernel, but it is not 0");
 		return 1;
 	}
 
@@ -483,23 +528,482 @@ int main(const int argc, char *const argv[], char *const *const envp)
 		perror("Failed to restrict privileges");
 		goto err_close_ruleset;
 	}
-	if (landlock_restrict_self(ruleset_fd, 0)) {
-		perror("Failed to enforce ruleset");
-		goto err_close_ruleset;
-	}
-	close(ruleset_fd);
 
 	cmd_path = argv[1];
 	cmd_argv = argv + 1;
-	fprintf(stderr, "Executing the sandboxed command...\n");
-	execvpe(cmd_path, cmd_argv, envp);
-	fprintf(stderr, "Failed to execute \"%s\": %s\n", cmd_path,
-		strerror(errno));
-	fprintf(stderr, "Hint: access to the binary, the interpreter or "
-			"shared libraries may be denied.\n");
-	return 1;
+
+	if (!supervise) {
+		if (landlock_restrict_self(ruleset_fd, 0)) {
+			perror("Failed to enforce ruleset");
+			goto err_close_ruleset;
+		}
+		close(ruleset_fd);
+		verbose_exec(cmd_path, cmd_argv, envp);
+	} else {
+		pid_t child;
+		int child_stdin_pipe[2], child_stdout_pipe[2],
+			child_stderr_pipe[2];
+		// read from [0], write to [1]
+		if (pipe(child_stdin_pipe) || pipe(child_stdout_pipe) ||
+		    pipe(child_stderr_pipe)) {
+			perror("Failed to create pipes");
+			goto err_close_ruleset;
+		}
+		child = fork();
+		if (child < 0) {
+			perror("Failed to fork");
+			goto err_close_ruleset;
+		}
+		if (child == 0) {
+			close(supervisor_fd);
+
+			if (landlock_restrict_self(ruleset_fd, 0)) {
+				perror("Failed to enforce ruleset");
+				goto err_close_ruleset;
+			}
+
+			close(child_stdin_pipe[1]);
+			close(child_stdout_pipe[0]);
+			close(child_stderr_pipe[0]);
+			if (dup2(child_stdin_pipe[0], STDIN_FILENO) < 0 ||
+			    dup2(child_stdout_pipe[1], STDOUT_FILENO) < 0 ||
+			    dup2(child_stderr_pipe[1], STDERR_FILENO) < 0) {
+				perror("Failed to redirect child I/O");
+				exit(1);
+			}
+			close(child_stdin_pipe[0]);
+			close(child_stdout_pipe[1]);
+			close(child_stderr_pipe[1]);
+
+			close(ruleset_fd);
+			verbose_exec(cmd_path, cmd_argv, envp);
+		} else {
+			close(ruleset_fd);
+			close(child_stdin_pipe[0]);
+			close(child_stdout_pipe[1]);
+			close(child_stderr_pipe[1]);
+			return interactive_sandboxer(supervisor_fd,
+						     child_stdin_pipe[1],
+						     child_stdout_pipe[0],
+						     child_stderr_pipe[0],
+						     child);
+		}
+	}
 
 err_close_ruleset:
 	close(ruleset_fd);
 	return 1;
+}
+
+int verbose_exec(const char *cmd_path, char *const *cmd_argv, char *const *envp)
+{
+	fprintf(stderr, "Executing the sandboxed command...\n");
+	execvpe(cmd_path, cmd_argv, envp);
+	int err = errno;
+	fprintf(stderr, "Failed to execute \"%s\": %s\n", cmd_path,
+		strerror(err));
+	fprintf(stderr, "Hint: access to the binary, the interpreter or "
+			"shared libraries may be denied.\n");
+	return err;
+}
+
+enum SandboxAccessType {
+	ACCESS_READ,
+	ACCESS_READWRITE,
+};
+
+static int f_set_noblock(int fd)
+{
+	int flags = fcntl(fd, F_GETFL, 0);
+	if (flags < 0) {
+		perror("Failed to get flags");
+		return -1;
+	}
+	if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+		perror("Failed to set flags");
+		return -1;
+	}
+	return 0;
+}
+
+static int write_all(int fd, const char *buf, size_t count)
+{
+	while (count > 0) {
+		ssize_t written = write(fd, buf, count);
+		if (written < 0) {
+			return written;
+		}
+		count -= written;
+		buf += written;
+	}
+	return 0;
+}
+
+static int readlink_fd_s(int fd, char *buf, size_t buf_len)
+{
+	if (buf_len == 0) {
+		errno = EINVAL;
+		return -1;
+	}
+	char procfd[100];
+	snprintf(procfd, sizeof(procfd), "/proc/self/fd/%d", fd);
+	ssize_t len = readlink(procfd, buf, buf_len - 1);
+	if (len < 0) {
+		return -1;
+	}
+	buf[len] = '\0';
+	return len;
+}
+
+static bool show_sandbox_prompt(enum SandboxAccessType access,
+				const char *file1, const char *file2, int pid,
+				const char *comm, const char *exe)
+{
+	if (isatty(STDIN_FILENO)) {
+		tcflush(STDIN_FILENO, TCIOFLUSH);
+	}
+	fprintf(stderr,
+		"------------- Sandboxer access request -------------\n");
+	fprintf(stderr, "Process %s[%d] (%s) wants to %s\n  %s\n", comm, pid,
+		exe, access == ACCESS_READ ? "read" : "write", file1);
+	if (file2) {
+		fprintf(stderr, "  %s\n", file2);
+	}
+	bool allow = false;
+	while (true) {
+		char answer[10];
+		fprintf(stderr, "y/n > ");
+		fflush(stderr);
+		int rc = read(STDIN_FILENO, answer, sizeof(answer));
+		if (rc < 0) {
+			perror("Failed to read answer");
+			break;
+		}
+		if (rc == 0) {
+			break;
+		}
+		answer[rc] = '\0';
+		if (strcmp(answer, "y\n") == 0) {
+			allow = true;
+			break;
+		} else if (strcmp(answer, "n\n") == 0) {
+			allow = false;
+			break;
+		} else {
+			fprintf(stderr, "Please answer \"y\" or \"n\"\n");
+		}
+	}
+	fprintf(stderr,
+		"----------------------------------------------------\n");
+	return allow;
+}
+
+static int process_event(struct landlock_supervise_event *evt)
+{
+	char *target_path_1 = NULL;
+	char *target_path_2 = NULL;
+	char *comm = NULL;
+	char *exe = NULL;
+	int pid = evt->accessor;
+	int fd;
+	ssize_t len;
+	enum SandboxAccessType access;
+
+	char proc_exe[100], proc_comm[100];
+	snprintf(proc_exe, sizeof(proc_exe), "/proc/%d/exe", pid);
+	exe = malloc(PATH_MAX);
+	if (!exe) {
+		abort();
+	}
+	len = readlink(proc_exe, exe, PATH_MAX - 1);
+	if (len < 0) {
+		perror("Failed to readlink proc exe");
+		return -1;
+	}
+	exe[len] = '\0';
+	snprintf(proc_comm, sizeof(proc_comm), "/proc/%d/comm", pid);
+	comm = malloc(PATH_MAX);
+	if (!comm) {
+		abort();
+	}
+	fd = open(proc_comm, O_RDONLY);
+	if (fd < 0) {
+		snprintf(comm, PATH_MAX, "???");
+	} else {
+		len = read(fd, comm, PATH_MAX - 1);
+		if (len < 0) {
+			snprintf(comm, PATH_MAX, "???");
+		} else {
+			comm[len] = '\0';
+			if (len > 0 && comm[len - 1] == '\n') {
+				comm[len - 1] = '\0';
+			}
+		}
+		close(fd);
+	}
+
+	switch (evt->hdr.type) {
+	case LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS:
+		if (evt->fd1 != -1) {
+			target_path_1 = malloc(PATH_MAX);
+			if (!target_path_1) {
+				abort();
+			}
+			if (readlink_fd_s(evt->fd1, target_path_1, PATH_MAX) <
+			    -1) {
+				perror("Failed to readlink");
+				return -1;
+			}
+		} else {
+			fprintf(stderr, "fd1 is -1 which should not happen.");
+			abort();
+		}
+		if (evt->fd2 != -1) {
+			target_path_2 = malloc(PATH_MAX);
+			if (!target_path_2) {
+				abort();
+			}
+			if (readlink_fd_s(evt->fd2, target_path_2, PATH_MAX) <
+			    -1) {
+				perror("Failed to readlink");
+				return -1;
+			}
+		}
+		if (evt->access_request & ACCESS_FS_ROUGHLY_WRITE) {
+			access = ACCESS_READWRITE;
+		} else {
+			access = ACCESS_READ;
+		}
+		bool answer = show_sandbox_prompt(
+			access, target_path_1, target_path_2, pid, comm, exe);
+		break;
+	}
+	free(target_path_1);
+	free(target_path_2);
+	free(comm);
+	free(exe);
+	return 0;
+}
+
+static int process_events(void *data, size_t data_len)
+{
+	while (data_len > 0) {
+		struct landlock_supervise_event evt;
+		int rc;
+		if (data_len < sizeof(evt.hdr)) {
+			fprintf(stderr,
+				"Too few bytes for a event header - got %zu left, need %zu.",
+				data_len, sizeof(evt.hdr));
+			return -EINVAL;
+		}
+		memcpy(&evt.hdr, data, sizeof(evt.hdr));
+		if (evt.hdr.length > data_len) {
+			fprintf(stderr,
+				"Length from event header is greater than remaining data.");
+			return -EINVAL;
+		}
+		memcpy(&evt, data, evt.hdr.length);
+		rc = process_event(&evt);
+		if (rc < 0) {
+			return rc;
+		}
+	}
+	return 0;
+}
+
+int interactive_sandboxer(int supervisor_fd, int child_stdin, int child_stdout,
+			  int child_stderr, pid_t child_pid)
+{
+	char *write_buf = NULL;
+	size_t write_buf_len = 0;
+
+	char io_buf[4096];
+
+	int status = 0;
+
+	struct pollfd pfds[5] = {
+		{ .fd = STDIN_FILENO, .events = POLLIN },
+		{ .fd = child_stdout, .events = POLLIN },
+		{ .fd = child_stderr, .events = POLLIN },
+		{ .fd = supervisor_fd, .events = POLLIN },
+		{ .fd = child_stdin, .events = POLLOUT },
+	};
+	const int pfd_idx_stdin = 0;
+	const int pfd_idx_child_stdout = 1;
+	const int pfd_idx_child_stderr = 2;
+	const int pfd_idx_supervisor = 3;
+	const int pfd_idx_child_stdin = 4;
+	const int poll_len = 5;
+
+	bool child_stdin_closed = false;
+
+	/*
+	 * Don't deadlock by us trying to write to child, and child
+	 * waiting to write to us.
+	 */
+	f_set_noblock(child_stdin);
+
+	/* Don't get killed by SIGPIPE when child closes stdout/err */
+	signal(SIGPIPE, SIG_IGN);
+
+	while (1) {
+		if (write_buf_len > 0 && !child_stdin_closed) {
+			pfds[pfd_idx_child_stdin].fd = child_stdin;
+		} else {
+			pfds[pfd_idx_child_stdin].fd = -1;
+		}
+
+		for (int i = 0; i < poll_len; i++) {
+			pfds[i].revents = 0;
+		}
+
+		if (ppoll(pfds, poll_len, NULL, NULL) < 0) {
+			if (errno != EINTR) {
+				perror("ppoll");
+				goto err_kill_child;
+			}
+		}
+
+		if (pfds[0].revents & POLLIN) {
+			/*
+			 * Our stdin -> child's stdin, or temp buffer.
+			 * Need to do this before handling any supervisor
+			 * events so that inputs intended for the child is
+			 * not interperted as user decision.
+			 */
+			ssize_t count =
+				read(STDIN_FILENO, io_buf, sizeof(io_buf));
+			if (count > 0) {
+				write_buf = realloc(write_buf,
+						    write_buf_len + count);
+				memcpy(write_buf + write_buf_len, io_buf,
+				       count);
+				write_buf_len += count;
+			} else if (count == 0) {
+				/* Our stdin is closed. Don't read from it anymore. */
+				pfds[pfd_idx_stdin].fd = -1;
+			} else {
+				perror("Failed to read from stdin");
+				goto err_kill_child;
+			}
+		}
+
+		if (write_buf_len > 0) {
+			/* Attempt to write any outstanding stdin to child */
+			ssize_t written =
+				write(child_stdin, write_buf, write_buf_len);
+			if (written > 0) {
+				if (written > write_buf_len || written == 0) {
+					abort();
+				} else if (written == write_buf_len) {
+					write_buf_len = 0;
+				} else {
+					memmove(write_buf, write_buf + written,
+						write_buf_len - written);
+					write_buf_len -= written;
+				}
+			} else {
+				if (errno == EPIPE) {
+					close(child_stdin);
+					child_stdin_closed = true;
+					pfds[pfd_idx_child_stdin].fd = -1;
+					write_buf_len = 0;
+				} else if (errno != EAGAIN) {
+					perror("Failed to write to child stdin");
+					goto err_kill_child;
+				}
+			}
+		}
+
+		if (pfds[pfd_idx_stdin].fd && write_buf_len == 0) {
+			/* We can safely close child's stdin now */
+			close(child_stdin);
+			child_stdin_closed = true;
+			pfds[pfd_idx_child_stdin].fd = -1;
+		}
+
+		if (pfds[pfd_idx_child_stdout].revents & POLLIN) {
+			/* Child stdout -> our stdout */
+			ssize_t count =
+				read(child_stdout, io_buf, sizeof(io_buf));
+			if (count > 0) {
+				if (write_all(STDOUT_FILENO, io_buf, count) <
+				    0) {
+					perror("Failed to write to stdout");
+					goto err_kill_child;
+				}
+			} else if (count == 0 ||
+				   (count < 0 && errno == EPIPE)) {
+				close(child_stdout);
+				pfds[pfd_idx_child_stdout].fd = -1;
+			} else if (count < 0 && errno != EAGAIN) {
+				perror("Failed to read from child stdout");
+				goto err_kill_child;
+			}
+		}
+
+		if (pfds[2].revents & POLLIN) {
+			/* Child stderr -> our stderr */
+			ssize_t count =
+				read(child_stderr, io_buf, sizeof(io_buf));
+			if (count > 0) {
+				if (write_all(STDERR_FILENO, io_buf, count) <
+				    0) {
+					perror("Failed to write to stderr");
+					goto err_kill_child;
+				}
+			} else if (count == 0 ||
+				   (count < 0 && errno == EPIPE)) {
+				close(child_stderr);
+				pfds[pfd_idx_child_stderr].fd = -1;
+			} else if (count < 0 && errno != EAGAIN) {
+				perror("Failed to read from child stderr");
+				goto err_kill_child;
+			}
+		}
+
+		if (waitpid(child_pid, &status, WNOHANG) == child_pid) {
+			/*
+			 * Write out any remaining child stdout/stderr.
+			 * If child died, read would just return EOF.
+			 */
+			while (1) {
+				ssize_t count = read(child_stdout, io_buf,
+						     sizeof(io_buf));
+				if (count > 0)
+					write_all(STDOUT_FILENO, io_buf, count);
+				else
+					break;
+			}
+			while (1) {
+				ssize_t count = read(child_stderr, io_buf,
+						     sizeof(io_buf));
+				if (count > 0)
+					write_all(STDERR_FILENO, io_buf, count);
+				else
+					break;
+			}
+			return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+		}
+
+		if (pfds[pfd_idx_supervisor].revents) {
+			ssize_t count =
+				read(supervisor_fd, io_buf, sizeof(io_buf));
+			if (count > 0) {
+				process_events(io_buf, count);
+			} else if (count == 0) {
+				fprintf(stderr,
+					"Unexpected EOF on supervisor fd\n");
+				goto err_kill_child;
+			} else if (count < 0 && errno != EAGAIN) {
+				perror("Failed to read from supervisor");
+				goto err_kill_child;
+			}
+		}
+	}
+
+err_kill_child:
+	close(supervisor_fd);
+	kill(child_pid, SIGTERM);
+	return -1;
 }
