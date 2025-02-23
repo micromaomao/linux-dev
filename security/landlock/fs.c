@@ -769,7 +769,6 @@ static bool is_access_to_paths_allowed(
 		_layer_masks_child2[LANDLOCK_NUM_ACCESS_FS];
 	layer_mask_t(*layer_masks_child1)[LANDLOCK_NUM_ACCESS_FS] = NULL,
 	(*layer_masks_child2)[LANDLOCK_NUM_ACCESS_FS] = NULL;
-	layer_mask_t pending_ask_supervise_layers = 0;
 
 	if (!access_request_parent1 && !access_request_parent2)
 		return true;
@@ -922,40 +921,11 @@ jump_up:
 	}
 	path_put(&walker_path);
 
-	if (!allowed_parent1) {
-		pending_ask_supervise_layers |=
-			landlock_layer_masks_to_denied_layers(
-				access_request_parent1, *layer_masks_parent1,
-				ARRAY_SIZE(*layer_masks_parent1),
-				domain->num_layers);
-	}
-	/* TODO: properly handle refer by passing in the right dentry / path */
-	/*
-	if (!allowed_parent2) {
-		pending_ask_supervise_layers |=
-			landlock_layer_masks_to_denied_layers(
-				access_request_parent2, layer_masks_parent2,
-				ARRAY_SIZE(*layer_masks_parent2),
-				domain->num_layers);
-	}
-
-	WARN_ON_ONCE(!(allowed_parent1 && allowed_parent2) !=
-		     !!pending_ask_supervise_layers);
-	*/
-	WARN_ON_ONCE(!allowed_parent1 != !!pending_ask_supervise_layers);
-
-	if (pending_ask_supervise_layers) {
-		allowed_parent1 = landlock_ask_supervised_layers(
-			domain, pending_ask_supervise_layers,
-			LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS,
-			access_request_parent1 | access_request_parent2, path,
-			NULL, 0);
-	}
-
 	return allowed_parent1 && allowed_parent2;
 }
 
 static int current_check_access_path(const struct path *const path,
+				     struct dentry *const child,
 				     access_mask_t access_request)
 {
 	const struct landlock_ruleset *const dom = get_current_fs_domain();
@@ -966,13 +936,32 @@ static int current_check_access_path(const struct path *const path,
 
 	access_request = landlock_init_layer_masks(
 		dom, access_request, &layer_masks, LANDLOCK_KEY_INODE);
-	/*
-	 * TODO: take in and pass dentry to this function so that
-	 * supervisor notification is more useful
-	 */
 	if (is_access_to_paths_allowed(dom, path, access_request, &layer_masks,
 				       NULL, 0, NULL, NULL))
 		return 0;
+
+	if (landlock_has_supervisors(dom)) {
+		layer_mask_t pending_ask_supervise_layers =
+			landlock_layer_masks_to_denied_layers(
+				access_request, layer_masks,
+				sizeof(layer_masks), dom->num_layers);
+
+		WARN_ON_ONCE(!pending_ask_supervise_layers);
+
+		struct path child_path = *path;
+		if (child) {
+			child_path.dentry = child;
+		}
+
+		bool supervisor_allowed = landlock_ask_supervised_layers(
+			dom, pending_ask_supervise_layers,
+			LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS, access_request,
+			&child_path, NULL, 0);
+
+		if (supervisor_allowed) {
+			return 0;
+		}
+	}
 
 	return -EACCES;
 }
@@ -1451,38 +1440,43 @@ static int hook_path_rename(const struct path *const old_dir,
 static int hook_path_mkdir(const struct path *const dir,
 			   struct dentry *const dentry, const umode_t mode)
 {
-	return current_check_access_path(dir, LANDLOCK_ACCESS_FS_MAKE_DIR);
+	return current_check_access_path(dir, dentry,
+					 LANDLOCK_ACCESS_FS_MAKE_DIR);
 }
 
 static int hook_path_mknod(const struct path *const dir,
 			   struct dentry *const dentry, const umode_t mode,
 			   const unsigned int dev)
 {
-	return current_check_access_path(dir, get_mode_access(mode));
+	return current_check_access_path(dir, dentry, get_mode_access(mode));
 }
 
 static int hook_path_symlink(const struct path *const dir,
 			     struct dentry *const dentry,
 			     const char *const old_name)
 {
-	return current_check_access_path(dir, LANDLOCK_ACCESS_FS_MAKE_SYM);
+	return current_check_access_path(dir, dentry,
+					 LANDLOCK_ACCESS_FS_MAKE_SYM);
 }
 
 static int hook_path_unlink(const struct path *const dir,
 			    struct dentry *const dentry)
 {
-	return current_check_access_path(dir, LANDLOCK_ACCESS_FS_REMOVE_FILE);
+	return current_check_access_path(dir, dentry,
+					 LANDLOCK_ACCESS_FS_REMOVE_FILE);
 }
 
 static int hook_path_rmdir(const struct path *const dir,
 			   struct dentry *const dentry)
 {
-	return current_check_access_path(dir, LANDLOCK_ACCESS_FS_REMOVE_DIR);
+	return current_check_access_path(dir, dentry,
+					 LANDLOCK_ACCESS_FS_REMOVE_DIR);
 }
 
 static int hook_path_truncate(const struct path *const path)
 {
-	return current_check_access_path(path, LANDLOCK_ACCESS_FS_TRUNCATE);
+	return current_check_access_path(path, NULL,
+					 LANDLOCK_ACCESS_FS_TRUNCATE);
 }
 
 /* File hooks */
@@ -1598,7 +1592,78 @@ static int hook_file_open(struct file *const file)
 	if ((open_access_request & allowed_access) == open_access_request)
 		return 0;
 
+	if (landlock_has_supervisors(dom)) {
+		layer_mask_t pending_ask_supervise_layers =
+			landlock_layer_masks_to_denied_layers(
+				open_access_request, layer_masks,
+				sizeof(layer_masks), dom->num_layers);
+
+		WARN_ON_ONCE(!pending_ask_supervise_layers);
+
+		/*
+		 * We don't need to ask the supervisor for optional
+		 * access right now - we can ask later.
+		 */
+
+		bool supervisor_allowed = landlock_ask_supervised_layers(
+			dom, pending_ask_supervise_layers,
+			LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS,
+			open_access_request, &file->f_path, NULL, 0);
+
+		if (supervisor_allowed) {
+			landlock_file(file)->allowed_access =
+				open_access_request;
+			return 0;
+		}
+	}
+
 	return -EACCES;
+}
+
+/*
+ * For any "optional" permissions (truncate and ioctl) which was
+ * not allowed at time a file was opened, we want to check with
+ * any supervised layers if they actually allow it at the time
+ * the user tries to do such an operation on the opened fd.  We
+ * can check for access on the path (using the opener's domain)
+ * as the opener can never re-gain permissions under landlock.
+ */
+static bool check_opened_file_access_supervisor(struct file *const file,
+						access_mask_t access_request)
+{
+	const struct landlock_ruleset *dom = landlock_get_applicable_domain(
+		landlock_cred(file->f_cred)->domain, any_fs);
+
+	if (landlock_has_supervisors(dom)) {
+		layer_mask_t layer_masks[LANDLOCK_NUM_ACCESS_FS] = {};
+		bool allowed = is_access_to_paths_allowed(
+			dom, &file->f_path,
+			landlock_init_layer_masks(dom, access_request,
+						  &layer_masks,
+						  LANDLOCK_KEY_INODE),
+			&layer_masks, NULL, 0, NULL, NULL);
+		if (allowed) {
+			WARN_ONCE(
+				1,
+				"Access was previously not allowed, now it's allowed in the same domain. Landlock bug?");
+			return false;
+		}
+
+		layer_mask_t pending_ask_supervise_layers =
+			landlock_layer_masks_to_denied_layers(
+				access_request, layer_masks,
+				sizeof(layer_masks), dom->num_layers);
+		WARN_ON_ONCE(!pending_ask_supervise_layers);
+
+		bool supervisor_allowed = landlock_ask_supervised_layers(
+			dom, pending_ask_supervise_layers,
+			LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS, access_request,
+			&file->f_path, NULL, 0);
+
+		return supervisor_allowed;
+	}
+
+	return false;
 }
 
 static int hook_file_truncate(struct file *const file)
@@ -1615,6 +1680,12 @@ static int hook_file_truncate(struct file *const file)
 	 */
 	if (landlock_file(file)->allowed_access & LANDLOCK_ACCESS_FS_TRUNCATE)
 		return 0;
+
+	if (check_opened_file_access_supervisor(file,
+						LANDLOCK_ACCESS_FS_TRUNCATE)) {
+		return 0;
+	}
+
 	return -EACCES;
 }
 
@@ -1638,6 +1709,11 @@ static int hook_file_ioctl(struct file *file, unsigned int cmd,
 	if (is_masked_device_ioctl(cmd))
 		return 0;
 
+	if (check_opened_file_access_supervisor(file,
+						LANDLOCK_ACCESS_FS_IOCTL_DEV)) {
+		return 0;
+	}
+
 	return -EACCES;
 }
 
@@ -1645,6 +1721,7 @@ static int hook_file_ioctl_compat(struct file *file, unsigned int cmd,
 				  unsigned long arg)
 {
 	access_mask_t allowed_access = landlock_file(file)->allowed_access;
+	const struct landlock_ruleset *dom;
 
 	/*
 	 * It is the access rights at the time of opening the file which
@@ -1660,6 +1737,11 @@ static int hook_file_ioctl_compat(struct file *file, unsigned int cmd,
 
 	if (is_masked_device_ioctl_compat(cmd))
 		return 0;
+
+	if (check_opened_file_access_supervisor(file,
+						LANDLOCK_ACCESS_FS_IOCTL_DEV)) {
+		return 0;
+	}
 
 	return -EACCES;
 }

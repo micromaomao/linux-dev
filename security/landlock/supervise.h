@@ -109,6 +109,17 @@ DEFINE_FREE(landlock_put_supervise_event,
 	    struct landlock_supervise_event_kernel *,
 	    if (_T) landlock_put_supervise_event(_T))
 
+static inline bool
+landlock_has_supervisors(const struct landlock_ruleset *const domain)
+{
+	size_t layer_level;
+	for (layer_level = 0; layer_level < domain->num_layers; layer_level++) {
+		if (domain->layer_stack[layer_level].supervisor)
+			return true;
+	}
+	return false;
+}
+
 static inline layer_mask_t landlock_layer_masks_to_denied_layers(
 	const access_mask_t access_request, const layer_mask_t layer_masks[],
 	const size_t masks_array_size, const int num_layers)

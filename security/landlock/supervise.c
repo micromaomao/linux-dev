@@ -54,10 +54,14 @@ void landlock_put_supervisor(struct landlock_supervisor *const supervisor)
 }
 
 /**
- * If all the layers in denied_layers are supervised, ask all of
- * them for permission, and return whether access should be
- * allowed.  If denied_layers contains any non-supervised layer,
- * will return false without making any supervisor event.
+ * landlock_ask_supervised_layers - check if all denied layers
+ * are supervised, and if yes, ask all of them for permission.
+ *
+ * Return whether access should be allowed.  If denied_layers
+ * contains any non-supervised layer, will return false without
+ * making any supervisor event.
+ *
+ * Caller owns any paths passed in, we might get refs.
  */
 bool landlock_ask_supervised_layers(
 	const struct landlock_ruleset *const domain,
@@ -68,6 +72,10 @@ bool landlock_ask_supervised_layers(
 {
 	size_t layer_level;
 	unsigned long denied_layers_ = denied_layers;
+
+	if (WARN_ON_ONCE(!denied_layers)) {
+		return true;
+	}
 
 	for_each_set_bit(layer_level, &denied_layers_, domain->num_layers) {
 		if (!domain->layer_stack[layer_level].supervisor) {
