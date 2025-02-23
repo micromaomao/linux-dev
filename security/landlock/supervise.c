@@ -13,6 +13,7 @@ struct landlock_supervisor *landlock_create_supervisor(void)
 	if (!supervisor)
 		return ERR_PTR(-ENOMEM);
 	refcount_set(&supervisor->usage, 1);
+	supervisor->next_event_id = 1;
 	spin_lock_init(&supervisor->lock);
 	INIT_LIST_HEAD(&supervisor->event_queue);
 	init_waitqueue_head(&supervisor->poll_event_wq);

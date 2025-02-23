@@ -22,7 +22,8 @@ struct landlock_supervisor {
 	/* protected by @lock, contains landlock_supervise_event_kernel */
 	struct list_head event_queue;
 	struct wait_queue_head poll_event_wq;
-	atomic_t next_event_id;
+	/* protected by @lock */
+	u32 next_event_id;
 };
 
 enum landlock_supervise_event_state {
