@@ -5,6 +5,7 @@ cd $(dirname $0)
 memory=4G
 cpus=$(nproc)
 network=1
+no_9pfs=0
 no_user_aslr=0
 
 exec_args=""
@@ -17,6 +18,8 @@ function show_help () {
     echo "  -m, --memory SIZE    Set the amount of memory for the VM (default: 2G)"
     echo "  -c, --cpus COUNT     Set the number of CPUs for the VM (default: 2)"
     echo "  -n, --no-network     Disable the network interface (default: no)"
+    echo "      --no-9pfs        Disable the 9pfs-based rootfs and use /dev/vda as root (default: no)"
+    echo "                       (rm .dev/vda.vhd to repopulate the disk image)"
     echo "      --no-user-aslr   Disable user-space ASLR (default: no)"
     echo ""
     exit 1
@@ -32,6 +35,9 @@ while [ "${1:-}" != '' ]; do
             ;;
         -n | --no-network )
             network=0
+            ;;
+        --no-9pfs )
+            no_9pfs=1
             ;;
         --no-user-aslr )
             no_user_aslr=1
@@ -98,6 +104,12 @@ if [ ! -e "$DISK" ]; then
         rm "$DISK"
         exit 1
     fi
+    sudo mkdir -p tmp_mnt
+    sudo mount -o loop "$DISK" tmp_mnt
+    sudo cp -ax "$ROOTFS_DIR/." tmp_mnt
+    sudo umount tmp_mnt
+    sudo rmdir tmp_mnt
+    sudo chown $(id -u):$(id -g) "$DISK"
 fi
 
 termsize=(`stty size`)
@@ -111,6 +123,11 @@ if [[ $no_user_aslr == 1 ]]; then
     echo 'echo 0 > /proc/sys/kernel/randomize_va_space' >> "$ROOTFS_DIR/_runtime_init.sh"
 fi
 
+root_cmd="root=root rw rootfstype=9p rootflags=trans=virtio"
+if [[ $no_9pfs == 1 ]]; then
+    root_cmd="root=/dev/vda rw"
+fi
+
 qemuFlags=(
     -machine q35,accel=kvm
     -enable-kvm
@@ -120,16 +137,20 @@ qemuFlags=(
 
     -kernel ../vmlinux
     -append "\
-        root=root rw rootfstype=9p rootflags=trans=virtio \
+        $root_cmd \
         earlycon console=hvc0 kgdboc=hvc1 \
-        nokaslr no_hash_pointers loglevel=7 \
+        nokaslr no_hash_pointers loglevel=8 \
         trace_clock=local \
         init=/init.sh - \
         $exec_args
     "
-
-    -virtfs "local,path=$ROOTFS_DIR,mount_tag=root,security_model=passthrough,readonly=off"
 )
+
+if [[ $no_9pfs == 0 ]]; then
+    qemuFlags+=(
+        -virtfs "local,path=$ROOTFS_DIR,mount_tag=root,security_model=passthrough,readonly=off"
+    )
+fi
 
 if [[ $network == 1 ]]; then
     qemuFlags+=(
