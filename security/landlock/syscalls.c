@@ -215,6 +215,54 @@ event_state_to_string(enum landlock_supervise_event_state state)
 	}
 }
 
+static void
+access_request_to_string(const landlock_supervise_event_type_t access_type,
+			 const access_mask_t access_request, struct seq_file *m)
+{
+	switch (access_type) {
+	case LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS:
+		if (access_request & LANDLOCK_ACCESS_FS_EXECUTE)
+			seq_printf(m, "FS_EXECUTE ");
+		if (access_request & LANDLOCK_ACCESS_FS_WRITE_FILE)
+			seq_printf(m, "FS_WRITE_FILE ");
+		if (access_request & LANDLOCK_ACCESS_FS_READ_FILE)
+			seq_printf(m, "FS_READ_FILE ");
+		if (access_request & LANDLOCK_ACCESS_FS_READ_DIR)
+			seq_printf(m, "FS_READ_DIR ");
+		if (access_request & LANDLOCK_ACCESS_FS_REMOVE_DIR)
+			seq_printf(m, "FS_REMOVE_DIR ");
+		if (access_request & LANDLOCK_ACCESS_FS_REMOVE_FILE)
+			seq_printf(m, "FS_REMOVE_FILE ");
+		if (access_request & LANDLOCK_ACCESS_FS_MAKE_CHAR)
+			seq_printf(m, "FS_MAKE_CHAR ");
+		if (access_request & LANDLOCK_ACCESS_FS_MAKE_DIR)
+			seq_printf(m, "FS_MAKE_DIR ");
+		if (access_request & LANDLOCK_ACCESS_FS_MAKE_REG)
+			seq_printf(m, "FS_MAKE_REG ");
+		if (access_request & LANDLOCK_ACCESS_FS_MAKE_SOCK)
+			seq_printf(m, "FS_MAKE_SOCK ");
+		if (access_request & LANDLOCK_ACCESS_FS_MAKE_FIFO)
+			seq_printf(m, "FS_MAKE_FIFO ");
+		if (access_request & LANDLOCK_ACCESS_FS_MAKE_BLOCK)
+			seq_printf(m, "FS_MAKE_BLOCK ");
+		if (access_request & LANDLOCK_ACCESS_FS_MAKE_SYM)
+			seq_printf(m, "FS_MAKE_SYM ");
+		if (access_request & LANDLOCK_ACCESS_FS_REFER)
+			seq_printf(m, "FS_REFER ");
+		if (access_request & LANDLOCK_ACCESS_FS_TRUNCATE)
+			seq_printf(m, "FS_TRUNCATE ");
+		if (access_request & LANDLOCK_ACCESS_FS_IOCTL_DEV)
+			seq_printf(m, "FS_IOCTL_DEV ");
+		break;
+	case LANDLOCK_SUPERVISE_EVENT_TYPE_NET_ACCESS:
+		if (access_request & LANDLOCK_ACCESS_NET_BIND_TCP)
+			seq_printf(m, "NET_BIND_TCP ");
+		if (access_request & LANDLOCK_ACCESS_NET_CONNECT_TCP)
+			seq_printf(m, "NET_CONNECT_TCP ");
+		break;
+	}
+}
+
 static void fop_supervisor_fdinfo(struct seq_file *m, struct file *f)
 {
 	struct landlock_supervisor *const supervisor = f->private_data;
@@ -235,16 +283,15 @@ static void fop_supervisor_fdinfo(struct seq_file *m, struct file *f)
 			put_task_struct(task);
 		} else {
 			seq_printf(m, "\taccessor: defunct\n");
-			/*
-			 * TODO: we probably shouldn't end up here if we write
-			 * our wait_interruptable / wait_killable code
-			 * correctly
-			 */
-			WARN(1, "no task in event pid\n");
 		}
 
 		if (event->type == LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS) {
 			seq_printf(m, "\taccess: filesystem\n");
+			seq_printf(m, "\taccess_request: %llu ",
+				   (unsigned long long)event->access_request);
+			access_request_to_string(event->type,
+						 event->access_request, m);
+			seq_printf(m, "\n");
 			if (event->target_1.dentry) {
 				/*
 				* ok to access since event owns a ref to the path,
