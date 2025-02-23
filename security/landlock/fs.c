@@ -791,6 +791,10 @@ static bool is_access_to_paths_allowed(
 	layer_mask_t(*layer_masks_child1)[LANDLOCK_NUM_ACCESS_FS] = NULL,
 	(*layer_masks_child2)[LANDLOCK_NUM_ACCESS_FS] = NULL;
 
+#ifdef DEBUG
+	layer_mask_t all_layers = (1 << domain->num_layers) - 1;
+#endif
+
 	if (!access_request_parent1 && !access_request_parent2)
 		return true;
 
@@ -819,6 +823,14 @@ static bool is_access_to_paths_allowed(
 		access_masked_parent1 = access_masked_parent2 =
 			landlock_union_access_masks(domain).fs;
 		is_dom_check = true;
+
+#ifdef DEBUG
+		pr_debug(
+			"check access to path %pd4 for access request p1 %x p2 %x:\n",
+			path->dentry, access_request_parent1,
+			access_request_parent2);
+#endif
+
 	} else {
 		if (WARN_ON_ONCE(dentry_child1 || dentry_child2))
 			return false;
@@ -826,7 +838,15 @@ static bool is_access_to_paths_allowed(
 		access_masked_parent1 = access_request_parent1;
 		access_masked_parent2 = access_request_parent2;
 		is_dom_check = false;
+
+#ifdef DEBUG
+		pr_debug("check access to path %pd4 for access request %x:\n",
+			 path->dentry, access_request_parent1);
+#endif
 	}
+#ifdef DEBUG
+	pr_debug("  (need layer mask %x)", all_layers);
+#endif
 
 	scoped_guard(rcu)
 	{
@@ -935,6 +955,33 @@ static bool is_access_to_paths_allowed(
 							*layer_masks_parent2));
 			}
 		}
+
+#ifdef DEBUG
+		{
+			rcu_read_lock();
+			pr_debug("  %pd: ino %lu (%p), rule: %s, allow: %s\n",
+				 walker_path.dentry,
+				 walker_path.dentry->d_inode->i_ino,
+				 walker_path.dentry->d_inode,
+				 rule ? "exists" : "does not exist",
+				 allowed_parent1 ? "yes" : "no");
+			unsigned long access_masked = access_masked_parent1;
+			unsigned long access_bit;
+			if (rule) {
+				for_each_set_bit(
+					access_bit, &access_masked,
+					ARRAY_SIZE(*layer_masks_parent1)) {
+					pr_debug(
+						"    access %x allowed by layer mask %d\n",
+						(1 << access_bit),
+						(~(*layer_masks_parent1)
+							 [access_bit]) &
+							all_layers);
+				}
+			}
+			rcu_read_unlock();
+		}
+#endif
 
 		/* Stops when a rule from each layer grants access. */
 		if (allowed_parent1 && allowed_parent2)
