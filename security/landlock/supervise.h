@@ -44,8 +44,9 @@ struct landlock_supervise_event_kernel {
 	access_mask_t access_request;
 	struct pid *accessor;
 	union {
+		/* struct path itself should not be a pointer */
 		struct {
-			struct path *target_1, *target_2;
+			struct path target_1, target_2;
 		};
 		struct {
 			__u16 port;
@@ -67,10 +68,16 @@ static inline void landlock_put_supervise_event(
 	struct landlock_supervise_event_kernel *const event)
 {
 	if (refcount_dec_and_test(&event->usage)) {
-		if (event->target_1)
-			path_put(event->target_1);
-		if (event->target_2)
-			path_put(event->target_2);
+		switch (event->type) {
+		case LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS:
+			if (event->target_1.dentry)
+				path_put(&event->target_1);
+			if (event->target_2.dentry)
+				path_put(&event->target_2);
+			break;
+		case LANDLOCK_SUPERVISE_EVENT_TYPE_NET_ACCESS:
+			break;
+		}
 		put_pid(event->accessor);
 		kfree(event);
 	}

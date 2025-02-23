@@ -248,21 +248,22 @@ static void fop_supervisor_fdinfo(struct seq_file *m, struct file *f)
 
 		if (event->type == LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS) {
 			seq_printf(m, "\taccess: filesystem\n");
-			if (event->target_1) {
+			if (event->target_1.dentry) {
 				/*
 				* ok to access since event owns a ref to the path,
 				* and we have event list spin lock.
 				*/
 				seq_printf(m, "\ttarget_1: ");
-				seq_path(m, event->target_1, "");
+				seq_path(m, &event->target_1, "");
 				seq_printf(m, "\n");
 			}
-			if (event->target_2) {
+			if (event->target_2.dentry) {
 				seq_printf(m, "\ttarget_2: ");
-				seq_path(m, event->target_2, "");
+				seq_path(m, &event->target_2, "");
 				seq_printf(m, "\n");
 			}
-		} else if (event->type == LANDLOCK_SUPERVISE_EVENT_TYPE_NET_ACCESS) {
+		} else if (event->type ==
+			   LANDLOCK_SUPERVISE_EVENT_TYPE_NET_ACCESS) {
 			seq_printf(m, "\taccess: network\n");
 			seq_printf(m, "\tport: %u\n",
 				   (unsigned int)event->port);
