@@ -12,7 +12,7 @@
 
 /**
  * Each supervisor is associated with one active layer in a
- * domain (or associated with a not-yet-active struct
+ * domain (or associated with a not-yet-active layer in a struct
  * landlock_ruleset).  User-space interact with the event queue
  * through a landlock_supervise_fd.
  */

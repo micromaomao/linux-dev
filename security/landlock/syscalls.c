@@ -172,7 +172,7 @@ static void fop_ruleset_fdinfo(struct seq_file *const m, struct file *const f)
 	struct landlock_ruleset *const ruleset = f->private_data;
 
 	seq_printf(m, "num_rules: %d\n", ruleset->num_rules);
-	if (ruleset->supervisor)
+	if (ruleset->layer_stack[0].supervisor)
 		seq_printf(m, "supervisor: yes\n");
 	else
 		seq_printf(m, "supervisor: no\n");
@@ -394,7 +394,7 @@ SYSCALL_DEFINE3(landlock_create_ruleset,
 			return -ENOMEM;
 		}
 		/* Pass ownership of supervisor to ruleset struct */
-		ruleset->supervisor = supervisor;
+		ruleset->layer_stack[0].supervisor = supervisor;
 	}
 
 	/* Creates anonymous FD referring to the ruleset. */
@@ -408,8 +408,8 @@ SYSCALL_DEFINE3(landlock_create_ruleset,
 	if (supervise) {
 		int supervisor_fd;
 
-		supervisor_fd = landlock_supervisor_open_fd(ruleset->supervisor,
-							    O_RDWR | O_CLOEXEC);
+		supervisor_fd = landlock_supervisor_open_fd(
+			ruleset->layer_stack[0].supervisor, O_RDWR | O_CLOEXEC);
 		if (supervisor_fd < 0) {
 			landlock_put_ruleset(ruleset);
 			return supervisor_fd;

@@ -519,8 +519,6 @@ static void free_ruleset(struct landlock_ruleset *const ruleset)
 #endif /* IS_ENABLED(CONFIG_INET) */
 
 	put_hierarchy(ruleset->hierarchy);
-	if (ruleset->supervisor)
-		landlock_put_supervisor(ruleset->supervisor);
 	for (layer = 0; layer < ruleset->num_layers; layer++) {
 		struct landlock_supervisor *const supervisor =
 			ruleset->layer_stack[layer].supervisor;

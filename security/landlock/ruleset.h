@@ -208,13 +208,6 @@ struct landlock_ruleset {
 			 */
 			u32 num_layers;
 			/**
-			 * @supervisor: For a unmerged ruleset, pointer to an
-			 * allocated supervisor if the user has requested
-			 * supervise mode.
-			 */
-			struct landlock_supervisor *supervisor;
-
-			/**
 			 * @layer_stack: A domain saves all layers of merged
 			 * rulesets in a stack (FAM), starting from the first
 			 * layer to the last one.  These layers are used when
