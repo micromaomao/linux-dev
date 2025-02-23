@@ -559,6 +559,32 @@ SYSCALL_DEFINE2(landlock_restrict_self, const int, ruleset_fd, const __u32,
 		new_dom->hierarchy->log_status = LANDLOCK_LOG_DISABLED;
 #endif /* CONFIG_AUDIT */
 
+#ifdef DEBUG
+	pr_debug("%s[%d] restricting self with landlock\n", current->comm,
+		 current->pid);
+	struct rb_node *node;
+	pr_debug("inode tree:\n");
+	for (node = rb_first(&new_dom->root_inode); node;
+	     node = rb_next(node)) {
+		const struct landlock_rule *rule =
+			rb_entry(node, struct landlock_rule, node);
+		spinlock_t *lock = &rule->key.object->lock;
+		rcu_read_lock();
+		spin_lock(lock);
+		struct inode *inode = rule->key.object->underobj;
+		if (inode)
+			pr_debug("  rule: ino %lu (%p)\n", inode->i_ino, inode);
+		else
+			pr_debug("  rule: inode released\n");
+		for (size_t i = 0; i < rule->num_layers; i++) {
+			pr_debug("    layer %u: access %x\n",
+				 rule->layers[i].level, rule->layers[i].access);
+		}
+		spin_unlock(lock);
+		rcu_read_unlock();
+	}
+#endif /* DEBUG */
+
 	/* Replaces the old (prepared) domain. */
 	landlock_put_ruleset(new_llcred->domain);
 	new_llcred->domain = new_dom;
