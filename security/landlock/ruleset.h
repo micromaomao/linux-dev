@@ -217,7 +217,8 @@ struct landlock_ruleset {
 			 * rights.  These layers are set once and never
 			 * changed for the lifetime of the ruleset.
 			 */
-			struct landlock_ruleset_layer layer_stack[];
+			struct landlock_ruleset_layer
+				layer_stack[] __counted_by(num_layers);
 		};
 	};
 };
