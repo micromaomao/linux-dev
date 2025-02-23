@@ -44,6 +44,7 @@
 #include "object.h"
 #include "ruleset.h"
 #include "setup.h"
+#include "supervise.h"
 
 /* Underlying object management */
 
@@ -768,6 +769,7 @@ static bool is_access_to_paths_allowed(
 		_layer_masks_child2[LANDLOCK_NUM_ACCESS_FS];
 	layer_mask_t(*layer_masks_child1)[LANDLOCK_NUM_ACCESS_FS] = NULL,
 	(*layer_masks_child2)[LANDLOCK_NUM_ACCESS_FS] = NULL;
+	layer_mask_t pending_ask_supervise_layers = 0;
 
 	if (!access_request_parent1 && !access_request_parent2)
 		return true;
@@ -920,6 +922,36 @@ jump_up:
 	}
 	path_put(&walker_path);
 
+	if (!allowed_parent1) {
+		pending_ask_supervise_layers |=
+			landlock_layer_masks_to_denied_layers(
+				access_request_parent1, *layer_masks_parent1,
+				ARRAY_SIZE(*layer_masks_parent1),
+				domain->num_layers);
+	}
+	/* TODO: properly handle refer by passing in the right dentry / path */
+	/*
+	if (!allowed_parent2) {
+		pending_ask_supervise_layers |=
+			landlock_layer_masks_to_denied_layers(
+				access_request_parent2, layer_masks_parent2,
+				ARRAY_SIZE(*layer_masks_parent2),
+				domain->num_layers);
+	}
+
+	WARN_ON_ONCE(!(allowed_parent1 && allowed_parent2) !=
+		     !!pending_ask_supervise_layers);
+	*/
+	WARN_ON_ONCE(!allowed_parent1 != !!pending_ask_supervise_layers);
+
+	if (pending_ask_supervise_layers) {
+		allowed_parent1 = landlock_ask_supervised_layers(
+			domain, pending_ask_supervise_layers,
+			LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS,
+			access_request_parent1 | access_request_parent2, path,
+			NULL, 0);
+	}
+
 	return allowed_parent1 && allowed_parent2;
 }
 
@@ -934,6 +966,10 @@ static int current_check_access_path(const struct path *const path,
 
 	access_request = landlock_init_layer_masks(
 		dom, access_request, &layer_masks, LANDLOCK_KEY_INODE);
+	/*
+	 * TODO: take in and pass dentry to this function so that
+	 * supervisor notification is more useful
+	 */
 	if (is_access_to_paths_allowed(dom, path, access_request, &layer_masks,
 				       NULL, 0, NULL, NULL))
 		return 0;

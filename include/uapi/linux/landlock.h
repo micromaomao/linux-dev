@@ -354,6 +354,11 @@ struct landlock_supervise_event {
 	__u64 access_request;
 	__kernel_pid_t accessor;
 	union {
+		/*
+		 * TODO: this is not suitable - for e.g. create what we
+		 * really need is fd of parent + filename, and for refer,
+		 * two parent fds + two filenames.
+		 */
 		struct {
 			/**
 			 * @fd1: An open file descriptor for the path being

@@ -55,6 +55,10 @@ struct landlock_supervise_event_kernel {
 	};
 };
 
+#define LANDLOCK_SUPERVISE_EVENT_HANDLED(event)                \
+	((event)->state == LANDLOCK_SUPERVISE_EVENT_ALLOWED || \
+	 (event)->state == LANDLOCK_SUPERVISE_EVENT_DENIED)
+
 struct landlock_supervisor *landlock_create_supervisor(void);
 void landlock_get_supervisor(struct landlock_supervisor *const supervisor);
 void landlock_put_supervisor(struct landlock_supervisor *const supervisor);
@@ -83,5 +87,35 @@ static inline void landlock_put_supervise_event(
 		kfree(event);
 	}
 }
+
+DEFINE_FREE(landlock_put_supervise_event,
+	    struct landlock_supervise_event_kernel *,
+	    if (_T) landlock_put_supervise_event(_T))
+
+static inline layer_mask_t landlock_layer_masks_to_denied_layers(
+	const access_mask_t access_request, const layer_mask_t layer_masks[],
+	const size_t masks_array_size, const int num_layers)
+{
+	unsigned long access_req = access_request;
+	layer_mask_t denied_layers = 0;
+	size_t layer_level;
+	unsigned long access_bit;
+
+	for (layer_level = 0; layer_level < num_layers; layer_level++) {
+		for_each_set_bit(access_bit, &access_req, masks_array_size) {
+			if (layer_masks[access_bit] & BIT_ULL(layer_level))
+				denied_layers |= BIT_ULL(layer_level);
+		}
+	}
+
+	return denied_layers;
+}
+
+bool landlock_ask_supervised_layers(
+	const struct landlock_ruleset *const domain,
+	const layer_mask_t denied_layers,
+	const landlock_supervise_event_type_t request_type,
+	const access_mask_t access_request, const struct path *const path1,
+	const struct path *const path2, const __u16 port);
 
 #endif /* _SECURITY_LANDLOCK_SUPERVISE_H */
