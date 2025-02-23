@@ -698,6 +698,33 @@ static bool show_sandbox_prompt(enum SandboxAccessType access,
 	return allow;
 }
 
+#ifndef min
+#define min(a, b) ((a) < (b) ? (a) : (b))
+#endif
+
+static bool path_join(char *dest_buf, size_t dest_buf_len, const char *last)
+{
+	if (dest_buf_len <= 1) {
+		return false;
+	}
+	size_t last_len = strlen(last);
+	size_t dest_len = strnlen(dest_buf, dest_buf_len);
+	size_t dest_space = dest_buf_len - dest_len;
+	if (dest_space <= 1) {
+		return false;
+	}
+	if (dest_space == 2) {
+		dest_buf[dest_len] = '/';
+		dest_buf[dest_len + 1] = '\0';
+		return false;
+	}
+	size_t copy_count = min(dest_space - 2, last_len);
+	dest_buf[dest_len] = '/';
+	memcpy(dest_buf + dest_len + 1, last, copy_count);
+	dest_buf[dest_len + 1 + copy_count] = '\0';
+	return copy_count == last_len;
+}
+
 static int process_event(struct landlock_supervise_event *evt)
 {
 	char *target_path_1 = NULL;
@@ -769,6 +796,15 @@ static int process_event(struct landlock_supervise_event *evt)
 				return -1;
 			}
 		}
+		if (evt->destname[0] != 0) {
+			if (evt->fd2 != -1) {
+				path_join(target_path_2, PATH_MAX,
+					  evt->destname);
+			} else {
+				path_join(target_path_1, PATH_MAX,
+					  evt->destname);
+			}
+		}
 		if (evt->access_request & ACCESS_FS_ROUGHLY_WRITE) {
 			access = ACCESS_READWRITE;
 		} else {
@@ -788,25 +824,26 @@ static int process_event(struct landlock_supervise_event *evt)
 static int process_events(void *data, size_t data_len)
 {
 	while (data_len > 0) {
-		struct landlock_supervise_event evt;
+		struct landlock_supervise_event *evt;
 		int rc;
-		if (data_len < sizeof(evt.hdr)) {
+		if (data_len < sizeof(evt->hdr)) {
 			fprintf(stderr,
 				"Too few bytes for a event header - got %zu left, need %zu.",
-				data_len, sizeof(evt.hdr));
+				data_len, sizeof(evt->hdr));
 			return -EINVAL;
 		}
-		memcpy(&evt.hdr, data, sizeof(evt.hdr));
-		if (evt.hdr.length > data_len) {
+		evt = data;
+		if (evt->hdr.length > data_len) {
 			fprintf(stderr,
 				"Length from event header is greater than remaining data.");
 			return -EINVAL;
 		}
-		memcpy(&evt, data, evt.hdr.length);
-		rc = process_event(&evt);
+		rc = process_event(evt);
 		if (rc < 0) {
 			return rc;
 		}
+		data_len -= evt->hdr.length;
+		data += evt->hdr.length;
 	}
 	return 0;
 }
@@ -817,7 +854,12 @@ int interactive_sandboxer(int supervisor_fd, int child_stdin, int child_stdout,
 	char *write_buf = NULL;
 	size_t write_buf_len = 0;
 
-	char io_buf[4096];
+	size_t io_buf_len = 4096;
+	char *io_buf = malloc(io_buf_len);
+	if (!io_buf) {
+		fprintf(stderr, "Failed to allocate I/O buffer");
+		return -1;
+	}
 
 	int status = 0;
 
@@ -871,8 +913,7 @@ int interactive_sandboxer(int supervisor_fd, int child_stdin, int child_stdout,
 			 * events so that inputs intended for the child is
 			 * not interperted as user decision.
 			 */
-			ssize_t count =
-				read(STDIN_FILENO, io_buf, sizeof(io_buf));
+			ssize_t count = read(STDIN_FILENO, io_buf, io_buf_len);
 			if (count > 0) {
 				write_buf = realloc(write_buf,
 						    write_buf_len + count);
@@ -924,8 +965,7 @@ int interactive_sandboxer(int supervisor_fd, int child_stdin, int child_stdout,
 
 		if (pfds[pfd_idx_child_stdout].revents & POLLIN) {
 			/* Child stdout -> our stdout */
-			ssize_t count =
-				read(child_stdout, io_buf, sizeof(io_buf));
+			ssize_t count = read(child_stdout, io_buf, io_buf_len);
 			if (count > 0) {
 				if (write_all(STDOUT_FILENO, io_buf, count) <
 				    0) {
@@ -944,8 +984,7 @@ int interactive_sandboxer(int supervisor_fd, int child_stdin, int child_stdout,
 
 		if (pfds[2].revents & POLLIN) {
 			/* Child stderr -> our stderr */
-			ssize_t count =
-				read(child_stderr, io_buf, sizeof(io_buf));
+			ssize_t count = read(child_stderr, io_buf, io_buf_len);
 			if (count > 0) {
 				if (write_all(STDERR_FILENO, io_buf, count) <
 				    0) {
@@ -968,16 +1007,16 @@ int interactive_sandboxer(int supervisor_fd, int child_stdin, int child_stdout,
 			 * If child died, read would just return EOF.
 			 */
 			while (1) {
-				ssize_t count = read(child_stdout, io_buf,
-						     sizeof(io_buf));
+				ssize_t count =
+					read(child_stdout, io_buf, io_buf_len);
 				if (count > 0)
 					write_all(STDOUT_FILENO, io_buf, count);
 				else
 					break;
 			}
 			while (1) {
-				ssize_t count = read(child_stderr, io_buf,
-						     sizeof(io_buf));
+				ssize_t count =
+					read(child_stderr, io_buf, io_buf_len);
 				if (count > 0)
 					write_all(STDERR_FILENO, io_buf, count);
 				else
@@ -987,8 +1026,8 @@ int interactive_sandboxer(int supervisor_fd, int child_stdin, int child_stdout,
 		}
 
 		if (pfds[pfd_idx_supervisor].revents) {
-			ssize_t count =
-				read(supervisor_fd, io_buf, sizeof(io_buf));
+retry:
+			ssize_t count = read(supervisor_fd, io_buf, io_buf_len);
 			if (count > 0) {
 				process_events(io_buf, count);
 			} else if (count == 0) {
@@ -996,6 +1035,18 @@ int interactive_sandboxer(int supervisor_fd, int child_stdin, int child_stdout,
 					"Unexpected EOF on supervisor fd\n");
 				goto err_kill_child;
 			} else if (count < 0 && errno != EAGAIN) {
+				if (errno == EINVAL) {
+					io_buf_len *= 2;
+					io_buf = realloc(io_buf, io_buf_len);
+					if (!io_buf) {
+						perror("Failed to realloc I/O buffer");
+						goto err_kill_child;
+					}
+					fprintf(stderr,
+						"Got EINVAL - possibly event too big. Realloced I/O buffer to %zu\n",
+						io_buf_len);
+					goto retry;
+				}
 				perror("Failed to read from supervisor");
 				goto err_kill_child;
 			}

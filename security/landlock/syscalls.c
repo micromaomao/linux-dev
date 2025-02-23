@@ -91,7 +91,7 @@ static void build_check_abi(void)
 	struct landlock_path_beneath_attr path_beneath_attr;
 	struct landlock_net_port_attr net_port_attr;
 	size_t ruleset_size, path_beneath_size, net_port_size;
-	struct landlock_supervise_event event;
+	struct landlock_supervise_event *event;
 	struct landlock_supervise_response response;
 	size_t supervise_evt_size, supervise_response_size;
 
@@ -118,20 +118,17 @@ static void build_check_abi(void)
 	BUILD_BUG_ON(sizeof(net_port_attr) != net_port_size);
 	BUILD_BUG_ON(sizeof(net_port_attr) != 16);
 
-	supervise_evt_size = sizeof(event.hdr.type);
-	supervise_evt_size += sizeof(event.hdr.length);
-	supervise_evt_size += sizeof(event.hdr.cookie);
-	supervise_evt_size += sizeof(event.access_request);
-	supervise_evt_size += sizeof(event.accessor);
-	supervise_evt_size += sizeof(event.fd1);
-	supervise_evt_size += sizeof(event.fd2);
-	supervise_evt_size += sizeof(event.reserved);
-	BUILD_BUG_ON(sizeof(event) != supervise_evt_size);
-	BUILD_BUG_ON(sizeof(event) != 32);
-	BUILD_BUG_ON(offsetofend(typeof(event), hdr) != 8);
-	/* Try not to change these */
-	BUILD_BUG_ON(offsetof(typeof(event), fd1) != 20);
-	BUILD_BUG_ON(offsetof(typeof(event), fd2) != 24);
+	/* Check that anything before the destname does not have holes */
+	supervise_evt_size = sizeof(event->hdr.type);
+	supervise_evt_size += sizeof(event->hdr.length);
+	supervise_evt_size += sizeof(event->hdr.cookie);
+	BUILD_BUG_ON(offsetofend(typeof(*event), hdr) != 8);
+	supervise_evt_size += sizeof(event->access_request);
+	supervise_evt_size += sizeof(event->accessor);
+	supervise_evt_size += sizeof(event->fd1);
+	supervise_evt_size += sizeof(event->fd2);
+	BUILD_BUG_ON(offsetof(typeof(*event), destname) != supervise_evt_size);
+	BUILD_BUG_ON(offsetof(typeof(*event), destname) != 28);
 
 	supervise_response_size = sizeof(response.length);
 	supervise_response_size += sizeof(response.decision);

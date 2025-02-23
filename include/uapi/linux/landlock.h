@@ -354,29 +354,41 @@ struct landlock_supervise_event {
 	__u64 access_request;
 	__kernel_pid_t accessor;
 	union {
-		/*
-		 * TODO: this is not suitable - for e.g. create what we
-		 * really need is fd of parent + filename, and for refer,
-		 * two parent fds + two filenames.
-		 */
 		struct {
 			/**
-			 * @fd1: An open file descriptor for the path being
-			 * accessed.  Must be closed by the reader.
+			 * @fd1: An open file descriptor for the file (open,
+			 * delete, execute, link, readdir, rename, truncate),
+			 * or the parent directory (for create operations
+			 * targetting its child) being accessed.  Must be
+			 * closed by the reader.
+			 *
+			 * If this points to a parent directory, @destname
+			 * will contain the target filename. If @destname is
+			 * empty, this points to the target file.
 			 */
 			int fd1;
 			/**
-			 * @fd2: A second file descriptor for events which
-			 * targets two files.  Must be closed by the reader.
-			 * This field is -1 if not used.
+			 * @fd2: For link or rename requests, a second file
+			 * descriptor for the target parent directory.  Must
+			 * be closed by the reader.  @destname contains the
+			 * destination filename.  This field is -1 if not
+			 * used.
 			 */
 			int fd2;
+			/**
+			 * If either of fd1 or fd2 points to a parent
+			 * directory rather than the target file, this is the
+			 * NULL-terminated name of the target.  This is a
+			 * variable length member, and the length including
+			 * the NULL terminator can be derived from
+			 * hdr.length - offsetof(struct landlock_supervise_event, destname).
+			 */
+			char destname[];
 		};
 		struct {
 			__u16 port;
 		};
 	};
-	__u32 reserved;
 };
 
 /* clang-format off */

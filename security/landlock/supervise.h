@@ -39,15 +39,32 @@ struct landlock_supervise_event_kernel {
 	enum landlock_supervise_event_state state;
 
 	/* Cookie as presented to user-space */
-	__u32 event_id;
+	u32 event_id;
 
 	landlock_supervise_event_type_t type;
 	access_mask_t access_request;
 	struct pid *accessor;
 	union {
-		/* struct path itself should not be a pointer */
 		struct {
-			struct path target_1, target_2;
+			/**
+			 * @target_1: The first (and may be the only, for
+			 * most requests) target path. To expose as much
+			 * useful information to the supervisor as possible,
+			 * for file creation and deletion, this points to the
+			 * actual path being created (or deleted), rather
+			 * than the parent directory.
+			 *
+			 * For refer (link and rename), this points to the
+			 * source (or simply the first argument in case of
+			 * exchange) being linked.
+			 */
+			struct path target_1;
+			/**
+			 * @target_2: The destination path for link and
+			 * rename (or simply the second argument in case of
+			 * exchange).
+			 */
+			struct path target_2;
 		};
 		struct {
 			__u16 port;
