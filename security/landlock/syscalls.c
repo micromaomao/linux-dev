@@ -203,6 +203,370 @@ static int fop_supervisor_release(struct inode *const inode,
 	return 0;
 }
 
+static ssize_t fop_supervisor_read(struct file *const filp,
+				   char __user *const buf, const size_t size,
+				   loff_t *const ppos)
+{
+	struct landlock_supervisor *supervisor = filp->private_data;
+	struct landlock_supervise_event_kernel *event = NULL;
+	struct landlock_supervise_event *user_event;
+	size_t event_size, name_size = 0, padded_size;
+	int fd1 = -1, fd2 = -1, ret;
+	char *leaf_name = NULL;
+	bool nonblock = filp->f_flags & O_NONBLOCK;
+
+	if (size < sizeof(struct landlock_supervise_event))
+		return -EINVAL;
+
+	/* Only allocate the minimum fixed size of the event structure */
+	user_event =
+		kzalloc(sizeof(struct landlock_supervise_event), GFP_KERNEL);
+	if (!user_event)
+		return -ENOMEM;
+
+retry:
+	spin_lock(&supervisor->lock);
+
+	/* Check if there are any events in the queue */
+	if (list_empty(&supervisor->event_queue)) {
+		spin_unlock(&supervisor->lock);
+
+		/* If non-blocking, return immediately */
+		if (nonblock) {
+			ret = -EAGAIN;
+			goto free_user_event;
+		}
+
+		/* Wait for events to be added to the queue */
+		ret = wait_event_interruptible(
+			supervisor->poll_event_wq,
+			!list_empty(&supervisor->event_queue));
+		if (ret)
+			goto free_user_event;
+
+		goto retry;
+	}
+
+	/* Find the first event that is in NEW state */
+	list_for_each_entry(event, &supervisor->event_queue, node) {
+		/* Skip events that are already notified */
+		if (event->state == LANDLOCK_SUPERVISE_EVENT_NOTIFIED)
+			continue;
+
+		if (event->state == LANDLOCK_SUPERVISE_EVENT_NEW)
+			break;
+	}
+
+	/* If we didn't find a new event in the queue */
+	if (&event->node == &supervisor->event_queue ||
+	    event->state != LANDLOCK_SUPERVISE_EVENT_NEW) {
+		spin_unlock(&supervisor->lock);
+
+		/* If non-blocking, return immediately */
+		if (nonblock) {
+			ret = -EAGAIN;
+			goto free_user_event;
+		}
+
+		/* Wait for new events */
+		ret = wait_event_interruptible(
+			supervisor->poll_event_wq,
+			!list_empty(&supervisor->event_queue));
+		if (ret)
+			goto free_user_event;
+
+		goto retry;
+	}
+
+	/* Check both target_*_is_new flags set (invalid state) */
+	if (event->type == LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS &&
+	    event->target_1.dentry && event->target_2.dentry &&
+	    event->target_1_is_new && event->target_2_is_new) {
+		WARN_ON(1);
+		event->state = LANDLOCK_SUPERVISE_EVENT_DENIED;
+		wake_up_var(event);
+		ret = -EAGAIN;
+		goto unlock_and_free;
+	}
+
+	/* Prepare file descriptors and destname if needed */
+	if (event->type == LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS) {
+		/* Calculate destname size and check buffer size requirements */
+		if (event->target_1.dentry && event->target_1_is_new) {
+			leaf_name = (char *)event->target_1.dentry->d_name.name;
+			name_size = event->target_1.dentry->d_name.len + 1;
+		} else if (event->target_2.dentry && event->target_2_is_new) {
+			leaf_name = (char *)event->target_2.dentry->d_name.name;
+			name_size = event->target_2.dentry->d_name.len + 1;
+		}
+	}
+
+	/* Calculate the total size including padding */
+	event_size =
+		offsetof(struct landlock_supervise_event, destname) + name_size;
+	padded_size = ALIGN(event_size, 8);
+
+	if (padded_size > size) {
+		ret = -EINVAL;
+		goto unlock_and_free;
+	}
+
+	/* Prepare the user event structure */
+	user_event->hdr.type = event->type;
+	user_event->hdr.length = padded_size;
+	user_event->hdr.cookie = event->event_id;
+	user_event->access_request = event->access_request;
+	user_event->accessor = pid_vnr(event->accessor);
+
+	/* Set up the appropriate file descriptors based on the type */
+	if (event->type == LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS) {
+		if (event->target_1.dentry) {
+			if (event->target_1_is_new) {
+				/* Open the parent directory */
+				struct path parent_path = {
+					.mnt = event->target_1.mnt,
+					.dentry =
+						event->target_1.dentry->d_parent
+				};
+				fd1 = get_unused_fd_flags(O_CLOEXEC);
+				if (fd1 < 0) {
+					pr_warn("Failed to get unused fd: %d\n",
+						fd1);
+					ret = fd1;
+					goto deny_and_fail;
+				}
+
+				struct file *f = dentry_open(&parent_path,
+							     O_PATH | O_CLOEXEC,
+							     current_cred());
+				if (IS_ERR(f)) {
+					pr_warn("Failed to open parent directory: %ld\n",
+						PTR_ERR(f));
+					ret = PTR_ERR(f);
+					goto deny_and_fail;
+				}
+				fd_install(fd1, f);
+			} else {
+				/* Open the target file/directory directly */
+				fd1 = get_unused_fd_flags(O_CLOEXEC);
+				if (fd1 < 0) {
+					pr_warn("Failed to get unused fd: %d\n",
+						fd1);
+					ret = fd1;
+					goto deny_and_fail;
+				}
+
+				struct file *f = dentry_open(&event->target_1,
+							     O_PATH | O_CLOEXEC,
+							     current_cred());
+				if (IS_ERR(f)) {
+					pr_warn("Failed to open target file: %ld\n",
+						PTR_ERR(f));
+					ret = PTR_ERR(f);
+					goto deny_and_fail;
+				}
+				fd_install(fd1, f);
+			}
+		}
+
+		if (event->target_2.dentry) {
+			// ... existing implementation for target_2 ...
+			if (event->target_2_is_new) {
+				/* Open the parent directory */
+				struct path parent_path = {
+					.mnt = event->target_2.mnt,
+					.dentry =
+						event->target_2.dentry->d_parent
+				};
+				fd2 = get_unused_fd_flags(O_CLOEXEC);
+				if (fd2 < 0) {
+					pr_warn("Failed to get unused fd: %d\n",
+						fd2);
+					ret = fd2;
+					goto deny_and_fail;
+				}
+
+				struct file *f = dentry_open(&parent_path,
+							     O_PATH | O_CLOEXEC,
+							     current_cred());
+				if (IS_ERR(f)) {
+					pr_warn("Failed to open parent directory: %ld\n",
+						PTR_ERR(f));
+					ret = PTR_ERR(f);
+					goto deny_and_fail;
+				}
+				fd_install(fd2, f);
+			} else {
+				/* Open the target file/directory directly */
+				fd2 = get_unused_fd_flags(O_CLOEXEC);
+				if (fd2 < 0) {
+					pr_warn("Failed to get unused fd: %d\n",
+						fd2);
+					ret = fd2;
+					goto deny_and_fail;
+				}
+
+				struct file *f = dentry_open(&event->target_2,
+							     O_PATH | O_CLOEXEC,
+							     current_cred());
+				if (IS_ERR(f)) {
+					pr_warn("Failed to open target file: %ld\n",
+						PTR_ERR(f));
+					ret = PTR_ERR(f);
+					goto deny_and_fail;
+				}
+				fd_install(fd2, f);
+			}
+		}
+	} else if (event->type == LANDLOCK_SUPERVISE_EVENT_TYPE_NET_ACCESS) {
+		user_event->port = event->port;
+	}
+
+	/* Set the file descriptors */
+	user_event->fd1 = fd1;
+	user_event->fd2 = fd2;
+
+	/* Mark the event as notified */
+	event->state = LANDLOCK_SUPERVISE_EVENT_NOTIFIED;
+
+	spin_unlock(&supervisor->lock);
+
+	/* Copy the fixed part of the structure to user space */
+	if (copy_to_user(buf, user_event,
+			 offsetof(struct landlock_supervise_event, destname))) {
+		ret = -EFAULT;
+		goto close_fds;
+	}
+
+	/* If there's a leaf name, copy it directly to the user buffer at the right offset */
+	if (leaf_name && name_size > 0) {
+		if (copy_to_user(buf + offsetof(struct landlock_supervise_event,
+						destname),
+				 leaf_name, name_size)) {
+			ret = -EFAULT;
+			goto close_fds;
+		}
+	}
+
+	/* Zero out any padding bytes */
+	if (padded_size > event_size) {
+		size_t padding_len = padded_size - event_size;
+		if (clear_user(buf + event_size, padding_len)) {
+			ret = -EFAULT;
+			goto close_fds;
+		}
+	}
+
+	kfree(user_event);
+	return padded_size;
+
+deny_and_fail:
+	event->state = LANDLOCK_SUPERVISE_EVENT_DENIED;
+	wake_up_var(event);
+	/* Fall through to unlock_and_free */
+
+unlock_and_free:
+	spin_unlock(&supervisor->lock);
+	/* Fall through to close_fds */
+
+close_fds:
+	if (fd1 >= 0)
+		put_unused_fd(fd1);
+	if (fd2 >= 0)
+		put_unused_fd(fd2);
+
+free_user_event:
+	kfree(user_event);
+	return ret;
+}
+
+static __poll_t fop_supervisor_poll(struct file *file, poll_table *wait)
+{
+	struct landlock_supervisor *supervisor = file->private_data;
+	__poll_t mask = 0;
+
+	poll_wait(file, &supervisor->poll_event_wq, wait);
+
+	spin_lock(&supervisor->lock);
+	if (!list_empty(&supervisor->event_queue))
+		mask |= POLLIN | POLLRDNORM;
+	spin_unlock(&supervisor->lock);
+
+	return mask;
+}
+
+static ssize_t fop_supervisor_write(struct file *const filp,
+				    const char __user *const buf,
+				    const size_t size, loff_t *const ppos)
+{
+	struct landlock_supervisor *supervisor = filp->private_data;
+	struct landlock_supervise_response response;
+	struct landlock_supervise_event_kernel *event;
+	size_t bytes_processed = 0;
+	bool found;
+
+	/* We need at least one complete response */
+	if (size < sizeof(response))
+		return -EINVAL;
+
+	while (bytes_processed + sizeof(response) <= size) {
+		if (copy_from_user(&response, buf + bytes_processed,
+				   sizeof(response)))
+			return -EFAULT;
+
+		/* Validate the response structure */
+		if (response.length != sizeof(response))
+			return -EINVAL;
+
+		spin_lock(&supervisor->lock);
+
+		/* Find the event with matching cookie */
+		found = false;
+		list_for_each_entry(event, &supervisor->event_queue, node) {
+			if (event->event_id == response.cookie) {
+				found = true;
+				break;
+			}
+		}
+
+		if (!found) {
+			spin_unlock(&supervisor->lock);
+			/* Continue to process additional responses if any */
+			bytes_processed += sizeof(response);
+			continue;
+		}
+
+		/* Ignore responses for already decided events */
+		if (LANDLOCK_SUPERVISE_EVENT_HANDLED(event)) {
+			spin_unlock(&supervisor->lock);
+			bytes_processed += sizeof(response);
+			continue;
+		}
+
+		/* Update the event state based on the response */
+		if (response.decision == LANDLOCK_SUPERVISE_DECISION_ALLOW)
+			event->state = LANDLOCK_SUPERVISE_EVENT_ALLOWED;
+		else
+			event->state = LANDLOCK_SUPERVISE_EVENT_DENIED;
+
+		/* Remove the event from the queue */
+		list_del(&event->node);
+
+		spin_unlock(&supervisor->lock);
+
+		/* Wake up threads waiting on this event */
+		wake_up_var(event);
+
+		/* Release our reference to the event */
+		landlock_put_supervise_event(event);
+
+		bytes_processed += sizeof(response);
+	}
+
+	/* Return the number of bytes processed */
+	return bytes_processed > 0 ? bytes_processed : -EINVAL;
+}
+
 static const char *
 event_state_to_string(enum landlock_supervise_event_state state)
 {
@@ -339,8 +703,10 @@ static void fop_supervisor_fdinfo(struct seq_file *m, struct file *f)
 static const struct file_operations supervisor_fops = {
 	.release = fop_supervisor_release,
 	/* TODO: read, write, poll, dup */
-	.read = fop_dummy_read,
-	.write = fop_dummy_write,
+	.read = fop_supervisor_read,
+	.write = fop_supervisor_write,
+	.poll = fop_supervisor_poll,
+	.llseek = noop_llseek,
 	.show_fdinfo = fop_supervisor_fdinfo,
 };
 
