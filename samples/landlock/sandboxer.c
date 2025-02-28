@@ -626,6 +626,12 @@ enum SandboxAccessType {
 	ACCESS_READWRITE,
 };
 
+struct context {
+	int supervisor_fd;
+	char **allowed_paths;
+	size_t num_allowed_paths;
+};
+
 static int f_set_noblock(int fd)
 {
 	int flags = fcntl(fd, F_GETFL, 0);
@@ -671,7 +677,8 @@ static int readlink_fd_s(int fd, char *buf, size_t buf_len)
 
 static bool show_sandbox_prompt(enum SandboxAccessType access,
 				const char *file1, const char *file2, int pid,
-				const char *comm, const char *exe)
+				const char *comm, const char *exe,
+				struct context *context)
 {
 	if (isatty(STDIN_FILENO)) {
 		tcflush(STDIN_FILENO, TCIOFLUSH);
@@ -686,7 +693,7 @@ static bool show_sandbox_prompt(enum SandboxAccessType access,
 	bool allow = false;
 	while (true) {
 		char answer[10];
-		fprintf(stderr, "y/n > ");
+		fprintf(stderr, "(y)es/(a)lways/(n)o > ");
 		fflush(stderr);
 		int rc = read(STDIN_FILENO, answer, sizeof(answer));
 		if (rc < 0) {
@@ -700,16 +707,51 @@ static bool show_sandbox_prompt(enum SandboxAccessType access,
 		if (strcmp(answer, "y\n") == 0) {
 			allow = true;
 			break;
+		} else if (strcmp(answer, "a\n") == 0) {
+			allow = true;
+			/* +2 in case file2 is also set */
+			context->allowed_paths =
+				realloc(context->allowed_paths,
+					(context->num_allowed_paths + 2) *
+						sizeof(char *));
+			if (!context->allowed_paths) {
+				abort();
+			}
+			char *dup_str = strdup(file1);
+			if (!dup_str) {
+				abort();
+			}
+			context->allowed_paths[context->num_allowed_paths] =
+				dup_str;
+			context->num_allowed_paths++;
+
+			if (file2) {
+				dup_str = strdup(file2);
+				if (!dup_str) {
+					abort();
+				}
+				context->allowed_paths
+					[context->num_allowed_paths] = dup_str;
+				context->num_allowed_paths++;
+			}
+			break;
 		} else if (strcmp(answer, "n\n") == 0) {
 			allow = false;
 			break;
 		} else {
-			fprintf(stderr, "Please answer \"y\" or \"n\"\n");
+			fprintf(stderr,
+				"Please answer \"y\", \"a\", or \"n\"\n");
 		}
 	}
 	fprintf(stderr,
 		"----------------------------------------------------\n");
 	return allow;
+}
+
+static bool show_sandbox_prompt_network(__u16 port, struct context *context)
+{
+	/* unimplemented */
+	return true;
 }
 
 #ifndef min
@@ -744,19 +786,23 @@ static bool path_join(char *dest_buf, size_t dest_buf_len, const char *last)
 }
 
 static int process_event(struct landlock_supervise_event *evt,
-			 int supervisor_fd)
+			 struct context *context)
 {
 	char *target_path_1 = NULL;
 	char *target_path_2 = NULL;
 	char *comm = NULL;
 	char *exe = NULL;
 	int pid;
-	int fd;
+	int fd = -1;
 	ssize_t len;
-	enum SandboxAccessType access;
+	enum SandboxAccessType access = -1;
 	char proc_exe[100], proc_comm[100];
 	struct landlock_supervise_response response;
+	bool allow = false;
 	int ret = 0;
+	int supervisor_fd = context->supervisor_fd;
+
+	memset(&response, 0, sizeof(response));
 
 	if (((uintptr_t)evt) % __alignof__(struct landlock_supervise_event) !=
 	    0) {
@@ -766,6 +812,71 @@ static int process_event(struct landlock_supervise_event *evt,
 		 */
 		fprintf(stderr, "evt = %p is badly aligned\n", evt);
 		abort();
+	}
+
+	switch (evt->hdr.type) {
+	case LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS:
+		if (evt->fd1 != -1) {
+			target_path_1 = malloc(PATH_MAX);
+			if (!target_path_1) {
+				abort();
+			}
+			if (readlink_fd_s(evt->fd1, target_path_1, PATH_MAX) <
+			    -1) {
+				close(evt->fd1);
+				perror("Failed to readlink");
+				ret = -1;
+				goto ret;
+			}
+			close(evt->fd1);
+		} else {
+			fprintf(stderr, "fd1 is -1 which should not happen.");
+			abort();
+		}
+		if (evt->fd2 != -1) {
+			target_path_2 = malloc(PATH_MAX);
+			if (!target_path_2) {
+				abort();
+			}
+			if (readlink_fd_s(evt->fd2, target_path_2, PATH_MAX) <
+			    -1) {
+				perror("Failed to readlink");
+				close(evt->fd2);
+				ret = -1;
+				goto ret;
+			}
+			close(evt->fd2);
+		}
+		if (evt->destname[0] != 0) {
+			if (evt->fd2 != -1) {
+				path_join(target_path_2, PATH_MAX,
+					  evt->destname);
+			} else {
+				path_join(target_path_1, PATH_MAX,
+					  evt->destname);
+			}
+		}
+		if (evt->access_request & ACCESS_FS_ROUGHLY_WRITE) {
+			access = ACCESS_READWRITE;
+		} else {
+			access = ACCESS_READ;
+		}
+
+		for (size_t i = 0; i < context->num_allowed_paths; i++) {
+			if (strcmp(target_path_1, context->allowed_paths[i]) ==
+			    0) {
+				allow = true;
+				break;
+			}
+		}
+		break;
+	case LANDLOCK_SUPERVISE_EVENT_TYPE_NET_ACCESS:
+		/* No pre-processing needed */
+		break;
+	default:
+		fprintf(stderr, "Unknown event type: %d\n", evt->hdr.type);
+		ret = -1;
+		break;
 	}
 
 	pid = evt->accessor;
@@ -803,88 +914,30 @@ static int process_event(struct landlock_supervise_event *evt,
 
 	switch (evt->hdr.type) {
 	case LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS:
-		if (evt->fd1 != -1) {
-			target_path_1 = malloc(PATH_MAX);
-			if (!target_path_1) {
-				abort();
-			}
-			if (readlink_fd_s(evt->fd1, target_path_1, PATH_MAX) <
-			    -1) {
-				perror("Failed to readlink");
-				return -1;
-			}
-		} else {
-			fprintf(stderr, "fd1 is -1 which should not happen.");
-			abort();
-		}
-		if (evt->fd2 != -1) {
-			target_path_2 = malloc(PATH_MAX);
-			if (!target_path_2) {
-				abort();
-			}
-			if (readlink_fd_s(evt->fd2, target_path_2, PATH_MAX) <
-			    -1) {
-				perror("Failed to readlink");
-				return -1;
-			}
-		}
-		if (evt->destname[0] != 0) {
-			if (evt->fd2 != -1) {
-				path_join(target_path_2, PATH_MAX,
-					  evt->destname);
-			} else {
-				path_join(target_path_1, PATH_MAX,
-					  evt->destname);
-			}
-		}
-		if (evt->access_request & ACCESS_FS_ROUGHLY_WRITE) {
-			access = ACCESS_READWRITE;
-		} else {
-			access = ACCESS_READ;
-		}
-		bool answer = show_sandbox_prompt(
-			access, target_path_1, target_path_2, pid, comm, exe);
-
-		/* Prepare and send response to the kernel */
-		response.length = sizeof(response);
-		response.decision = answer ? LANDLOCK_SUPERVISE_DECISION_ALLOW :
-					     LANDLOCK_SUPERVISE_DECISION_DENY;
-		response._reserved = 0;
-		response.cookie = evt->hdr.cookie;
-
-		if (write(supervisor_fd, &response, sizeof(response)) !=
-		    sizeof(response)) {
-			perror("Failed to write supervisor response");
-			ret = -1;
+		if (!allow) {
+			allow = show_sandbox_prompt(access, target_path_1,
+						    target_path_2, pid, comm,
+						    exe, context);
 		}
 		break;
 	case LANDLOCK_SUPERVISE_EVENT_TYPE_NET_ACCESS:
-		/* Handle network access - similar to filesystem access */
-		access = ACCESS_READWRITE;
-		char port_str[32];
-		snprintf(port_str, sizeof(port_str), "port %d", evt->port);
-		answer = show_sandbox_prompt(access, port_str, NULL, pid, comm,
-					     exe);
-
-		/* Prepare and send response to the kernel */
-		response.length = sizeof(response);
-		response.decision = answer ? LANDLOCK_SUPERVISE_DECISION_ALLOW :
-					     LANDLOCK_SUPERVISE_DECISION_DENY;
-		response._reserved = 0;
-		response.cookie = evt->hdr.cookie;
-
-		if (write(supervisor_fd, &response, sizeof(response)) !=
-		    sizeof(response)) {
-			perror("Failed to write supervisor response");
-			ret = -1;
-		}
-		break;
-	default:
-		fprintf(stderr, "Unknown event type: %d\n", evt->hdr.type);
-		ret = -1;
+		allow = show_sandbox_prompt_network(evt->port, context);
 		break;
 	}
 
+	/* Prepare and send response to the kernel */
+	response.length = sizeof(response);
+	response.decision = allow ? LANDLOCK_SUPERVISE_DECISION_ALLOW :
+				    LANDLOCK_SUPERVISE_DECISION_DENY;
+	response.cookie = evt->hdr.cookie;
+
+	if (write(supervisor_fd, &response, sizeof(response)) !=
+	    sizeof(response)) {
+		perror("Failed to write supervisor response");
+		ret = -1;
+	}
+
+ret:
 	free(target_path_1);
 	free(target_path_2);
 	free(comm);
@@ -892,7 +945,7 @@ static int process_event(struct landlock_supervise_event *evt,
 	return ret;
 }
 
-static int process_events(void *data, size_t data_len, int supervisor_fd)
+static int process_events(void *data, size_t data_len, struct context *context)
 {
 	while (data_len > 0) {
 		struct landlock_supervise_event *evt;
@@ -909,7 +962,7 @@ static int process_events(void *data, size_t data_len, int supervisor_fd)
 				"Length from event header is greater than remaining data.");
 			return -EINVAL;
 		}
-		rc = process_event(evt, supervisor_fd);
+		rc = process_event(evt, context);
 		if (rc < 0) {
 			return rc;
 		}
@@ -947,6 +1000,12 @@ int interactive_sandboxer(int supervisor_fd, int child_stdin, int child_stdout,
 	const int pfd_idx_supervisor = 3;
 	const int pfd_idx_child_stdin = 4;
 	const int poll_len = 5;
+
+	struct context context = {
+		.supervisor_fd = supervisor_fd,
+		.allowed_paths = NULL,
+		.num_allowed_paths = 0,
+	};
 
 	bool child_stdin_closed = false;
 
@@ -1106,7 +1165,7 @@ int interactive_sandboxer(int supervisor_fd, int child_stdin, int child_stdout,
 retry:
 			ssize_t count = read(supervisor_fd, io_buf, io_buf_len);
 			if (count > 0) {
-				process_events(io_buf, count, supervisor_fd);
+				process_events(io_buf, count, &context);
 			} else if (count == 0) {
 				fprintf(stderr,
 					"Unexpected EOF on supervisor fd\n");
