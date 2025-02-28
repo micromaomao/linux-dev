@@ -29,6 +29,7 @@
 #include <sys/wait.h>
 #include <termios.h>
 #include <linux/limits.h>
+#include <stdint.h>
 
 #ifndef landlock_create_ruleset
 static inline int
@@ -172,7 +173,7 @@ static int populate_ruleset_fs(const char *const env_var, const int ruleset_fd,
 			path_beneath.allowed_access &= ACCESS_FILE;
 		if (verbose) {
 			__u64 ino = statbuf.st_ino;
-			printf("%s: ino = %lu, access_mask = 0x%llx\n",
+			printf("%s: ino = %llu, access_mask = 0x%llx\n",
 			       path_list[i], ino, path_beneath.allowed_access);
 		}
 		if (landlock_add_rule(ruleset_fd, LANDLOCK_RULE_PATH_BENEATH,
