@@ -744,12 +744,23 @@ static int process_event(struct landlock_supervise_event *evt)
 	char *target_path_2 = NULL;
 	char *comm = NULL;
 	char *exe = NULL;
-	int pid = evt->accessor;
+	int pid;
 	int fd;
 	ssize_t len;
 	enum SandboxAccessType access;
-
 	char proc_exe[100], proc_comm[100];
+
+	if (((uintptr_t)evt) % __alignof__(struct landlock_supervise_event) !=
+	    0) {
+		/*
+		 * Check that the kernel hasn't messed up given we're
+		 * reading an array of varable length struct
+		 */
+		fprintf(stderr, "evt = %p is badly aligned\n", evt);
+		abort();
+	}
+
+	pid = evt->accessor;
 	snprintf(proc_exe, sizeof(proc_exe), "/proc/%d/exe", pid);
 	exe = malloc(PATH_MAX);
 	if (!exe) {

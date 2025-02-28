@@ -380,10 +380,17 @@ struct landlock_supervise_event {
 			/**
 			 * If either of fd1 or fd2 points to a parent
 			 * directory rather than the target file, this is the
-			 * NULL-terminated name of the target.  This is a
-			 * variable length member, and the length including
-			 * the NULL terminator can be derived from
-			 * hdr.length - offsetof(struct landlock_supervise_event, destname).
+			 * NULL-terminated name of the target.
+			 *
+			 * Counting the NULL terminator, this field will
+			 * contain one or more NULL padding at the end so
+			 * that the length of the whole struct
+			 * landlock_supervise_event is a multiple of 8 bytes.
+			 *
+			 * This is a variable length member, and the length
+			 * including the terminating NULL(s) can be derived
+			 * from hdr.length - offsetof(struct
+			 * landlock_supervise_event, destname).
 			 */
 			char destname[];
 		};

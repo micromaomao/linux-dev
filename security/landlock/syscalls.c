@@ -130,6 +130,12 @@ static void build_check_abi(void)
 	BUILD_BUG_ON(offsetof(typeof(*event), destname) != supervise_evt_size);
 	BUILD_BUG_ON(offsetof(typeof(*event), destname) != 28);
 
+	/*
+	 * Make sure this struct does not end up with stricter
+	 * alignment than 8
+	 */
+	BUILD_BUG_ON(__alignof__(typeof(*event)) != 8);
+
 	supervise_response_size = sizeof(response.length);
 	supervise_response_size += sizeof(response.decision);
 	supervise_response_size += sizeof(response._reserved);
