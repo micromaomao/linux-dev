@@ -975,7 +975,7 @@ int interactive_sandboxer(int supervisor_fd, int child_stdin, int child_stdout,
 			}
 		}
 
-		if (pfds[pfd_idx_stdin].fd && write_buf_len == 0) {
+		if (pfds[pfd_idx_stdin].fd == -1 && write_buf_len == 0) {
 			/* We can safely close child's stdin now */
 			close(child_stdin);
 			child_stdin_closed = true;
