@@ -723,6 +723,10 @@ static bool path_join(char *dest_buf, size_t dest_buf_len, const char *last)
 	}
 	size_t last_len = strlen(last);
 	size_t dest_len = strnlen(dest_buf, dest_buf_len);
+	if (dest_len == 1 && dest_buf[0] == '/') {
+		dest_buf[0] = '\0';
+		dest_len = 0;
+	}
 	size_t dest_space = dest_buf_len - dest_len;
 	if (dest_space <= 1) {
 		return false;
