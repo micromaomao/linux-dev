@@ -68,7 +68,8 @@ bool landlock_ask_supervised_layers(
 	const layer_mask_t denied_layers,
 	const landlock_supervise_event_type_t request_type,
 	const access_mask_t access_request, const struct path *const path1,
-	const struct path *const path2, const __u16 port)
+	const struct path *const path2, const bool path1_new,
+	const bool path2_new, const __u16 port)
 {
 	size_t layer_level;
 	unsigned long denied_layers_ = denied_layers;
@@ -124,10 +125,12 @@ bool landlock_ask_supervised_layers(
 			if (path1) {
 				path_get(path1);
 				event->target_1 = *path1;
+				event->target_1_is_new = path1_new;
 			}
 			if (path2) {
 				path_get(path2);
 				event->target_2 = *path2;
+				event->target_2_is_new = path2_new;
 			}
 			break;
 		case LANDLOCK_SUPERVISE_EVENT_TYPE_NET_ACCESS:

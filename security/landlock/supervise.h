@@ -52,19 +52,31 @@ struct landlock_supervise_event_kernel {
 			 * useful information to the supervisor as possible,
 			 * for file creation and deletion, this points to the
 			 * actual path being created (or deleted), rather
-			 * than the parent directory.
+			 * than the parent directory. Note that for the
+			 * create case, this means that the dentry will be
+			 * negative (unless we end up in some horrible race).
+			 * In the create case, target_1_is_new is set, so
+			 * that we know to pass the parent as the fd to the
+			 * user-space supervisor, and fill destname with the
+			 * name of the file.
 			 *
 			 * For refer (link and rename), this points to the
 			 * source (or simply the first argument in case of
-			 * exchange) being linked.
+			 * exchange) being linked. It will necessarily have
+			 * to be an existing file (even though the dentry may
+			 * turn negative).
 			 */
 			struct path target_1;
 			/**
 			 * @target_2: The destination path for link and
 			 * rename (or simply the second argument in case of
-			 * exchange).
+			 * exchange). target_2_is_new will be set unless this
+			 * is an exchange.
 			 */
 			struct path target_2;
+
+			u8 target_1_is_new : 1;
+			u8 target_2_is_new : 1;
 		};
 		struct {
 			__u16 port;
@@ -144,6 +156,7 @@ bool landlock_ask_supervised_layers(
 	const layer_mask_t denied_layers,
 	const landlock_supervise_event_type_t request_type,
 	const access_mask_t access_request, const struct path *const path1,
-	const struct path *const path2, const __u16 port);
+	const struct path *const path2, const bool path1_new,
+	const bool path2_new, const __u16 port);
 
 #endif /* _SECURITY_LANDLOCK_SUPERVISE_H */

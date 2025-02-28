@@ -303,12 +303,20 @@ static void fop_supervisor_fdinfo(struct seq_file *m, struct file *f)
 				* ok to access since event owns a ref to the path,
 				* and we have event list spin lock.
 				*/
-				seq_printf(m, "\ttarget_1: ");
+				if (event->target_1_is_new) {
+					seq_printf(m, "\ttarget_1 (new): ");
+				} else {
+					seq_printf(m, "\ttarget_1: ");
+				}
 				seq_path(m, &event->target_1, "");
 				seq_printf(m, "\n");
 			}
 			if (event->target_2.dentry) {
-				seq_printf(m, "\ttarget_2: ");
+				if (event->target_2_is_new) {
+					seq_printf(m, "\ttarget_2 (new): ");
+				} else {
+					seq_printf(m, "\ttarget_2: ");
+				}
 				seq_path(m, &event->target_2, "");
 				seq_printf(m, "\n");
 			}

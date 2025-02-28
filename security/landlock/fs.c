@@ -956,7 +956,7 @@ static int current_check_access_path(const struct path *const path,
 		bool supervisor_allowed = landlock_ask_supervised_layers(
 			dom, pending_ask_supervise_layers,
 			LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS, access_request,
-			&child_path, NULL, 0);
+			&child_path, NULL, !!child, false, 0);
 
 		if (supervisor_allowed) {
 			return 0;
@@ -1608,7 +1608,8 @@ static int hook_file_open(struct file *const file)
 		bool supervisor_allowed = landlock_ask_supervised_layers(
 			dom, pending_ask_supervise_layers,
 			LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS,
-			open_access_request, &file->f_path, NULL, 0);
+			open_access_request, &file->f_path, NULL, false, false,
+			0);
 
 		if (supervisor_allowed) {
 			landlock_file(file)->allowed_access =
@@ -1658,7 +1659,7 @@ static bool check_opened_file_access_supervisor(struct file *const file,
 		bool supervisor_allowed = landlock_ask_supervised_layers(
 			dom, pending_ask_supervise_layers,
 			LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS, access_request,
-			&file->f_path, NULL, 0);
+			&file->f_path, NULL, false, false, 0);
 
 		return supervisor_allowed;
 	}
