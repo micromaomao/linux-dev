@@ -1724,7 +1724,6 @@ static int hook_file_ioctl_compat(struct file *file, unsigned int cmd,
 				  unsigned long arg)
 {
 	access_mask_t allowed_access = landlock_file(file)->allowed_access;
-	const struct landlock_ruleset *dom;
 
 	/*
 	 * It is the access rights at the time of opening the file which
