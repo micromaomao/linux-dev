@@ -293,17 +293,23 @@ out_unset:
 	LANDLOCK_ACCESS_FS_READ_FILE | \
 	LANDLOCK_ACCESS_FS_READ_DIR)
 
-#define ACCESS_FS_ROUGHLY_WRITE ( \
-	LANDLOCK_ACCESS_FS_WRITE_FILE | \
-	LANDLOCK_ACCESS_FS_REMOVE_DIR | \
-	LANDLOCK_ACCESS_FS_REMOVE_FILE | \
+#define ACCESS_FS_ROUGHLY_CREATE ( \
 	LANDLOCK_ACCESS_FS_MAKE_CHAR | \
 	LANDLOCK_ACCESS_FS_MAKE_DIR | \
 	LANDLOCK_ACCESS_FS_MAKE_REG | \
 	LANDLOCK_ACCESS_FS_MAKE_SOCK | \
 	LANDLOCK_ACCESS_FS_MAKE_FIFO | \
 	LANDLOCK_ACCESS_FS_MAKE_BLOCK | \
-	LANDLOCK_ACCESS_FS_MAKE_SYM | \
+	LANDLOCK_ACCESS_FS_MAKE_SYM)
+
+#define ACCESS_FS_ROUGHLY_REMOVE ( \
+	LANDLOCK_ACCESS_FS_REMOVE_DIR | \
+	LANDLOCK_ACCESS_FS_REMOVE_FILE)
+
+#define ACCESS_FS_ROUGHLY_WRITE ( \
+	LANDLOCK_ACCESS_FS_WRITE_FILE | \
+	ACCESS_FS_ROUGHLY_CREATE | \
+	ACCESS_FS_ROUGHLY_REMOVE | \
 	LANDLOCK_ACCESS_FS_REFER | \
 	LANDLOCK_ACCESS_FS_TRUNCATE | \
 	LANDLOCK_ACCESS_FS_IOCTL_DEV)
@@ -624,6 +630,8 @@ int verbose_exec(const char *cmd_path, char *const *cmd_argv, char *const *envp)
 enum SandboxAccessType {
 	ACCESS_READ,
 	ACCESS_READWRITE,
+	ACCESS_CREATE,
+	ACCESS_REMOVE,
 };
 
 struct context {
@@ -675,18 +683,36 @@ static int readlink_fd_s(int fd, char *buf, size_t buf_len)
 	return len;
 }
 
-static bool show_sandbox_prompt(enum SandboxAccessType access,
-				const char *file1, const char *file2, int pid,
-				const char *comm, const char *exe,
-				struct context *context)
+static bool show_sandbox_prompt_fs(enum SandboxAccessType access,
+				   const char *file1, const char *file2,
+				   int pid, const char *comm, const char *exe,
+				   struct context *context)
 {
+	const char *access_kv;
+	switch (access) {
+	case ACCESS_READ:
+		access_kv = "read";
+		break;
+	case ACCESS_READWRITE:
+		access_kv = "read/write";
+		break;
+	case ACCESS_CREATE:
+		access_kv = "create";
+		break;
+	case ACCESS_REMOVE:
+		access_kv = "remove";
+		break;
+	default:
+		abort();
+		return false;
+	}
 	if (isatty(STDIN_FILENO)) {
 		tcflush(STDIN_FILENO, TCIOFLUSH);
 	}
 	fprintf(stderr,
 		"------------- Sandboxer access request -------------\n");
 	fprintf(stderr, "Process %s[%d] (%s) wants to %s\n  %s\n", comm, pid,
-		exe, access == ACCESS_READ ? "read" : "write", file1);
+		exe, access_kv, file1);
 	if (file2) {
 		fprintf(stderr, "  %s\n", file2);
 	}
@@ -750,7 +776,7 @@ static bool show_sandbox_prompt(enum SandboxAccessType access,
 
 static bool show_sandbox_prompt_network(__u16 port, struct context *context)
 {
-	/* unimplemented */
+	/* TODO: unimplemented in kernel */
 	return true;
 }
 
@@ -856,10 +882,23 @@ static int process_event(struct landlock_supervise_event *evt,
 					  evt->destname);
 			}
 		}
-		if (evt->access_request & ACCESS_FS_ROUGHLY_WRITE) {
+		if (evt->access_request & ACCESS_FS_ROUGHLY_CREATE) {
+			access = ACCESS_CREATE;
+		} else if (evt->access_request & ACCESS_FS_ROUGHLY_REMOVE) {
+			access = ACCESS_REMOVE;
+		} else if (evt->access_request & ACCESS_FS_ROUGHLY_WRITE) {
 			access = ACCESS_READWRITE;
 		} else {
 			access = ACCESS_READ;
+		}
+
+		if (strcmp(target_path_1, "/dev/tty") == 0) {
+			/*
+			 * Deny TTY access to bash, as it messes with the
+			 * supervisor input, causing the supervisor to
+			 * receive SIGTTIN
+			 */
+			goto response;
 		}
 
 		for (size_t i = 0; i < context->num_allowed_paths; i++) {
@@ -915,9 +954,9 @@ static int process_event(struct landlock_supervise_event *evt,
 	switch (evt->hdr.type) {
 	case LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS:
 		if (!allow) {
-			allow = show_sandbox_prompt(access, target_path_1,
-						    target_path_2, pid, comm,
-						    exe, context);
+			allow = show_sandbox_prompt_fs(access, target_path_1,
+						       target_path_2, pid, comm,
+						       exe, context);
 		}
 		break;
 	case LANDLOCK_SUPERVISE_EVENT_TYPE_NET_ACCESS:
@@ -925,6 +964,7 @@ static int process_event(struct landlock_supervise_event *evt,
 		break;
 	}
 
+response:
 	/* Prepare and send response to the kernel */
 	response.length = sizeof(response);
 	response.decision = allow ? LANDLOCK_SUPERVISE_DECISION_ALLOW :
