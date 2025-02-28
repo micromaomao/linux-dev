@@ -203,117 +203,139 @@ static int fop_supervisor_release(struct inode *const inode,
 	return 0;
 }
 
+/**
+ * Lifetime of return value is tied to p.
+ */
+static struct path p_parent(struct path p)
+{
+	struct path parent_path = { .mnt = p.mnt,
+				    .dentry = p.dentry->d_parent };
+	return parent_path;
+}
+
+/**
+ * Open an O_PATH fd of a target file for passing to the
+ * supervisor.
+ */
+static int supervise_fs_fd_open_install(struct path *path)
+{
+	int fd = get_unused_fd_flags(O_CLOEXEC);
+	if (fd < 0) {
+		pr_warn("get_unused_fd_flags: %pe\n", ERR_PTR(fd));
+		return fd;
+	}
+	struct file *f = dentry_open(path, O_PATH | O_CLOEXEC, current_cred());
+	if (IS_ERR(f)) {
+		pr_warn("Failed to open fd in supervisor: %ld\n", PTR_ERR(f));
+		put_unused_fd(fd);
+		return PTR_ERR(f);
+	}
+	fd_install(fd, f);
+	return fd;
+}
+
 static ssize_t fop_supervisor_read(struct file *const filp,
 				   char __user *const buf, const size_t size,
 				   loff_t *const ppos)
 {
 	struct landlock_supervisor *supervisor = filp->private_data;
 	struct landlock_supervise_event_kernel *event = NULL;
-	struct landlock_supervise_event *user_event;
-	size_t event_size, name_size = 0, padded_size;
-	int fd1 = -1, fd2 = -1, ret;
-	char *leaf_name = NULL;
+	bool found = false;
+	struct landlock_supervise_event *user_event = NULL;
+	size_t destname_size = 0, event_size = 0;
+	const size_t dest_offset =
+		offsetof(struct landlock_supervise_event, destname);
+	const char *destname = NULL; /* Lifetime tied to event */
+	int fd1 = -1, fd2 = -1, ret = 0;
 	bool nonblock = filp->f_flags & O_NONBLOCK;
+	struct path parent_path;
+
+	if (WARN_ON(!supervisor))
+		return -ENODEV;
 
 	if (size < sizeof(struct landlock_supervise_event))
 		return -EINVAL;
 
-	/* Only allocate the minimum fixed size of the event structure */
+retry:
+	spin_lock(&supervisor->lock);
+
+	/*
+	 * Find the first new event (but really, all events in this
+	 * list should be new)
+	 */
+	list_for_each_entry(event, &supervisor->event_queue, node) {
+		if (event->state == LANDLOCK_SUPERVISE_EVENT_NEW) {
+			found = true;
+			break;
+		}
+	}
+
+	if (!found) {
+		spin_unlock(&supervisor->lock);
+		if (nonblock) {
+			return -EAGAIN;
+		}
+
+		/*
+		 * Wait for events to be added to the queue.
+		 * Not sure if we can call list_empty() without the lock
+		 * here, hence true.
+		 */
+		ret = wait_event_interruptible(supervisor->poll_event_wq, true);
+		if (ret)
+			return ret;
+
+		goto retry;
+	}
+
+	/*
+	 * We take the event out of the list and let other readers
+	 * carry on.  We take over the event's ownership from the
+	 * list (hence no get/put).
+	 */
+	list_del(&event->node);
+	spin_unlock(&supervisor->lock);
+
+	if (event->type == LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS) {
+		struct dentry *dest_dentry;
+
+		if (WARN_ON(event->target_1_is_new && event->target_2_is_new)) {
+			ret = -EAGAIN;
+			goto fail_deny;
+		}
+
+		/*
+		 * Get destname out here so that we know the event's size.
+		 * We separate the lifetime of destname away from the
+		 * kernel event so we can move the copy outside of lock.
+		 */
+		if (event->target_1.dentry && event->target_1_is_new) {
+			dest_dentry = event->target_1.dentry;
+			destname = (char *)dest_dentry->d_name.name;
+			destname_size = dest_dentry->d_name.len + 1;
+		} else if (event->target_2.dentry && event->target_2_is_new) {
+			dest_dentry = event->target_2.dentry;
+			destname = (char *)dest_dentry->d_name.name;
+			destname_size = dest_dentry->d_name.len + 1;
+		}
+	}
+
+	event_size = ALIGN(dest_offset + destname_size,
+			   __alignof__(typeof(*user_event)));
+
+	if (event_size > size) {
+		ret = -EINVAL;
+		goto fail_readd_event;
+	}
+
+	/* We will copy the destname directly to user buffer */
 	user_event =
 		kzalloc(sizeof(struct landlock_supervise_event), GFP_KERNEL);
 	if (!user_event)
 		return -ENOMEM;
 
-retry:
-	spin_lock(&supervisor->lock);
-
-	/* Check if there are any events in the queue */
-	if (list_empty(&supervisor->event_queue)) {
-		spin_unlock(&supervisor->lock);
-
-		/* If non-blocking, return immediately */
-		if (nonblock) {
-			ret = -EAGAIN;
-			goto free_user_event;
-		}
-
-		/* Wait for events to be added to the queue */
-		ret = wait_event_interruptible(
-			supervisor->poll_event_wq,
-			!list_empty(&supervisor->event_queue));
-		if (ret)
-			goto free_user_event;
-
-		goto retry;
-	}
-
-	/* Find the first event that is in NEW state */
-	list_for_each_entry(event, &supervisor->event_queue, node) {
-		/* Skip events that are already notified */
-		if (event->state == LANDLOCK_SUPERVISE_EVENT_NOTIFIED)
-			continue;
-
-		if (event->state == LANDLOCK_SUPERVISE_EVENT_NEW)
-			break;
-	}
-
-	/* If we didn't find a new event in the queue */
-	if (&event->node == &supervisor->event_queue ||
-	    event->state != LANDLOCK_SUPERVISE_EVENT_NEW) {
-		spin_unlock(&supervisor->lock);
-
-		/* If non-blocking, return immediately */
-		if (nonblock) {
-			ret = -EAGAIN;
-			goto free_user_event;
-		}
-
-		/* Wait for new events */
-		ret = wait_event_interruptible(
-			supervisor->poll_event_wq,
-			!list_empty(&supervisor->event_queue));
-		if (ret)
-			goto free_user_event;
-
-		goto retry;
-	}
-
-	/* Check both target_*_is_new flags set (invalid state) */
-	if (event->type == LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS &&
-	    event->target_1.dentry && event->target_2.dentry &&
-	    event->target_1_is_new && event->target_2_is_new) {
-		WARN_ON(1);
-		event->state = LANDLOCK_SUPERVISE_EVENT_DENIED;
-		wake_up_var(event);
-		ret = -EAGAIN;
-		goto unlock_and_free;
-	}
-
-	/* Prepare file descriptors and destname if needed */
-	if (event->type == LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS) {
-		/* Calculate destname size and check buffer size requirements */
-		if (event->target_1.dentry && event->target_1_is_new) {
-			leaf_name = (char *)event->target_1.dentry->d_name.name;
-			name_size = event->target_1.dentry->d_name.len + 1;
-		} else if (event->target_2.dentry && event->target_2_is_new) {
-			leaf_name = (char *)event->target_2.dentry->d_name.name;
-			name_size = event->target_2.dentry->d_name.len + 1;
-		}
-	}
-
-	/* Calculate the total size including padding */
-	event_size =
-		offsetof(struct landlock_supervise_event, destname) + name_size;
-	padded_size = ALIGN(event_size, 8);
-
-	if (padded_size > size) {
-		ret = -EINVAL;
-		goto unlock_and_free;
-	}
-
-	/* Prepare the user event structure */
 	user_event->hdr.type = event->type;
-	user_event->hdr.length = padded_size;
+	user_event->hdr.length = event_size;
 	user_event->hdr.cookie = event->event_id;
 	user_event->access_request = event->access_request;
 	user_event->accessor = pid_vnr(event->accessor);
@@ -322,160 +344,108 @@ retry:
 	if (event->type == LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS) {
 		if (event->target_1.dentry) {
 			if (event->target_1_is_new) {
-				/* Open the parent directory */
-				struct path parent_path = {
-					.mnt = event->target_1.mnt,
-					.dentry =
-						event->target_1.dentry->d_parent
-				};
-				fd1 = get_unused_fd_flags(O_CLOEXEC);
+				parent_path = p_parent(event->target_1);
+				fd1 = supervise_fs_fd_open_install(
+					&parent_path);
 				if (fd1 < 0) {
-					pr_warn("Failed to get unused fd: %d\n",
-						fd1);
 					ret = fd1;
-					goto deny_and_fail;
+					goto fail_deny_or_readd;
 				}
-
-				struct file *f = dentry_open(&parent_path,
-							     O_PATH | O_CLOEXEC,
-							     current_cred());
-				if (IS_ERR(f)) {
-					pr_warn("Failed to open parent directory: %ld\n",
-						PTR_ERR(f));
-					ret = PTR_ERR(f);
-					goto deny_and_fail;
-				}
-				fd_install(fd1, f);
 			} else {
-				/* Open the target file/directory directly */
-				fd1 = get_unused_fd_flags(O_CLOEXEC);
+				fd1 = supervise_fs_fd_open_install(
+					&event->target_1);
 				if (fd1 < 0) {
-					pr_warn("Failed to get unused fd: %d\n",
-						fd1);
 					ret = fd1;
-					goto deny_and_fail;
+					goto fail_deny_or_readd;
 				}
-
-				struct file *f = dentry_open(&event->target_1,
-							     O_PATH | O_CLOEXEC,
-							     current_cred());
-				if (IS_ERR(f)) {
-					pr_warn("Failed to open target file: %ld\n",
-						PTR_ERR(f));
-					ret = PTR_ERR(f);
-					goto deny_and_fail;
-				}
-				fd_install(fd1, f);
 			}
 		}
 
 		if (event->target_2.dentry) {
-			// ... existing implementation for target_2 ...
 			if (event->target_2_is_new) {
-				/* Open the parent directory */
-				struct path parent_path = {
-					.mnt = event->target_2.mnt,
-					.dentry =
-						event->target_2.dentry->d_parent
-				};
-				fd2 = get_unused_fd_flags(O_CLOEXEC);
+				parent_path = p_parent(event->target_2);
+				fd2 = supervise_fs_fd_open_install(
+					&parent_path);
 				if (fd2 < 0) {
-					pr_warn("Failed to get unused fd: %d\n",
-						fd2);
 					ret = fd2;
-					goto deny_and_fail;
+					goto fail_deny_or_readd;
 				}
-
-				struct file *f = dentry_open(&parent_path,
-							     O_PATH | O_CLOEXEC,
-							     current_cred());
-				if (IS_ERR(f)) {
-					pr_warn("Failed to open parent directory: %ld\n",
-						PTR_ERR(f));
-					ret = PTR_ERR(f);
-					goto deny_and_fail;
-				}
-				fd_install(fd2, f);
 			} else {
-				/* Open the target file/directory directly */
-				fd2 = get_unused_fd_flags(O_CLOEXEC);
+				fd2 = supervise_fs_fd_open_install(
+					&event->target_2);
 				if (fd2 < 0) {
-					pr_warn("Failed to get unused fd: %d\n",
-						fd2);
 					ret = fd2;
-					goto deny_and_fail;
+					goto fail_deny_or_readd;
 				}
-
-				struct file *f = dentry_open(&event->target_2,
-							     O_PATH | O_CLOEXEC,
-							     current_cred());
-				if (IS_ERR(f)) {
-					pr_warn("Failed to open target file: %ld\n",
-						PTR_ERR(f));
-					ret = PTR_ERR(f);
-					goto deny_and_fail;
-				}
-				fd_install(fd2, f);
 			}
 		}
 	} else if (event->type == LANDLOCK_SUPERVISE_EVENT_TYPE_NET_ACCESS) {
 		user_event->port = event->port;
 	}
 
-	/* Set the file descriptors */
 	user_event->fd1 = fd1;
 	user_event->fd2 = fd2;
 
-	/* Mark the event as notified */
-	event->state = LANDLOCK_SUPERVISE_EVENT_NOTIFIED;
-
-	spin_unlock(&supervisor->lock);
-
-	/* Copy the fixed part of the structure to user space */
-	if (copy_to_user(buf, user_event,
-			 offsetof(struct landlock_supervise_event, destname))) {
+	/* Non-variable-sized part */
+	if (copy_to_user(buf, user_event, dest_offset)) {
 		ret = -EFAULT;
-		goto close_fds;
+		goto fail_readd_event;
 	}
 
-	/* If there's a leaf name, copy it directly to the user buffer at the right offset */
-	if (leaf_name && name_size > 0) {
-		if (copy_to_user(buf + offsetof(struct landlock_supervise_event,
-						destname),
-				 leaf_name, name_size)) {
+	/* destname */
+	if (destname && destname_size > 0) {
+		if (copy_to_user(buf + dest_offset, destname, destname_size)) {
 			ret = -EFAULT;
-			goto close_fds;
+			goto fail_readd_event;
 		}
 	}
 
 	/* Zero out any padding bytes */
-	if (padded_size > event_size) {
-		size_t padding_len = padded_size - event_size;
-		if (clear_user(buf + event_size, padding_len)) {
+	if (event_size > dest_offset + destname_size) {
+		size_t padding_len = event_size - dest_offset - destname_size;
+		if (clear_user(buf + dest_offset + destname_size,
+			       padding_len)) {
 			ret = -EFAULT;
-			goto close_fds;
+			goto fail_readd_event;
 		}
 	}
 
-	kfree(user_event);
-	return padded_size;
+	ret = event_size;
+	event->state = LANDLOCK_SUPERVISE_EVENT_NOTIFIED;
+	/* No decision yet, don't wake up! */
+	spin_lock(&supervisor->lock);
+	list_add(&event->node, &supervisor->notified_events);
+	event = NULL;
+	spin_unlock(&supervisor->lock);
+	goto free;
 
-deny_and_fail:
+fail_deny_or_readd:
+	if (ret == -EINTR)
+		goto fail_readd_event;
+	else
+		goto fail_deny;
+
+fail_readd_event:
+	WARN_ON(event->state != LANDLOCK_SUPERVISE_EVENT_NEW);
+	spin_lock(&supervisor->lock);
+	list_add(&event->node, &supervisor->event_queue);
+	event = NULL;
+	spin_unlock(&supervisor->lock);
+	goto free;
+
+fail_deny:
 	event->state = LANDLOCK_SUPERVISE_EVENT_DENIED;
 	wake_up_var(event);
-	/* Fall through to unlock_and_free */
+	landlock_put_supervise_event(event);
+	event = NULL;
+	goto free;
 
-unlock_and_free:
-	spin_unlock(&supervisor->lock);
-	/* Fall through to close_fds */
-
-close_fds:
+free:
+	WARN_ON(event);
 	if (fd1 >= 0)
 		put_unused_fd(fd1);
 	if (fd2 >= 0)
 		put_unused_fd(fd2);
-
-free_user_event:
 	kfree(user_event);
 	return ret;
 }
@@ -514,7 +484,6 @@ static ssize_t fop_supervisor_write(struct file *const filp,
 				   sizeof(response)))
 			return -EFAULT;
 
-		/* Validate the response structure */
 		if (response.length != sizeof(response))
 			return -EINVAL;
 
@@ -522,7 +491,7 @@ static ssize_t fop_supervisor_write(struct file *const filp,
 
 		/* Find the event with matching cookie */
 		found = false;
-		list_for_each_entry(event, &supervisor->event_queue, node) {
+		list_for_each_entry(event, &supervisor->notified_events, node) {
 			if (event->event_id == response.cookie) {
 				found = true;
 				break;
@@ -531,39 +500,48 @@ static ssize_t fop_supervisor_write(struct file *const filp,
 
 		if (!found) {
 			spin_unlock(&supervisor->lock);
-			/* Continue to process additional responses if any */
-			bytes_processed += sizeof(response);
-			continue;
+			pr_warn("Unknown supervise event cookie: %u\n",
+				response.cookie);
+			event = NULL;
+			goto ret;
 		}
 
-		/* Ignore responses for already decided events */
-		if (LANDLOCK_SUPERVISE_EVENT_HANDLED(event)) {
-			spin_unlock(&supervisor->lock);
-			bytes_processed += sizeof(response);
-			continue;
-		}
-
-		/* Update the event state based on the response */
-		if (response.decision == LANDLOCK_SUPERVISE_DECISION_ALLOW)
-			event->state = LANDLOCK_SUPERVISE_EVENT_ALLOWED;
-		else
-			event->state = LANDLOCK_SUPERVISE_EVENT_DENIED;
-
-		/* Remove the event from the queue */
 		list_del(&event->node);
-
 		spin_unlock(&supervisor->lock);
 
-		/* Wake up threads waiting on this event */
-		wake_up_var(event);
+		if (WARN_ON(LANDLOCK_SUPERVISE_EVENT_HANDLED(event))) {
+			bytes_processed += sizeof(response);
+			landlock_put_supervise_event(event);
+			event = NULL;
+			continue;
+		}
 
-		/* Release our reference to the event */
+		if (response.decision == LANDLOCK_SUPERVISE_DECISION_ALLOW)
+			event->state = LANDLOCK_SUPERVISE_EVENT_ALLOWED;
+		else if (response.decision == LANDLOCK_SUPERVISE_DECISION_DENY)
+			event->state = LANDLOCK_SUPERVISE_EVENT_DENIED;
+		else {
+			pr_warn("Invalid supervise event decision: %u\n",
+				response.decision);
+			goto fail_re_add;
+		}
+
+		wake_up_var(event);
 		landlock_put_supervise_event(event);
+		event = NULL;
 
 		bytes_processed += sizeof(response);
 	}
+	goto ret;
 
-	/* Return the number of bytes processed */
+fail_re_add:
+	spin_lock(&supervisor->lock);
+	list_add(&event->node, &supervisor->notified_events);
+	event = NULL;
+	spin_unlock(&supervisor->lock);
+
+ret:
+	WARN_ON(event);
 	return bytes_processed > 0 ? bytes_processed : -EINVAL;
 }
 

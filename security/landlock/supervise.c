@@ -22,6 +22,7 @@ struct landlock_supervisor *landlock_create_supervisor(void)
 	supervisor->next_event_id = 1;
 	spin_lock_init(&supervisor->lock);
 	INIT_LIST_HEAD(&supervisor->event_queue);
+	INIT_LIST_HEAD(&supervisor->notified_events);
 	init_waitqueue_head(&supervisor->poll_event_wq);
 	return supervisor;
 }
@@ -31,6 +32,17 @@ void landlock_get_supervisor(struct landlock_supervisor *const supervisor)
 	refcount_inc(&supervisor->usage);
 }
 
+static void
+deny_and_put_event(struct landlock_supervise_event_kernel *const event)
+{
+	cmpxchg(&event->state, LANDLOCK_SUPERVISE_EVENT_NEW,
+		LANDLOCK_SUPERVISE_EVENT_DENIED);
+	cmpxchg(&event->state, LANDLOCK_SUPERVISE_EVENT_NOTIFIED,
+		LANDLOCK_SUPERVISE_EVENT_DENIED);
+	wake_up_var(event);
+	landlock_put_supervise_event(event);
+}
+
 void landlock_put_supervisor(struct landlock_supervisor *const supervisor)
 {
 	if (refcount_dec_and_test(&supervisor->usage)) {
@@ -38,16 +50,21 @@ void landlock_put_supervisor(struct landlock_supervisor *const supervisor)
 
 		might_sleep();
 		/* we are the only reference, hence no locking */
+
+		/* deny all pending events */
 		list_for_each_entry_safe(freeme, next, &supervisor->event_queue,
 					 node) {
 			list_del(&freeme->node);
-			cmpxchg(&freeme->state, LANDLOCK_SUPERVISE_EVENT_NEW,
-				LANDLOCK_SUPERVISE_EVENT_DENIED);
-			cmpxchg(&freeme->state,
-				LANDLOCK_SUPERVISE_EVENT_NOTIFIED,
-				LANDLOCK_SUPERVISE_EVENT_DENIED);
-			wake_up_var(freeme);
-			landlock_put_supervise_event(freeme);
+			deny_and_put_event(freeme);
+		}
+		/*
+		 * user reply no longer possible without any reference to
+		 * supervisor, deny all notified events
+		 */
+		list_for_each_entry_safe(freeme, next,
+					 &supervisor->notified_events, node) {
+			list_del(&freeme->node);
+			deny_and_put_event(freeme);
 		}
 		kfree(supervisor);
 	}
@@ -142,8 +159,8 @@ bool landlock_ask_supervised_layers(
 
 		spin_lock(&supervisor->lock);
 		event->event_id = supervisor->next_event_id++;
-		list_add_tail(&event->node, &supervisor->event_queue);
 		landlock_get_supervise_event(event);
+		list_add_tail(&event->node, &supervisor->event_queue);
 		spin_unlock(&supervisor->lock);
 		wake_up(&supervisor->poll_event_wq);
 
@@ -156,6 +173,8 @@ bool landlock_ask_supervised_layers(
 		if (event->state != LANDLOCK_SUPERVISE_EVENT_ALLOWED) {
 			return false;
 		}
+
+		/* event has __free */
 	}
 
 	return true;

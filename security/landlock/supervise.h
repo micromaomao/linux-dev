@@ -21,6 +21,8 @@ struct landlock_supervisor {
 	spinlock_t lock;
 	/* protected by @lock, contains landlock_supervise_event_kernel */
 	struct list_head event_queue;
+	/* protected by @lock, contains landlock_supervise_event_kernel */
+	struct list_head notified_events;
 	struct wait_queue_head poll_event_wq;
 	/* protected by @lock */
 	u32 next_event_id;
