@@ -64,7 +64,10 @@ static inline int landlock_restrict_self(const int ruleset_fd,
 #define ENV_TCP_CONNECT_NAME "LL_TCP_CONNECT"
 #define ENV_SCOPED_NAME "LL_SCOPED"
 #define ENV_SUPERVISE "LL_SUPERVISE"
+#define ENV_VERBOSE "LL_VERBOSE"
 #define ENV_DELIMITER ":"
+
+static bool verbose = false;
 
 static int str2num(const char *numstr, __u64 *num_dst)
 {
@@ -167,6 +170,11 @@ static int populate_ruleset_fs(const char *const env_var, const int ruleset_fd,
 		path_beneath.allowed_access = allowed_access;
 		if (!S_ISDIR(statbuf.st_mode))
 			path_beneath.allowed_access &= ACCESS_FILE;
+		if (verbose) {
+			__u64 ino = statbuf.st_ino;
+			printf("%s: ino = %lu, access_mask = 0x%llx\n",
+			       path_list[i], ino, path_beneath.allowed_access);
+		}
 		if (landlock_add_rule(ruleset_fd, LANDLOCK_RULE_PATH_BENEATH,
 				      &path_beneath, 0)) {
 			fprintf(stderr,
@@ -328,6 +336,7 @@ static const char help[] =
 	"  - \"a\" to restrict opening abstract unix sockets\n"
 	"  - \"s\" to restrict sending signals\n"
 	"* " ENV_SUPERVISE ": set to 1 to enable supervisor mode\n"
+	"* " ENV_VERBOSE ": set to 1 to enable verbose output\n"
 	"\n"
 	"Example:\n"
 	ENV_FS_RO_NAME "=\"${PATH}:/lib:/usr:/proc:/etc:/dev/urandom\" "
@@ -357,7 +366,7 @@ int main(const int argc, char *const argv[], char *const *const envp)
 	      access_fs_rw = ACCESS_FS_ROUGHLY_READ | ACCESS_FS_ROUGHLY_WRITE;
 	bool supervise = false;
 	__u32 flags;
-	char *env_supervise;
+	char *env_supervise, *env_verbose;
 
 	struct landlock_ruleset_attr ruleset_attr = {
 		.handled_access_fs = access_fs_rw,
@@ -377,6 +386,10 @@ int main(const int argc, char *const argv[], char *const *const envp)
 	env_supervise = getenv(ENV_SUPERVISE);
 	if (env_supervise && strcmp(env_supervise, "1") == 0) {
 		supervise = true;
+	}
+	env_verbose = getenv(ENV_VERBOSE);
+	if (env_verbose && strcmp(env_verbose, "1") == 0) {
+		verbose = true;
 	}
 
 	abi = landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION);
@@ -1036,15 +1049,17 @@ retry:
 				goto err_kill_child;
 			} else if (count < 0 && errno != EAGAIN) {
 				if (errno == EINVAL) {
+					/* Maybe buffer is too small to fit the event? */
+					if (io_buf_len > (2 << 20)) {
+						perror("Read supervisor fd");
+						goto err_kill_child;
+					}
 					io_buf_len *= 2;
 					io_buf = realloc(io_buf, io_buf_len);
 					if (!io_buf) {
 						perror("Failed to realloc I/O buffer");
 						goto err_kill_child;
 					}
-					fprintf(stderr,
-						"Got EINVAL - possibly event too big. Realloced I/O buffer to %zu\n",
-						io_buf_len);
 					goto retry;
 				}
 				perror("Failed to read from supervisor");
