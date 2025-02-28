@@ -1117,6 +1117,8 @@ static bool collect_domain_accesses(
  * - 0 if access is allowed;
  * - -EXDEV if @old_dentry would inherit new access rights from @new_dir;
  * - -EACCES if file removal or creation is denied.
+ *
+ * TODO: implement interation wiht supervisors.
  */
 static int current_check_refer_path(struct dentry *const old_dentry,
 				    const struct path *const new_dir,
