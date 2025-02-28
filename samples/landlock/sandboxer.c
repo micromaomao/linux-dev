@@ -739,7 +739,8 @@ static bool path_join(char *dest_buf, size_t dest_buf_len, const char *last)
 	return copy_count == last_len;
 }
 
-static int process_event(struct landlock_supervise_event *evt)
+static int process_event(struct landlock_supervise_event *evt,
+			 int supervisor_fd)
 {
 	char *target_path_1 = NULL;
 	char *target_path_2 = NULL;
@@ -750,6 +751,8 @@ static int process_event(struct landlock_supervise_event *evt)
 	ssize_t len;
 	enum SandboxAccessType access;
 	char proc_exe[100], proc_comm[100];
+	struct landlock_supervise_response response;
+	int ret = 0;
 
 	if (((uintptr_t)evt) % __alignof__(struct landlock_supervise_event) !=
 	    0) {
@@ -837,16 +840,55 @@ static int process_event(struct landlock_supervise_event *evt)
 		}
 		bool answer = show_sandbox_prompt(
 			access, target_path_1, target_path_2, pid, comm, exe);
+
+		/* Prepare and send response to the kernel */
+		response.length = sizeof(response);
+		response.decision = answer ? LANDLOCK_SUPERVISE_DECISION_ALLOW :
+					     LANDLOCK_SUPERVISE_DECISION_DENY;
+		response._reserved = 0;
+		response.cookie = evt->hdr.cookie;
+
+		if (write(supervisor_fd, &response, sizeof(response)) !=
+		    sizeof(response)) {
+			perror("Failed to write supervisor response");
+			ret = -1;
+		}
+		break;
+	case LANDLOCK_SUPERVISE_EVENT_TYPE_NET_ACCESS:
+		/* Handle network access - similar to filesystem access */
+		access = ACCESS_READWRITE;
+		char port_str[32];
+		snprintf(port_str, sizeof(port_str), "port %d", evt->port);
+		answer = show_sandbox_prompt(access, port_str, NULL, pid, comm,
+					     exe);
+
+		/* Prepare and send response to the kernel */
+		response.length = sizeof(response);
+		response.decision = answer ? LANDLOCK_SUPERVISE_DECISION_ALLOW :
+					     LANDLOCK_SUPERVISE_DECISION_DENY;
+		response._reserved = 0;
+		response.cookie = evt->hdr.cookie;
+
+		if (write(supervisor_fd, &response, sizeof(response)) !=
+		    sizeof(response)) {
+			perror("Failed to write supervisor response");
+			ret = -1;
+		}
+		break;
+	default:
+		fprintf(stderr, "Unknown event type: %d\n", evt->hdr.type);
+		ret = -1;
 		break;
 	}
+
 	free(target_path_1);
 	free(target_path_2);
 	free(comm);
 	free(exe);
-	return 0;
+	return ret;
 }
 
-static int process_events(void *data, size_t data_len)
+static int process_events(void *data, size_t data_len, int supervisor_fd)
 {
 	while (data_len > 0) {
 		struct landlock_supervise_event *evt;
@@ -863,7 +905,7 @@ static int process_events(void *data, size_t data_len)
 				"Length from event header is greater than remaining data.");
 			return -EINVAL;
 		}
-		rc = process_event(evt);
+		rc = process_event(evt, supervisor_fd);
 		if (rc < 0) {
 			return rc;
 		}
@@ -1060,7 +1102,7 @@ int interactive_sandboxer(int supervisor_fd, int child_stdin, int child_stdout,
 retry:
 			ssize_t count = read(supervisor_fd, io_buf, io_buf_len);
 			if (count > 0) {
-				process_events(io_buf, count);
+				process_events(io_buf, count, supervisor_fd);
 			} else if (count == 0) {
 				fprintf(stderr,
 					"Unexpected EOF on supervisor fd\n");
