@@ -921,17 +921,23 @@ int interactive_sandboxer(int supervisor_fd, int child_stdin, int child_stdout,
 
 		if (pfds[0].revents & POLLIN) {
 			/*
-			 * Our stdin -> child's stdin, or temp buffer.
+			 * Our stdin -> temp buffer for child's stdin.
 			 * Need to do this before handling any supervisor
 			 * events so that inputs intended for the child is
 			 * not interperted as user decision.
 			 */
-			ssize_t count = read(STDIN_FILENO, io_buf, io_buf_len);
+			const int read_len = 4096;
+			write_buf =
+				realloc(write_buf, write_buf_len + read_len);
+			if (!write_buf) {
+				fprintf(stderr,
+					"Failed to realloc write buffer\n");
+				goto err_kill_child;
+			}
+			ssize_t count = read(STDIN_FILENO,
+					     write_buf + write_buf_len,
+					     read_len);
 			if (count > 0) {
-				write_buf = realloc(write_buf,
-						    write_buf_len + count);
-				memcpy(write_buf + write_buf_len, io_buf,
-				       count);
 				write_buf_len += count;
 			} else if (count == 0) {
 				/* Our stdin is closed. Don't read from it anymore. */
@@ -947,7 +953,7 @@ int interactive_sandboxer(int supervisor_fd, int child_stdin, int child_stdout,
 			ssize_t written =
 				write(child_stdin, write_buf, write_buf_len);
 			if (written > 0) {
-				if (written > write_buf_len || written == 0) {
+				if (written > write_buf_len) {
 					abort();
 				} else if (written == write_buf_len) {
 					write_buf_len = 0;
@@ -1057,7 +1063,8 @@ retry:
 					io_buf_len *= 2;
 					io_buf = realloc(io_buf, io_buf_len);
 					if (!io_buf) {
-						perror("Failed to realloc I/O buffer");
+						fprintf(stderr,
+							"Failed to realloc I/O buffer\n");
 						goto err_kill_child;
 					}
 					goto retry;
