@@ -2229,7 +2229,7 @@ int tomoyo_supervisor(struct tomoyo_request_info *r, const char *fmt, ...)
 		     !atomic_read(&tomoyo_query_observers), HZ))
 			break;
 		entry.timer++;
-		trace_printk("%d\n", entry.timer);
+		trace_printk("%p, %d\n", &entry, entry.timer);
 	}
 	spin_lock(&tomoyo_query_list_lock);
 	list_del(&entry.list);

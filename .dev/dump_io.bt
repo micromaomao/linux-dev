@@ -1,0 +1,170 @@
+#!/usr/bin/env bpftrace
+
+BEGIN
+{
+  printf("Tracing PID %d FD %d. Press Ctrl+C to exit.\n", $1, $2);
+  @max_buf_size = 64; // Buffer size limit
+}
+
+tracepoint:syscalls:sys_enter_read
+/pid == $1 && args->fd == $2/
+{
+  @read_start[tid] = 1;
+  @read_fd[tid] = args->fd;
+  @read_buf[tid] = args->buf;
+}
+
+tracepoint:syscalls:sys_exit_read
+/@read_start[tid] && @read_fd[tid] == $2/
+{
+  if (args->ret > 0) {
+    printf("< ");
+    $total = args->ret > 4096 ? 4096 : args->ret;
+
+    // Print first chunk
+    $size = $total > @max_buf_size ? @max_buf_size : $total;
+    $data = buf(@read_buf[tid], $size);
+    printf("%r", $data);
+
+    // Print second chunk if needed
+    if ($total > @max_buf_size) {
+      $size = $total > 2*@max_buf_size ? @max_buf_size : $total-@max_buf_size;
+      $data = buf(@read_buf[tid] + @max_buf_size, $size);
+      printf("%r", $data);
+    }
+
+    // Continue for more chunks
+    if ($total > 2*@max_buf_size) {
+      $size = $total > 3*@max_buf_size ? @max_buf_size : $total-2*@max_buf_size;
+      $data = buf(@read_buf[tid] + 2*@max_buf_size, $size);
+      printf("%r", $data);
+    }
+
+    // Continue for more chunks
+    if ($total > 3*@max_buf_size) {
+      $size = $total > 4*@max_buf_size ? @max_buf_size : $total-3*@max_buf_size;
+      $data = buf(@read_buf[tid] + 3*@max_buf_size, $size);
+      printf("%r", $data);
+    }
+
+    // Continue for more chunks
+    if ($total > 4*@max_buf_size) {
+      $size = $total > 5*@max_buf_size ? @max_buf_size : $total-4*@max_buf_size;
+      $data = buf(@read_buf[tid] + 4*@max_buf_size, $size);
+      printf("%r", $data);
+    }
+
+    // Continue for more chunks
+    if ($total > 5*@max_buf_size) {
+      $size = $total > 6*@max_buf_size ? @max_buf_size : $total-5*@max_buf_size;
+      $data = buf(@read_buf[tid] + 5*@max_buf_size, $size);
+      printf("%r", $data);
+    }
+
+    // Continue for more chunks
+    if ($total > 6*@max_buf_size) {
+      $size = $total > 7*@max_buf_size ? @max_buf_size : $total-6*@max_buf_size;
+      $data = buf(@read_buf[tid] + 6*@max_buf_size, $size);
+      printf("%r", $data);
+    }
+
+    // Continue for more chunks
+    if ($total > 7*@max_buf_size) {
+      $size = $total > 8*@max_buf_size ? @max_buf_size : $total-7*@max_buf_size;
+      $data = buf(@read_buf[tid] + 7*@max_buf_size, $size);
+      printf("%r", $data);
+    }
+
+    // Continue for more chunks
+    if ($total > 8*@max_buf_size) {
+      $size = $total > 9*@max_buf_size ? @max_buf_size : $total-8*@max_buf_size;
+      $data = buf(@read_buf[tid] + 8*@max_buf_size, $size);
+      printf("%r", $data);
+    }
+
+    printf("\n");
+  }
+  delete(@read_start[tid]);
+  delete(@read_fd[tid]);
+  delete(@read_buf[tid]);
+}
+
+tracepoint:syscalls:sys_enter_write
+/pid == $1 && args->fd == $2/
+{
+  if (args->count > 0) {
+    printf("> ");
+    $total = args->count > 4096 ? 4096 : args->count;
+
+    // Print first chunk
+    $size = $total > @max_buf_size ? @max_buf_size : $total;
+    $data = buf(args->buf, $size);
+    printf("%r", $data);
+
+    // Print second chunk if needed
+    if ($total > @max_buf_size) {
+      $size = $total > 2*@max_buf_size ? @max_buf_size : $total-@max_buf_size;
+      $data = buf(args->buf + @max_buf_size, $size);
+      printf("%r", $data);
+    }
+
+    // Continue for more chunks
+    if ($total > 2*@max_buf_size) {
+      $size = $total > 3*@max_buf_size ? @max_buf_size : $total-2*@max_buf_size;
+      $data = buf(args->buf + 2*@max_buf_size, $size);
+      printf("%r", $data);
+    }
+
+    // Continue for more chunks
+    if ($total > 3*@max_buf_size) {
+      $size = $total > 4*@max_buf_size ? @max_buf_size : $total-3*@max_buf_size;
+      $data = buf(args->buf + 3*@max_buf_size, $size);
+      printf("%r", $data);
+    }
+
+    // Continue for more chunks
+    if ($total > 4*@max_buf_size) {
+      $size = $total > 5*@max_buf_size ? @max_buf_size : $total-4*@max_buf_size;
+      $data = buf(args->buf + 4*@max_buf_size, $size);
+      printf("%r", $data);
+    }
+
+    // Continue for more chunks
+    if ($total > 5*@max_buf_size) {
+      $size = $total > 6*@max_buf_size ? @max_buf_size : $total-5*@max_buf_size;
+      $data = buf(args->buf + 5*@max_buf_size, $size);
+      printf("%r", $data);
+    }
+
+    // Continue for more chunks
+    if ($total > 6*@max_buf_size) {
+      $size = $total > 7*@max_buf_size ? @max_buf_size : $total-6*@max_buf_size;
+      $data = buf(args->buf + 6*@max_buf_size, $size);
+      printf("%r", $data);
+    }
+
+    // Continue for more chunks
+    if ($total > 7*@max_buf_size) {
+      $size = $total > 8*@max_buf_size ? @max_buf_size : $total-7*@max_buf_size;
+      $data = buf(args->buf + 7*@max_buf_size, $size);
+      printf("%r", $data);
+    }
+
+    // Continue for more chunks
+    if ($total > 8*@max_buf_size) {
+      $size = $total > 9*@max_buf_size ? @max_buf_size : $total-8*@max_buf_size;
+      $data = buf(args->buf + 8*@max_buf_size, $size);
+      printf("%r", $data);
+    }
+
+    printf("\n");
+  }
+}
+
+END
+{
+  clear(@read_start);
+  clear(@read_fd);
+  clear(@read_buf);
+  clear(@max_buf_size);
+}
