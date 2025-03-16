@@ -2221,6 +2221,7 @@ int tomoyo_supervisor(struct tomoyo_request_info *r, const char *fmt, ...)
 	if (quota_exceeded)
 		goto out;
 	/* Give 10 seconds for supervisor's opinion. */
+	trace_printk("will now wait for supervisor's decision for 10s\n");
 	while (entry.timer < 10) {
 		wake_up_all(&tomoyo_query_wait);
 		if (wait_event_interruptible_timeout
@@ -2228,6 +2229,7 @@ int tomoyo_supervisor(struct tomoyo_request_info *r, const char *fmt, ...)
 		     !atomic_read(&tomoyo_query_observers), HZ))
 			break;
 		entry.timer++;
+		trace_printk("%d\n", entry.timer);
 	}
 	spin_lock(&tomoyo_query_list_lock);
 	list_del(&entry.list);
