@@ -5,7 +5,7 @@ cd $(dirname $0)
 memory=4G
 cpus=$(nproc)
 network=1
-no_9pfs=0
+fs_type=9pfs
 no_user_aslr=0
 no_virtio_serial=0
 
@@ -19,8 +19,11 @@ function show_help () {
     echo "  -m, --memory SIZE    Set the amount of memory for the VM (default: 2G)"
     echo "  -c, --cpus COUNT     Set the number of CPUs for the VM (default: 2)"
     echo "  -n, --no-network     Disable the network interface (default: no)"
-    echo "      --no-9pfs        Disable the 9pfs-based rootfs and use /dev/vda as root (default: no)"
-    echo "                       (rm .dev/vda.vhd to repopulate the disk image)"
+    echo "  -f, --fs TYPE        Which type of root filesystem to use. Available options:"
+    echo "                         9pfs (default)"
+    echo "                         virtiofs (Requires virtiofsd)"
+    echo "                         vhd (Uses .dev/vda.vhd)"
+    echo "                           (rm .dev/vda.vhd to repopulate the disk image)"
     echo "      --no-user-aslr   Disable user-space ASLR (default: no)"
     echo "      --no-virtio-serial"
     echo "                       Disable virtio-serial and use PCI serial instead (default: no)"
@@ -39,8 +42,22 @@ while [ "${1:-}" != '' ]; do
         -n | --no-network )
             network=0
             ;;
-        --no-9pfs )
-            no_9pfs=1
+        -f | --fs ) shift
+            case $1 in
+                9pfs )
+                    fs_type=9pfs
+                    ;;
+                virtiofs )
+                    fs_type=virtiofs
+                    ;;
+                vhd )
+                    fs_type=vhd
+                    ;;
+                * )
+                    echo "Unknown filesystem type $1"
+                    show_help
+                    ;;
+            esac
             ;;
         --no-user-aslr )
             no_user_aslr=1
@@ -130,8 +147,11 @@ if [[ $no_user_aslr == 1 ]]; then
     echo 'echo 0 > /proc/sys/kernel/randomize_va_space' >> "$ROOTFS_DIR/_runtime_init.sh"
 fi
 
-root_cmd="root=root rw rootfstype=9p rootflags=trans=virtio"
-if [[ $no_9pfs == 1 ]]; then
+if [[ $fs_type == "9pfs" ]]; then
+    root_cmd="root=root rw rootfstype=9p rootflags=trans=virtio"
+elif [[ $fs_type == "virtiofs" ]]; then
+    root_cmd="root=rootfs rw rootfstype=virtiofs"
+elif [[ $fs_type == "vhd" ]]; then
     root_cmd="root=/dev/vda rw"
 fi
 
@@ -159,9 +179,19 @@ qemuFlags=(
     "
 )
 
-if [[ $no_9pfs == 0 ]]; then
+if [[ $fs_type == "9pfs" ]]; then
     qemuFlags+=(
         -virtfs "local,path=$ROOTFS_DIR,mount_tag=root,security_model=passthrough,readonly=off"
+    )
+elif [[ $fs_type == "virtiofs" ]]; then
+    virtiofs_socket_path=$(mktemp -u /tmp/virtiosock-XXXXXXXXXXX)
+    sudo virtiofsd --socket-path="$virtiofs_socket_path" --shared-dir="$ROOTFS_DIR" --inode-file-handles=prefer &
+    virtiofsd_pid=$!
+    qemuFlags+=(
+        -chardev "socket,id=virtiofs,path=$virtiofs_socket_path"
+        -device "vhost-user-fs-pci,queue-size=1024,chardev=virtiofs,tag=rootfs"
+        -object "memory-backend-file,id=mem,size=$memory,mem-path=/dev/shm,share=on"
+        -numa "node,memdev=mem"
     )
 fi
 
@@ -203,5 +233,13 @@ qemuFlags+=(
     sudo chown $(id -u):$(id -g) $PWD/kgdb.sock
     sudo chown $(id -u):$(id -g) $PWD/.qemu.pid
 } &
+
+function exit_function {
+    if [[ $fs_type == "virtiofs" ]]; then
+        kill $virtiofsd_pid
+    fi
+}
+
+trap exit_function EXIT SIGINT SIGTERM
 
 sudo qemu-system-x86_64 "${qemuFlags[@]}"
