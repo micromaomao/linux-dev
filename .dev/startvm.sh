@@ -158,7 +158,7 @@ if [[ $no_user_aslr == 1 ]]; then
 fi
 
 if [[ $fs_type == "9pfs" ]]; then
-    root_cmd="root=root rw rootfstype=9p rootflags=trans=virtio"
+    root_cmd="root=root rw rootfstype=9p rootflags=trans=virtio,cache=loose"
 elif [[ $fs_type == "virtiofs" ]]; then
     root_cmd="root=rootfs rw rootfstype=virtiofs"
 elif [[ $fs_type == "vhd" ]]; then
@@ -270,6 +270,27 @@ function exit_function {
         kill $virtiofsd_pid
     fi
 }
+
+# qemuFlags+=(
+#     -virtfs "local,path=/tmp/linux-test,mount_tag=test,security_model=passthrough,readonly=off"
+# )
+# # mount -t 9p -o trans=virtio,debug=8 test /mnt/t
+
+qemuFlags+=(
+    -virtfs "local,path=/tmp/linux-test,mount_tag=test,security_model=passthrough,readonly=off"
+)
+# mount -t 9p -o trans=virtio,cache=loose test /mnt/linux
+
+# mount -t 9p -o trans=virtio,cache=none test /mnt/linux
+# env LL_FS_RO=/etc:/usr:/bin:/lib:/mnt/linux/linux/Makefile LL_FS_RW= /sandboxer bash
+# head /mnt/linux/linux/Makefile
+
+
+# qemuFlags+=(
+#     -chardev "socket,id=virtiofs-lt,path=/tmp/vhostqemu-lt"
+#     -device "vhost-user-fs-pci,queue-size=1024,chardev=virtiofs-lt,tag=test"
+# )
+# # mount -t virtiofs test /mnt/t
 
 trap exit_function EXIT SIGINT SIGTERM
 
