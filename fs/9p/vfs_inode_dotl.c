@@ -682,6 +682,9 @@ v9fs_stat2inode_dotl(struct p9_stat_dotl *stat, struct inode *inode,
 	 * because the inode structure does not have fields for them.
 	 */
 	v9inode->cache_validity &= ~V9FS_INO_INVALID_ATTR;
+
+	p9_debug(P9_DEBUG_VFS, "st generation %llu, qid->version = %u\n",
+		 stat->st_gen, stat->qid.version);
 }
 
 static int

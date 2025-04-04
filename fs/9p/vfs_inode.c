@@ -732,6 +732,9 @@ struct dentry *v9fs_vfs_lookup(struct inode *dir, struct dentry *dentry,
 	 */
 	name = dentry->d_name.name;
 	fid = p9_client_walk(dfid, 1, &name, 1);
+	if (fid && !IS_ERR(fid)) {
+		p9_debug(P9_DEBUG_VFS, "%pd -> qid->path %llu\n", dentry, fid->qid.path);
+	}
 	p9_fid_put(dfid);
 	if (fid == ERR_PTR(-ENOENT))
 		inode = NULL;
@@ -1404,4 +1407,3 @@ static const struct inode_operations v9fs_symlink_inode_operations = {
 	.getattr = v9fs_vfs_getattr,
 	.setattr = v9fs_vfs_setattr,
 };
-
