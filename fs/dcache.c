@@ -34,6 +34,7 @@
 #include <linux/list_lru.h>
 #include "internal.h"
 #include "mount.h"
+#include <linux/proc_fs.h>
 
 #include <asm/runtime-const.h>
 
@@ -3174,6 +3175,61 @@ static void __init dcache_init_early(void)
 	runtime_const_init(shift, d_hash_shift);
 	runtime_const_init(ptr, dentry_hashtable);
 }
+
+static int procfs_dump_dcache(struct seq_file *m, void *v)
+{
+	struct hlist_bl_head *dcache_ht = runtime_const_ptr(dentry_hashtable);
+	size_t dcache_entries = 1ull << (32 - d_hash_shift);
+	const char *fs_filter[] = {
+		"9p",
+		"ext4",
+		"virtiofs",
+		NULL
+	};
+
+	seq_printf(m, "Dentry cache hash table: %zu entries\n", dcache_entries);
+	seq_printf(m, "Dumping dcache for these filesystems: ");
+	for (int i = 0; fs_filter[i]; i++) {
+		if (i > 0)
+			seq_puts(m, ", ");
+		seq_puts(m, fs_filter[i]);
+	}
+	seq_puts(m, "\n");
+	rcu_read_lock();
+	for (size_t i = 0; i < dcache_entries; i++) {
+		struct hlist_bl_head *head = &dcache_ht[i];
+		struct hlist_bl_node *node;
+		struct dentry *dentry;
+
+		hlist_bl_for_each_entry_rcu(dentry, node, head, d_hash) {
+			bool found = false;
+			for (int j = 0; fs_filter[j]; j++) {
+				if (strcmp(dentry->d_sb->s_type->name, fs_filter[j]) == 0) {
+					found = true;
+					break;
+				}
+			}
+			if (!found)
+				continue;
+			seq_printf(m, "  %p: ", dentry);
+			seq_dentry(m, dentry, " \t\n\\");
+			if (d_is_negative(dentry))
+				seq_puts(m, " (negative)");
+			if (d_unhashed(dentry))
+				seq_puts(m, " (unhashed)");
+			seq_puts(m, "\n");
+		}
+	}
+	rcu_read_unlock();
+	return 0;
+}
+
+static int __init init_proc_dump_dcache(void)
+{
+	proc_create_single("dump_dcache", 0, NULL, procfs_dump_dcache);
+	return 0;
+}
+fs_initcall(init_proc_dump_dcache);
 
 static void __init dcache_init(void)
 {
