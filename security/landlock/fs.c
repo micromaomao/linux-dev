@@ -9,6 +9,8 @@
  * Copyright © 2023-2024 Google LLC
  */
 
+// #define DEBUG
+
 #include <asm/ioctls.h>
 #include <kunit/test.h>
 #include <linux/atomic.h>
