@@ -363,22 +363,28 @@ void v9fs_evict_inode(struct inode *inode)
 		clear_inode(inode);
 }
 
+struct iget_data {
+	struct p9_wstat *st;
+
+	/* May be NULL */
+	struct dentry *dentry;
+};
+
 static int v9fs_test_inode(struct inode *inode, void *data)
 {
 	int umode;
 	dev_t rdev;
 	struct v9fs_inode *v9inode = V9FS_I(inode);
-	struct p9_wstat *st = (struct p9_wstat *)data;
+	struct p9_wstat *st = ((struct iget_data *)data)->st;
+	struct dentry *dentry = ((struct iget_data *)data)->dentry;
 	struct v9fs_session_info *v9ses = v9fs_inode2v9ses(inode);
+	bool cached = v9ses->cache & (CACHE_META | CACHE_LOOSE);
 
 	umode = p9mode2unixmode(v9ses, st, &rdev);
-	/* don't match inode of different type */
+	/*
+	 * Don't reuse inode of different type, even if path matches.
+	 */
 	if (inode_wrong_type(inode, umode))
-		return 0;
-
-	/* compare qid details */
-	if (memcmp(&v9inode->qid.version,
-		   &st->qid.version, sizeof(v9inode->qid.version)))
 		return 0;
 
 	if (v9inode->qid.type != st->qid.type)
@@ -386,6 +392,32 @@ static int v9fs_test_inode(struct inode *inode, void *data)
 
 	if (v9inode->qid.path != st->qid.path)
 		return 0;
+
+	if (cached) {
+		/*
+		 * Server side changes are not supposed to happen in cached mode.
+		 * If we fail this version comparison on the inode, we don't reuse
+		 * it.
+		 */
+		if (memcmp(&v9inode->qid.version,
+			&st->qid.version, sizeof(v9inode->qid.version)))
+			return 0;
+	}
+
+	if (v9fs_inode_ident_path(v9ses) && dentry) {
+		if (v9inode->path) {
+			if (!ino_path_compare(v9inode->path, dentry)) {
+				p9_debug(
+					P9_DEBUG_VFS,
+					"Refusing to reuse inode %p based on path mismatch",
+					inode);
+				return 0;
+			}
+		} else {
+			WARN_ON_ONCE(1);
+		}
+	}
+
 	return 1;
 }
 
@@ -394,33 +426,55 @@ static int v9fs_test_new_inode(struct inode *inode, void *data)
 	return 0;
 }
 
-static int v9fs_set_inode(struct inode *inode,  void *data)
+static int v9fs_set_inode(struct inode *inode, void *data)
 {
 	struct v9fs_inode *v9inode = V9FS_I(inode);
-	struct p9_wstat *st = (struct p9_wstat *)data;
+	struct iget_data *idata = data;
+	struct p9_wstat *st = idata->st;
 
 	memcpy(&v9inode->qid, &st->qid, sizeof(st->qid));
+	/*
+	 * We can't fill v9inode->path here, because allocating an ino_path
+	 * means that we might sleep, and we can't sleep here.
+	 */
+	v9inode->path = NULL;
 	return 0;
 }
 
-static struct inode *v9fs_qid_iget(struct super_block *sb,
-				   struct p9_qid *qid,
-				   struct p9_wstat *st,
+static struct inode *v9fs_qid_iget(struct super_block *sb, struct p9_qid *qid,
+				   struct p9_wstat *st, struct dentry *dentry,
 				   int new)
 {
 	dev_t rdev;
 	int retval;
 	umode_t umode;
 	struct inode *inode;
+	struct v9fs_inode *v9inode;
 	struct v9fs_session_info *v9ses = sb->s_fs_info;
 	int (*test)(struct inode *inode, void *data);
+	struct iget_data data = {
+		.st = st,
+		.dentry = dentry,
+	};
 
 	if (new)
 		test = v9fs_test_new_inode;
 	else
 		test = v9fs_test_inode;
 
-	inode = iget5_locked(sb, QID2INO(qid), test, v9fs_set_inode, st);
+	if (dentry) {
+		/*
+		 * If we need to compare paths to find the inode to reuse, we need
+		 * to take the rename_sem for this FS.  We need to take it here,
+		 * instead of inside ino_path_compare, as iget5_locked has
+		 * spinlock in it (inode_hash_lock)
+		 */
+		down_read(&v9ses->rename_sem);
+	}
+	inode = iget5_locked(sb, QID2INO(qid), test, v9fs_set_inode, &data);
+	if (dentry)
+		up_read(&v9ses->rename_sem);
+
 	if (!inode)
 		return ERR_PTR(-ENOMEM);
 	if (!(inode->i_state & I_NEW))
@@ -436,6 +490,16 @@ static struct inode *v9fs_qid_iget(struct super_block *sb,
 	if (retval)
 		goto error;
 
+	v9inode = V9FS_I(inode);
+	if (dentry) {
+		down_read(&v9ses->rename_sem);
+		v9inode->path = make_ino_path(dentry);
+		up_read(&v9ses->rename_sem);
+		if (!v9inode->path) {
+			retval = -ENOMEM;
+			goto error;
+		}
+	}
 	v9fs_stat2inode(st, inode, sb, 0);
 	v9fs_set_netfs_context(inode);
 	v9fs_cache_inode_get_cookie(inode);
@@ -447,9 +511,18 @@ error:
 
 }
 
-struct inode *
-v9fs_inode_from_fid(struct v9fs_session_info *v9ses, struct p9_fid *fid,
-		    struct super_block *sb, int new)
+/**
+ * Issues a getattr request and use the result to look up the inode for
+ * the target pointed to by @fid.
+ * @v9ses: session information
+ * @fid: fid to issue attribute request for
+ * @sb: superblock on which to create inode
+ * @dentry: if not NULL, the path of the provided dentry is compared
+ * against the path stored in the inode, to determine reuse eligibility.
+ */
+struct inode *v9fs_inode_from_fid(struct v9fs_session_info *v9ses,
+				  struct p9_fid *fid, struct super_block *sb,
+				  struct dentry *dentry, int new)
 {
 	struct p9_wstat *st;
 	struct inode *inode = NULL;
@@ -458,7 +531,7 @@ v9fs_inode_from_fid(struct v9fs_session_info *v9ses, struct p9_fid *fid,
 	if (IS_ERR(st))
 		return ERR_CAST(st);
 
-	inode = v9fs_qid_iget(sb, &st->qid, st, new);
+	inode = v9fs_qid_iget(sb, &st->qid, st, dentry, new);
 	p9stat_free(st);
 	kfree(st);
 	return inode;
@@ -607,18 +680,14 @@ v9fs_create(struct v9fs_session_info *v9ses, struct inode *dir,
 				   "p9_client_walk failed %d\n", err);
 			goto error;
 		}
-		/*
-		 * Instantiate inode.  On .L fs, pass in dentry for inodeident=path.
-		 */
-		inode = v9fs_get_new_inode_from_fid(v9ses, fid, dir->i_sb,
-			v9fs_proto_dotl(v9ses) ? dentry : NULL);
+		/* instantiate inode and assign the unopened fid to the dentry */
+		inode = v9fs_get_new_inode_from_fid(v9ses, fid, dir->i_sb, dentry);
 		if (IS_ERR(inode)) {
 			err = PTR_ERR(inode);
 			p9_debug(P9_DEBUG_VFS,
 				   "inode creation failed %d\n", err);
 			goto error;
 		}
-		/* Assign the unopened fid to the dentry */
 		v9fs_fid_add(dentry, &fid);
 		d_instantiate(dentry, inode);
 	}
@@ -1414,4 +1483,3 @@ static const struct inode_operations v9fs_symlink_inode_operations = {
 	.getattr = v9fs_vfs_getattr,
 	.setattr = v9fs_vfs_setattr,
 };
-
