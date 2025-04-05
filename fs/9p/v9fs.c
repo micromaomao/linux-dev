@@ -36,7 +36,7 @@ enum {
 	/* Options that take integer arguments */
 	Opt_debug, Opt_dfltuid, Opt_dfltgid, Opt_afid,
 	/* String options */
-	Opt_uname, Opt_remotename, Opt_cache, Opt_cachetag,
+	Opt_uname, Opt_remotename, Opt_cache, Opt_cachetag, Opt_inodeident,
 	/* Options that take no arguments */
 	Opt_nodevmap, Opt_noxattr, Opt_directio, Opt_ignoreqv,
 	/* Access options */
@@ -63,6 +63,7 @@ static const match_table_t tokens = {
 	{Opt_access, "access=%s"},
 	{Opt_posixacl, "posixacl"},
 	{Opt_locktimeout, "locktimeout=%u"},
+	{Opt_inodeident, "inodeident=%s"},
 	{Opt_err, NULL}
 };
 
@@ -148,6 +149,15 @@ int v9fs_show_options(struct seq_file *m, struct dentry *root)
 
 	if (v9ses->flags & V9FS_NO_XATTR)
 		seq_puts(m, ",noxattr");
+
+	switch (v9ses->flags & V9FS_INODE_IDENT_MASK) {
+	case 0:
+		seq_puts(m, ",inodeident=none");
+		break;
+	case V9FS_INODE_IDENT_PATH:
+		seq_puts(m, ",inodeident=path");
+		break;
+	}
 
 	return p9_show_client_options(m, v9ses->clnt);
 }
@@ -369,6 +379,25 @@ static int v9fs_parse_options(struct v9fs_session_info *v9ses, char *opts)
 			v9ses->session_lock_timeout = (long)option * HZ;
 			break;
 
+		case Opt_inodeident:
+			s = match_strdup(&args[0]);
+			if (!s) {
+				ret = -ENOMEM;
+				p9_debug(P9_DEBUG_ERROR,
+					 "problem allocating copy of inodeident arg\n");
+				goto free_and_return;
+			}
+			if (strcmp(s, "none") == 0) {
+				v9ses->flags &= ~V9FS_INODE_IDENT_MASK;
+			} else if (strcmp(s, "path") == 0) {
+				v9ses->flags |= V9FS_INODE_IDENT_PATH;
+			} else {
+				ret = -EINVAL;
+				p9_debug(P9_DEBUG_ERROR, "Unknown inodeident argument %s\n", s);
+			}
+			kfree(s);
+			break;
+
 		default:
 			continue;
 		}
@@ -422,6 +451,8 @@ struct p9_fid *v9fs_session_init(struct v9fs_session_info *v9ses,
 	} else if (p9_is_proto_dotu(v9ses->clnt)) {
 		v9ses->flags |= V9FS_PROTO_2000U;
 	}
+
+	v9ses->flags |= V9FS_INODE_IDENT_PATH;
 
 	rc = v9fs_parse_options(v9ses, data);
 	if (rc < 0)
