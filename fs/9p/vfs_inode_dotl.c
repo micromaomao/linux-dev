@@ -52,10 +52,17 @@ static kgid_t v9fs_get_fsgid_for_create(struct inode *dir_inode)
 	return current_fsgid();
 }
 
+struct iget_data {
+	struct p9_stat_dotl *st;
+	struct dentry *dentry;
+};
+
 static int v9fs_test_inode_dotl(struct inode *inode, void *data)
 {
 	struct v9fs_inode *v9inode = V9FS_I(inode);
-	struct p9_stat_dotl *st = (struct p9_stat_dotl *)data;
+	struct p9_stat_dotl *st = ((struct iget_data *)data)->st;
+	struct dentry *dentry = ((struct iget_data *)data)->dentry;
+	struct v9fs_session_info *v9ses = v9fs_inode2v9ses(inode);
 
 	/* don't match inode of different type */
 	if (inode_wrong_type(inode, st->st_mode))
@@ -74,22 +81,74 @@ static int v9fs_test_inode_dotl(struct inode *inode, void *data)
 
 	if (v9inode->qid.path != st->qid.path)
 		return 0;
+
+	if (v9fs_inode_ident_path(v9ses)) {
+		if (!ino_path_compare(v9inode->path, dentry)) {
+			p9_debug(P9_DEBUG_VFS, "Refusing to reuse inode %p based on path mismatch",
+				 inode);
+			return 0;
+		}
+	}
 	return 1;
 }
 
 /* Always get a new inode */
 static int v9fs_test_new_inode_dotl(struct inode *inode, void *data)
 {
+	struct v9fs_inode *v9inode = V9FS_I(inode);
+	struct p9_stat_dotl *st = ((struct iget_data *)data)->st;
+	struct dentry *dentry = ((struct iget_data *)data)->dentry;
+	struct v9fs_session_info *v9ses = v9fs_inode2v9ses(inode);
+
+	/*
+	 * Don't reuse inode of different type, even if we have
+	 * inodeident=path and path matches.
+	 */
+	if (inode_wrong_type(inode, st->st_mode))
+		return 0;
+
+	/*
+	 * We're only getting here if QID2INO stays the same anyway, so
+	 * mirroring the qid checks in v9fs_test_inode_dotl
+	 * (but maybe that check is unnecessary anyway? at least on 64bit)
+	 */
+
+	if (v9inode->qid.type != st->qid.type)
+		return 0;
+
+	if (v9inode->qid.path != st->qid.path)
+		return 0;
+
+	if (v9fs_inode_ident_path(v9ses) && dentry && v9inode->path) {
+		if (ino_path_compare(V9FS_I(inode)->path, dentry)) {
+			p9_debug(P9_DEBUG_VFS,
+				 "Reusing inode %p based on path match", inode);
+			return 1;
+		}
+	}
+
 	return 0;
 }
 
 static int v9fs_set_inode_dotl(struct inode *inode,  void *data)
 {
 	struct v9fs_inode *v9inode = V9FS_I(inode);
-	struct p9_stat_dotl *st = (struct p9_stat_dotl *)data;
+	struct v9fs_session_info *v9ses = v9fs_inode2v9ses(inode);
+	struct iget_data *idata = data;
+	struct p9_stat_dotl *st = idata->st;
+	struct dentry *dentry = idata->dentry;
 
 	memcpy(&v9inode->qid, &st->qid, sizeof(st->qid));
 	inode->i_generation = st->st_gen;
+	if (v9fs_inode_ident_path(v9ses)) {
+		if (dentry) {
+			v9inode->path = make_ino_path(dentry);
+			if (!v9inode->path)
+				return -ENOMEM;
+		} else {
+			v9inode->path = NULL;
+		}
+	}
 	return 0;
 }
 
@@ -97,19 +156,35 @@ static struct inode *v9fs_qid_iget_dotl(struct super_block *sb,
 					struct p9_qid *qid,
 					struct p9_fid *fid,
 					struct p9_stat_dotl *st,
+					struct dentry *dentry,
 					int new)
 {
 	int retval;
 	struct inode *inode;
 	struct v9fs_session_info *v9ses = sb->s_fs_info;
 	int (*test)(struct inode *inode, void *data);
+	struct iget_data data = {
+		.st = st,
+		.dentry = dentry,
+	};
+
 
 	if (new)
 		test = v9fs_test_new_inode_dotl;
 	else
 		test = v9fs_test_inode_dotl;
 
-	inode = iget5_locked(sb, QID2INO(qid), test, v9fs_set_inode_dotl, st);
+	if (v9fs_inode_ident_path(v9ses) && dentry) {
+		/*
+		 * We have to take the rename_sem lock here as iget5_locked has
+		 * spinlock in it (inode_hash_lock)
+		 */
+		down_read(&v9ses->rename_sem);
+	}
+	inode = iget5_locked(sb, QID2INO(qid), test, v9fs_set_inode_dotl, &data);
+	if (v9fs_inode_ident_path(v9ses) && dentry)
+		up_read(&v9ses->rename_sem);
+
 	if (!inode)
 		return ERR_PTR(-ENOMEM);
 	if (!(inode->i_state & I_NEW))
@@ -142,7 +217,7 @@ error:
 
 struct inode *
 v9fs_inode_from_fid_dotl(struct v9fs_session_info *v9ses, struct p9_fid *fid,
-			 struct super_block *sb, int new)
+			 struct super_block *sb, struct dentry *dentry, int new)
 {
 	struct p9_stat_dotl *st;
 	struct inode *inode = NULL;
@@ -151,7 +226,7 @@ v9fs_inode_from_fid_dotl(struct v9fs_session_info *v9ses, struct p9_fid *fid,
 	if (IS_ERR(st))
 		return ERR_CAST(st);
 
-	inode = v9fs_qid_iget_dotl(sb, &st->qid, fid, st, new);
+	inode = v9fs_qid_iget_dotl(sb, &st->qid, fid, st, dentry, new);
 	kfree(st);
 	return inode;
 }
@@ -305,7 +380,7 @@ v9fs_vfs_atomic_open_dotl(struct inode *dir, struct dentry *dentry,
 		p9_debug(P9_DEBUG_VFS, "p9_client_walk failed %d\n", err);
 		goto out;
 	}
-	inode = v9fs_get_new_inode_from_fid(v9ses, fid, dir->i_sb);
+	inode = v9fs_get_new_inode_from_fid(v9ses, fid, dir->i_sb, dentry);
 	if (IS_ERR(inode)) {
 		err = PTR_ERR(inode);
 		p9_debug(P9_DEBUG_VFS, "inode creation failed %d\n", err);
@@ -400,7 +475,7 @@ static int v9fs_vfs_mkdir_dotl(struct mnt_idmap *idmap,
 	}
 
 	/* instantiate inode and assign the unopened fid to the dentry */
-	inode = v9fs_get_new_inode_from_fid(v9ses, fid, dir->i_sb);
+	inode = v9fs_get_new_inode_from_fid(v9ses, fid, dir->i_sb, dentry);
 	if (IS_ERR(inode)) {
 		err = PTR_ERR(inode);
 		p9_debug(P9_DEBUG_VFS, "inode creation failed %d\n",
@@ -838,7 +913,7 @@ v9fs_vfs_mknod_dotl(struct mnt_idmap *idmap, struct inode *dir,
 			 err);
 		goto error;
 	}
-	inode = v9fs_get_new_inode_from_fid(v9ses, fid, dir->i_sb);
+	inode = v9fs_get_new_inode_from_fid(v9ses, fid, dir->i_sb, dentry);
 	if (IS_ERR(inode)) {
 		err = PTR_ERR(inode);
 		p9_debug(P9_DEBUG_VFS, "inode creation failed %d\n",

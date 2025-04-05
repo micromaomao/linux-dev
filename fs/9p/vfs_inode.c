@@ -243,6 +243,7 @@ struct inode *v9fs_alloc_inode(struct super_block *sb)
 
 void v9fs_free_inode(struct inode *inode)
 {
+	free_ino_path(V9FS_I(inode)->path);
 	kmem_cache_free(v9fs_inode_cache, V9FS_I(inode));
 }
 
@@ -607,15 +608,17 @@ v9fs_create(struct v9fs_session_info *v9ses, struct inode *dir,
 			goto error;
 		}
 		/*
-		 * instantiate inode and assign the unopened fid to the dentry
+		 * Instantiate inode.  On .L fs, pass in dentry for inodeident=path.
 		 */
-		inode = v9fs_get_new_inode_from_fid(v9ses, fid, dir->i_sb);
+		inode = v9fs_get_new_inode_from_fid(v9ses, fid, dir->i_sb,
+			v9fs_proto_dotl(v9ses) ? dentry : NULL);
 		if (IS_ERR(inode)) {
 			err = PTR_ERR(inode);
 			p9_debug(P9_DEBUG_VFS,
 				   "inode creation failed %d\n", err);
 			goto error;
 		}
+		/* Assign the unopened fid to the dentry */
 		v9fs_fid_add(dentry, &fid);
 		d_instantiate(dentry, inode);
 	}
@@ -733,14 +736,21 @@ struct dentry *v9fs_vfs_lookup(struct inode *dir, struct dentry *dentry,
 	name = dentry->d_name.name;
 	fid = p9_client_walk(dfid, 1, &name, 1);
 	p9_fid_put(dfid);
+
+	/*
+	 * On .L fs, pass in dentry to v9fs_get_inode_from_fid in case it is
+	 * needed by inodeident=path
+	 */
 	if (fid == ERR_PTR(-ENOENT))
 		inode = NULL;
 	else if (IS_ERR(fid))
 		inode = ERR_CAST(fid);
-	else if (v9ses->cache & (CACHE_META|CACHE_LOOSE))
-		inode = v9fs_get_inode_from_fid(v9ses, fid, dir->i_sb);
+	else if (v9ses->cache & (CACHE_META | CACHE_LOOSE))
+		inode = v9fs_get_inode_from_fid(v9ses, fid, dir->i_sb,
+			v9fs_proto_dotl(v9ses) ? dentry : NULL);
 	else
-		inode = v9fs_get_new_inode_from_fid(v9ses, fid, dir->i_sb);
+		inode = v9fs_get_new_inode_from_fid(v9ses, fid, dir->i_sb,
+			v9fs_proto_dotl(v9ses) ? dentry : NULL);
 	/*
 	 * If we had a rename on the server and a parallel lookup
 	 * for the new name, then make sure we instantiate with

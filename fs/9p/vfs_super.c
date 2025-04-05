@@ -139,7 +139,7 @@ static struct dentry *v9fs_mount(struct file_system_type *fs_type, int flags,
 	else
 		sb->s_d_op = &v9fs_dentry_operations;
 
-	inode = v9fs_get_new_inode_from_fid(v9ses, fid, sb);
+	inode = v9fs_get_new_inode_from_fid(v9ses, fid, sb, NULL);
 	if (IS_ERR(inode)) {
 		retval = PTR_ERR(inode);
 		goto release_sb;
@@ -151,6 +151,14 @@ static struct dentry *v9fs_mount(struct file_system_type *fs_type, int flags,
 		goto release_sb;
 	}
 	sb->s_root = root;
+
+	if (v9fs_inode_ident_path(v9ses)) {
+		/* Probably not necessary, just to satisfy lockdep_assert */
+		down_read(&v9ses->rename_sem);
+		V9FS_I(inode)->path = make_ino_path(root);
+		up_read(&v9ses->rename_sem);
+	}
+
 	retval = v9fs_get_acl(inode, fid);
 	if (retval)
 		goto release_sb;
