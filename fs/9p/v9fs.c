@@ -155,7 +155,7 @@ int v9fs_show_options(struct seq_file *m, struct dentry *root)
 		seq_puts(m, ",inodeident=none");
 		break;
 	case V9FS_INODE_IDENT_PATH:
-		seq_puts(m, ",inodeident=path");
+		/* default */
 		break;
 	}
 
