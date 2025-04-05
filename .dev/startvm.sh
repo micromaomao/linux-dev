@@ -163,7 +163,7 @@ if [[ $no_user_aslr == 1 ]]; then
 fi
 
 if [[ $fs_type == "9pfs" ]]; then
-    root_cmd="root=root rw rootfstype=9p rootflags=trans=virtio,cache=loose"
+    root_cmd="root=root rw rootfstype=9p rootflags=trans=virtio,cache=none,inodeident=path"
 elif [[ $fs_type == "virtiofs" ]]; then
     root_cmd="root=rootfs rw rootfstype=virtiofs"
 elif [[ $fs_type == "vhd" ]]; then
