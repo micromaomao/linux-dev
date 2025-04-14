@@ -13,6 +13,13 @@ struct ick_checked_process {
 };
 
 /**
+ * Called from page fault handler to copy off page content before allowing
+ * it to be modified.  Returns zero on success, and any of the bits in
+ * VM_FAULT_ERROR on failure.
+ */
+vm_fault_t ick_do_wp_page(struct vm_fault *vmf);
+
+/**
  * Initialize the ick data structures on the current task and checkpoint it.
  */
 int ick_checkpoint_proc(void);

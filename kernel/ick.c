@@ -51,6 +51,22 @@ static void mark_pages(void) {
 	mmap_write_unlock(mm);
 }
 
+vm_fault_t ick_do_wp_page(struct vm_fault *vmf) {
+	unsigned long page_addr = vmf->address;
+	struct task_struct *task = current;
+	struct ick_checked_process *ick_data = task->ick_data;
+
+	BUG_ON(!ick_data);
+	BUG_ON(!(vmf->flags & FAULT_FLAG_WRITE));
+
+	trace_printk("CoWing page 0x%px following wp fault at offset 0x%x\n",
+					(void *)page_addr, (int)(vmf->real_address - page_addr));
+
+	/* TODO */
+
+	return 0;
+}
+
 int ick_checkpoint_proc(void) {
 	struct ick_checked_process *ick_data;
 	struct pt_regs *regs;
