@@ -12,6 +12,7 @@ struct ick_checked_process {
 	struct pt_regs saved_regs;
 	struct rb_root modified_pages_tree;
 	struct spinlock tree_lock;
+	bool reverting;
 };
 
 struct ick_modified_page {

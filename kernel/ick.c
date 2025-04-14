@@ -64,6 +64,15 @@ vm_fault_t ick_do_wp_page(struct vm_fault *vmf) {
 	BUG_ON(!ick_data);
 	BUG_ON(!(vmf->flags & FAULT_FLAG_WRITE));
 
+	if (READ_ONCE(ick_data->reverting)) {
+		/*
+		 * Don't handle a write page fault that is itself caused by ick
+		 * reverting pages
+		 */
+		trace_printk("ick->reverting = 1, skipping\n");
+		return 0;
+	}
+
 	trace_printk("CoWing page 0x%px following wp fault at offset 0x%x\n",
 					(void *)page_addr, (int)(vmf->real_address - page_addr));
 
@@ -145,6 +154,10 @@ int ick_checkpoint_proc(void) {
 int ick_revert_proc(void) {
 	struct ick_checked_process *ick_data;
 	struct pt_regs *regs;
+	struct ick_modified_page *mod_page;
+	struct rb_node *node;
+	unsigned long addr;
+	int ret = 0;
 
 	ick_data = current->ick_data;
 	if (!ick_data) {
@@ -161,7 +174,25 @@ int ick_revert_proc(void) {
 #error "Unsupported architecture"
 #endif
 
-	// TODO: implement rest
+	spin_lock(&ick_data->tree_lock);
+	WRITE_ONCE(ick_data->reverting, true);
+	/* Do it in address space order for better cache locality when copying */
+	for (node = rb_first(&ick_data->modified_pages_tree); node;
+				node = rb_next(node)) {
+		mod_page = rb_entry(node, struct ick_modified_page, node);
+		addr = mod_page->addr;
+		u8 *orig_page_content = mod_page->orig_page_content;
+		trace_printk("Restoring CoW'd page at 0x%px\n", (void*)addr);
+		ret = copy_to_user_nofault((void *)addr, orig_page_content, PAGE_SIZE);
+		if (ret) {
+			pr_alert("ick: Failed to copy page content for 0x%px back: %pe\n", (void*)addr, ERR_PTR(ret));
+			spin_unlock(&ick_data->tree_lock);
+			WRITE_ONCE(ick_data->reverting, false);
+			return ret;
+		}
+	}
+	WRITE_ONCE(ick_data->reverting, false);
+	spin_unlock(&ick_data->tree_lock);
 
 	trace_printk("Restored process %s[%d]\n",
 			current->comm, current->pid);
