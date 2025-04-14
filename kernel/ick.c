@@ -218,6 +218,11 @@ int ick_revert_proc(void)
 {
 	struct ick_checked_process *ick_data;
 	struct pt_regs *regs;
+	struct ick_modified_page *mod_page;
+	struct rb_node *node;
+	unsigned long addr;
+	int ret = 0;
+	u8 *orig_page_content;
 
 	ick_data = current->ick_data;
 	if (!ick_data) {
@@ -234,8 +239,22 @@ int ick_revert_proc(void)
 #error "Unsupported architecture"
 #endif
 
-	print_modified_page_tree(&ick_data->modified_pages_tree);
-	/* TODO: implement rest */
+	spin_lock(&ick_data->tree_lock);
+	/* Do it in address space order for better cache locality when copying */
+	for (node = rb_first(&ick_data->modified_pages_tree); node;
+				node = rb_next(node)) {
+		mod_page = rb_entry(node, struct ick_modified_page, node);
+		addr = mod_page->addr;
+		orig_page_content = mod_page->orig_page_content;
+		trace_printk("Restoring CoW'd page at 0x%px\n", (void *)addr);
+		ret = copy_to_user_nofault((void *)addr, orig_page_content, PAGE_SIZE);
+		if (ret) {
+			pr_alert("ick: Failed to copy page content for 0x%px back\n", (void *)addr);
+			spin_unlock(&ick_data->tree_lock);
+			return -EFAULT;
+		}
+	}
+	spin_unlock(&ick_data->tree_lock);
 
 	trace_printk("Restored process %s[%d]\n",
 			current->comm, current->pid);
