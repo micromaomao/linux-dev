@@ -790,8 +790,7 @@ ssize_t ksys_write(unsigned int fd, const char __user *buf, size_t count)
 				return ret;
 			}
 
-			/* Hmm... what do we do now? Let's just return for now. */
-			return count;
+			return restart_syscall();
 		} else {
 			pr_info("hack: %u gave different output\n", current->hack_target.next_number - 1);
 			/*
