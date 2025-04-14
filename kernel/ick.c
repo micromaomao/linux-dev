@@ -56,6 +56,28 @@ static void mark_pages(void)
 }
 
 /**
+ * Called from page fault handler to copy off page content before allowing
+ * it to be modified.  Returns zero on success, and any of the bits in
+ * VM_FAULT_ERROR on failure.
+ */
+vm_fault_t ick_do_wp_page(struct vm_fault *vmf)
+{
+	unsigned long page_addr = vmf->address;
+	struct task_struct *task = current;
+	struct ick_checked_process *ick_data = task->ick_data;
+
+	BUG_ON(!ick_data);
+	BUG_ON(!(vmf->flags & FAULT_FLAG_WRITE));
+
+	trace_printk("CoWing page 0x%px following wp fault at offset 0x%x\n",
+					(void *)page_addr, (int)(vmf->real_address - page_addr));
+
+	/* TODO */
+
+	return 0;
+}
+
+/**
  * Initialize the ick data structures on the current task and checkpoint it.
  */
 int ick_checkpoint_proc(void)

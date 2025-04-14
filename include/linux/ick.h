@@ -5,6 +5,7 @@
 
 #include <linux/types.h>
 #include <linux/sched.h>
+#include <linux/mm_types.h>
 
 #ifdef CONFIG_ICK
 
@@ -12,6 +13,8 @@ struct ick_checked_process {
 	struct pt_regs saved_regs;
 	/* ... more to come ... */
 };
+
+vm_fault_t ick_do_wp_page(struct vm_fault *vmf);
 
 int ick_checkpoint_proc(void);
 int ick_revert_proc(void);
