@@ -2,10 +2,14 @@
 
 cd $(dirname $0)
 
-memory=2G
-cpus=2
+memory=4G
+cpus=$(nproc)
+nopreempt=0
 network=1
+fs_type=9pfs
 no_user_aslr=0
+no_virtio_serial=0
+tmux=0
 
 exec_args=""
 
@@ -17,7 +21,16 @@ function show_help () {
     echo "  -m, --memory SIZE    Set the amount of memory for the VM (default: 2G)"
     echo "  -c, --cpus COUNT     Set the number of CPUs for the VM (default: 2)"
     echo "  -n, --no-network     Disable the network interface (default: no)"
+    echo "  -t                   Enable tty mode on the serial console and run tmux"
+    echo "  -f, --fs TYPE        Which type of root filesystem to use. Available options:"
+    echo "                         9pfs (default)"
+    echo "                         virtiofs (Requires virtiofsd)"
+    echo "                         vhd (Uses .dev/vda.vhd)"
+    echo "                           (rm .dev/vda.vhd to repopulate the disk image)"
     echo "      --no-user-aslr   Disable user-space ASLR (default: no)"
+    echo "      --no-virtio-serial"
+    echo "                       Disable virtio-serial and use PCI serial instead (default: no)"
+    echo "      --no-preempt     Disable preemption (default: no)"
     echo ""
     exit 1
 }
@@ -33,8 +46,34 @@ while [ "${1:-}" != '' ]; do
         -n | --no-network )
             network=0
             ;;
+        -t )
+            tmux=1
+            ;;
+        -f | --fs ) shift
+            case $1 in
+                9pfs )
+                    fs_type=9pfs
+                    ;;
+                virtiofs )
+                    fs_type=virtiofs
+                    ;;
+                vhd )
+                    fs_type=vhd
+                    ;;
+                * )
+                    echo "Unknown filesystem type $1"
+                    show_help
+                    ;;
+            esac
+            ;;
         --no-user-aslr )
             no_user_aslr=1
+            ;;
+        --no-virtio-serial )
+            no_virtio_serial=1
+            ;;
+        --no-preempt )
+            nopreempt=1
             ;;
         -h | --help )
             show_help
@@ -87,6 +126,14 @@ if [ ! -e "$ROOTFS_DIR/bin" ]; then
     sudo rm "$ROOTFS_DIR"/.dockerenv
     sudo bash -c "cat /etc/resolv.conf > '$ROOTFS_DIR/etc/resolv.conf'"
 fi
+
+termsize=(`stty size`)
+termheight=${termsize[0]}
+termwidth=${termsize[1]}
+sudo touch "$ROOTFS_DIR/_runtime_init.sh"
+sudo chown $(id -u):$(id -g) "$ROOTFS_DIR/_runtime_init.sh"
+echo "stty rows $termheight cols $termwidth" > "$ROOTFS_DIR/_runtime_init.sh"
+
 DISK=vda.vhd
 if [ ! -e "$DISK" ]; then
     touch "$DISK"
@@ -98,17 +145,42 @@ if [ ! -e "$DISK" ]; then
         rm "$DISK"
         exit 1
     fi
+    sudo mkdir -p tmp_mnt
+    sudo mount -o loop "$DISK" tmp_mnt
+    sudo cp -ax "$ROOTFS_DIR/." tmp_mnt
+    sudo umount tmp_mnt
+    sudo rmdir tmp_mnt
+    sudo chown $(id -u):$(id -g) "$DISK"
 fi
-
-termsize=(`stty size`)
-termheight=${termsize[0]}
-termwidth=${termsize[1]}
-sudo touch "$ROOTFS_DIR/_runtime_init.sh"
-sudo chown $(id -u):$(id -g) "$ROOTFS_DIR/_runtime_init.sh"
-echo "stty rows $termheight cols $termwidth" > "$ROOTFS_DIR/_runtime_init.sh"
 
 if [[ $no_user_aslr == 1 ]]; then
     echo 'echo 0 > /proc/sys/kernel/randomize_va_space' >> "$ROOTFS_DIR/_runtime_init.sh"
+fi
+
+if [[ $fs_type == "9pfs" ]]; then
+    root_cmd="root=root rw rootfstype=9p rootflags=trans=virtio"
+elif [[ $fs_type == "virtiofs" ]]; then
+    root_cmd="root=rootfs rw rootfstype=virtiofs"
+elif [[ $fs_type == "vhd" ]]; then
+    root_cmd="root=/dev/vda rw"
+fi
+
+if [[ $no_virtio_serial == 0 ]]; then
+    console_cmd="console=hvc0 kgdboc=hvc1"
+else
+    console_cmd="console=ttyS0,115200 kgdboc=ttyS1,115200"
+fi
+
+if [[ $tmux == 1 ]]; then
+    if [[ $exec_args == "" ]]; then
+        exec_args="/bin/fish"
+    fi
+    exec_args="tmux -2 new '$exec_args'"
+fi
+
+preempt_cmd=""
+if [[ $nopreempt == 1 ]]; then
+    preempt_cmd="preempt=none"
 fi
 
 qemuFlags=(
@@ -120,15 +192,31 @@ qemuFlags=(
 
     -kernel ../vmlinux
     -append "\
-        root=root rw rootfstype=9p rootflags=trans=virtio \
-        console=ttyS0,115200 kgdboc=ttyS1,115200 \
-        nokaslr no_hash_pointers loglevel=7 \
+        $preempt_cmd \
+        $root_cmd \
+        earlycon $console_cmd \
+        nokaslr no_hash_pointers loglevel=8 \
+        trace_clock=local \
         init=/init.sh - \
         $exec_args
     "
-
-    -virtfs "local,path=$ROOTFS_DIR,mount_tag=root,security_model=passthrough,readonly=off"
 )
+
+if [[ $fs_type == "9pfs" ]]; then
+    qemuFlags+=(
+        -virtfs "local,path=$ROOTFS_DIR,mount_tag=root,security_model=passthrough,readonly=off"
+    )
+elif [[ $fs_type == "virtiofs" ]]; then
+    virtiofs_socket_path=$(mktemp -u /tmp/virtiosock-XXXXXXXXXXX)
+    sudo virtiofsd --socket-path="$virtiofs_socket_path" --shared-dir="$ROOTFS_DIR" --inode-file-handles=prefer &
+    virtiofsd_pid=$!
+    qemuFlags+=(
+        -chardev "socket,id=virtiofs,path=$virtiofs_socket_path"
+        -device "vhost-user-fs-pci,queue-size=1024,chardev=virtiofs,tag=rootfs"
+        -object "memory-backend-file,id=mem,size=$memory,mem-path=/dev/shm,share=on"
+        -numa "node,memdev=mem"
+    )
+fi
 
 if [[ $network == 1 ]]; then
     qemuFlags+=(
@@ -137,12 +225,31 @@ if [[ $network == 1 ]]; then
     )
 fi
 
-qemuFlags+=(
-    -chardev "stdio,id=stdio,signal=off"
-    -device "pci-serial,chardev=stdio"
+if [[ $no_virtio_serial == 0 ]]; then
+    qemuFlags+=(
+        -device "virtio-serial-pci,id=virtio-serial0"
+        -device "virtconsole,chardev=stdio"
+        -device "virtconsole,chardev=kgdb"
+    )
+else
+    qemuFlags+=(
+        -device "pci-serial,chardev=stdio"
+        -device "pci-serial,chardev=kgdb"
+    )
+fi
 
+if [[ $tmux == 1 ]]; then
+    qemuFlags+=(
+        -chardev "stdio,id=stdio,signal=off"
+    )
+else
+    qemuFlags+=(
+        -chardev "stdio,id=stdio,signal=on"
+    )
+fi
+
+qemuFlags+=(
     -chardev "socket,path=$PWD/kgdb.sock,server=on,wait=off,id=kgdb"
-    -device "pci-serial,chardev=kgdb"
 
     -drive "file=$DISK,format=raw,if=virtio"
 
@@ -157,5 +264,13 @@ qemuFlags+=(
     sudo chown $(id -u):$(id -g) $PWD/kgdb.sock
     sudo chown $(id -u):$(id -g) $PWD/.qemu.pid
 } &
+
+function exit_function {
+    if [[ $fs_type == "virtiofs" ]]; then
+        kill $virtiofsd_pid
+    fi
+}
+
+trap exit_function EXIT SIGINT SIGTERM
 
 sudo qemu-system-x86_64 "${qemuFlags[@]}"
