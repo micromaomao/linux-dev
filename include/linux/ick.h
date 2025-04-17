@@ -11,7 +11,18 @@
 
 struct ick_checked_process {
 	struct pt_regs saved_regs;
-	/* ... more to come ... */
+	struct rb_root modified_pages_tree;
+	spinlock_t tree_lock;
+};
+
+struct ick_modified_page {
+	unsigned long addr;
+	struct rb_node node;
+	/*
+	 * Don't include a whole page of data here, otherwise this struct will be just
+	 * a bit over PAGE_SIZE, which makes memory allocation inefficient.
+	 */
+	u8 *orig_page_content;
 };
 
 vm_fault_t ick_do_wp_page(struct vm_fault *vmf);
