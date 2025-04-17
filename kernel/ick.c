@@ -4,6 +4,7 @@
 #include <linux/errno.h>
 #include <linux/ptrace.h>
 #include <linux/sched/task_stack.h>
+#include <linux/vmalloc.h>
 #include <asm/tlb.h>
 
 /* Mark pages as write-protected */
@@ -65,6 +66,11 @@ vm_fault_t ick_do_wp_page(struct vm_fault *vmf)
 	unsigned long page_addr = vmf->address;
 	struct task_struct *task = current;
 	struct ick_checked_process *ick_data = task->ick_data;
+	struct ick_modified_page *mod_page, *new_mod_page __free(kfree) = NULL;
+	u8 *copied_page_content __free(kfree) = NULL;
+	struct rb_node **new;
+	struct rb_node *parent = NULL;
+	long ret;
 
 	BUG_ON(!ick_data);
 	BUG_ON(!(vmf->flags & FAULT_FLAG_WRITE));
@@ -72,7 +78,53 @@ vm_fault_t ick_do_wp_page(struct vm_fault *vmf)
 	trace_printk("CoWing page 0x%px following wp fault at offset 0x%x\n",
 					(void *)page_addr, (int)(vmf->real_address - page_addr));
 
-	/* TODO */
+	/*
+	 * We will pretty much always need these, so do the allocations now,
+	 * outside of the spinlock
+	 */
+	copied_page_content = kmalloc(PAGE_SIZE, GFP_KERNEL_ACCOUNT);
+	new_mod_page = kmalloc(sizeof(*mod_page), GFP_KERNEL_ACCOUNT);
+
+	if (!copied_page_content || !new_mod_page) {
+		return VM_FAULT_OOM;
+	}
+
+	spin_lock(&ick_data->tree_lock);
+	new = &ick_data->modified_pages_tree.rb_node;
+	while (*new) {
+		parent = *new;
+		mod_page = rb_entry(parent, struct ick_modified_page, node);
+
+		if (page_addr < mod_page->addr)
+			new = &parent->rb_left;
+		else if (page_addr > mod_page->addr)
+			new = &parent->rb_right;
+		else {
+			/* Page already in tree, so it's already copied before. Ignore. */
+			trace_printk("Already in tree page 0x%px hti wp fault again\n", (void *)page_addr);
+			spin_unlock(&ick_data->tree_lock);
+			return 0;
+		}
+	}
+
+	ret = copy_from_user_nofault(copied_page_content, (void *)page_addr, PAGE_SIZE);
+	if (ret) {
+		pr_alert("ick: Failed to copy page 0x%px following wp fault\n", (void *)page_addr);
+		spin_unlock(&ick_data->tree_lock);
+		return VM_FAULT_SIGBUS;
+	}
+
+	mod_page = new_mod_page;
+	mod_page->addr = page_addr;
+	mod_page->orig_page_content = copied_page_content;
+	rb_link_node(&mod_page->node, parent, new);
+	rb_insert_color(&mod_page->node, &ick_data->modified_pages_tree);
+
+	/* Don't free these anymore */
+	new_mod_page = NULL;
+	copied_page_content = NULL;
+
+	spin_unlock(&ick_data->tree_lock);
 
 	return 0;
 }
