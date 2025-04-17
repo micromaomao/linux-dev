@@ -5,11 +5,21 @@
 
 #include <linux/types.h>
 #include <linux/sched.h>
+#include <linux/mm_types.h>
 
 #ifdef CONFIG_ICK
 struct ick_checked_process {
 	struct pt_regs saved_regs;
-	// ... more to come ...
+	struct rb_root modified_pages_tree;
+	struct spinlock tree_lock;
+};
+
+struct ick_modified_page {
+	unsigned long addr;
+	struct rb_node node;
+	// Don't include a whole page of data here, otherwise this struct will be just
+	// a bit over PAGE_SIZE, which makes memory allocation inefficient
+	u8 *orig_page_content;
 };
 
 /**
