@@ -165,6 +165,52 @@ int ick_checkpoint_proc(void)
 	return 0;
 }
 
+static void print_modified_page_tree(struct rb_root *root)
+{
+	struct rb_node *node;
+	struct ick_modified_page *mod_page;
+	u8 *current_page_content __free(kfree) = kmalloc(PAGE_SIZE, GFP_KERNEL);
+	u8 *orig_page_content;
+	int ret;
+
+	if (WARN_ON(!current_page_content))
+		return;
+
+	if (!root)
+		return;
+
+	trace_printk("Modified pages:\n");
+	for (node = rb_first(root); node; node = rb_next(node)) {
+		int diff_start_byte = -1;
+		int diff_n_bytes = 0;
+
+		mod_page = rb_entry(node, struct ick_modified_page, node);
+		ret = copy_from_user_nofault(
+			current_page_content,
+			(const void __user *)mod_page->addr, PAGE_SIZE);
+		if (WARN_ON(ret)) {
+			return;
+		}
+		orig_page_content = mod_page->orig_page_content;
+		for (int i = 0; i < PAGE_SIZE; i++) {
+			if (diff_start_byte >= 0) {
+				if (current_page_content[i] != orig_page_content[i])
+					diff_n_bytes = i - diff_start_byte + 1;
+			} else if (current_page_content[i] != orig_page_content[i]) {
+				diff_start_byte = i;
+				diff_n_bytes = 1;
+			}
+		}
+		if (diff_start_byte != -1) {
+			trace_printk(
+				"Page 0x%016lx: change starting at offset 0x%03x for %d bytes\n",
+				mod_page->addr, diff_start_byte, diff_n_bytes);
+		} else {
+			trace_printk("Page 0x%016lx: no changes\n", mod_page->addr);
+		}
+	}
+}
+
 /**
  * Revert the current task to the state checkpointed by ick_checkpoint_proc.
  */
@@ -188,6 +234,7 @@ int ick_revert_proc(void)
 #error "Unsupported architecture"
 #endif
 
+	print_modified_page_tree(&ick_data->modified_pages_tree);
 	/* TODO: implement rest */
 
 	trace_printk("Restored process %s[%d]\n",
