@@ -167,6 +167,15 @@ static __always_inline long syscall_enter_from_user_mode_work(struct pt_regs *re
 	if (work & SYSCALL_WORK_ENTER)
 		syscall = syscall_trace_enter(regs, syscall, work);
 
+	if (unlikely(current->ick_data)) {
+		if (syscall != __NR_read && syscall != __NR_write && syscall != __NR_exit_group) {
+			pr_err("ick checkpointed process %s[%d] tried to call syscall %ld - blocked\n",
+			       current->comm, current->pid, syscall);
+			regs->ax = -EPERM;
+			return -1L;
+		}
+	}
+
 	return syscall;
 }
 
