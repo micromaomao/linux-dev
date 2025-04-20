@@ -75,6 +75,15 @@ vm_fault_t ick_do_wp_page(struct vm_fault *vmf)
 	BUG_ON(!ick_data);
 	BUG_ON(!(vmf->flags & FAULT_FLAG_WRITE));
 
+	if (READ_ONCE(ick_data->reverting)) {
+		/*
+		 * Don't handle a write page fault that is itself caused by ick
+		 * reverting pages
+		 */
+		trace_printk("ick->reverting = 1, skipping\n");
+		return 0;
+	}
+
 	trace_printk("CoWing page 0x%px following wp fault at offset 0x%x\n",
 					(void *)page_addr, (int)(vmf->real_address - page_addr));
 
@@ -240,6 +249,7 @@ int ick_revert_proc(void)
 #endif
 
 	spin_lock(&ick_data->tree_lock);
+	WRITE_ONCE(ick_data->reverting, true);
 	/* Do it in address space order for better cache locality when copying */
 	for (node = rb_first(&ick_data->modified_pages_tree); node;
 				node = rb_next(node)) {
@@ -247,13 +257,15 @@ int ick_revert_proc(void)
 		addr = mod_page->addr;
 		orig_page_content = mod_page->orig_page_content;
 		trace_printk("Restoring CoW'd page at 0x%px\n", (void *)addr);
-		ret = copy_to_user_nofault((void *)addr, orig_page_content, PAGE_SIZE);
+		ret = copy_to_user((void *)addr, orig_page_content, PAGE_SIZE);
 		if (ret) {
 			pr_alert("ick: Failed to copy page content for 0x%px back\n", (void *)addr);
 			spin_unlock(&ick_data->tree_lock);
+			WRITE_ONCE(ick_data->reverting, false);
 			return -EFAULT;
 		}
 	}
+	WRITE_ONCE(ick_data->reverting, false);
 	spin_unlock(&ick_data->tree_lock);
 
 	trace_printk("Restored process %s[%d]\n",
