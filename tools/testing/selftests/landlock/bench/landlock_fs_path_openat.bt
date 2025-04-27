@@ -1,0 +1,31 @@
+#define CPU_MIN 8
+
+kfunc:path_openat /cpu >= CPU_MIN && !@path_openat_start_time[tid]/
+{
+	@path_openat_start_time[tid] = nsecs;
+	@hook_open_duration[tid] = (uint64) 0;
+}
+
+kfunc:hook_file_open /cpu >= CPU_MIN && @path_openat_start_time[tid]/
+{
+	@hook_open_start_time[tid] = nsecs;
+}
+
+kretfunc:hook_file_open /cpu >= CPU_MIN && @hook_open_start_time[tid]/
+{
+	$duration = nsecs - @hook_open_start_time[tid];
+	@hook_open_duration[tid] += $duration;
+	delete(@hook_open_start_time[tid]);
+}
+
+kretfunc:path_openat /cpu >= CPU_MIN && @path_openat_start_time[tid]/
+{
+	$duration_path_openat = nsecs - @path_openat_start_time[tid];
+	$duration_hook_file_open = @hook_open_duration[tid];
+	@latency["hook_file_open"] = lhist($duration_hook_file_open, 250, 2000, 100);
+	@latency["path_openat"] = lhist($duration_path_openat, 250, 2000, 100);
+	$overhead_percent = ($duration_hook_file_open * 100) / $duration_path_openat;
+	@landlock_overhead["hook_file_open"] = lhist($overhead_percent, 0, 100, 10);
+	delete(@path_openat_start_time[tid]);
+	delete(@hook_open_duration[tid]);
+}
