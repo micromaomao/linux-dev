@@ -1,0 +1,80 @@
+#!/usr/bin/env bpftrace
+/**
+`* SPDX-License-Identifier: GPL-2.0
+ *
+ * Copyright © 2025 Tingmao Wang <m@maowtm.org>
+ *
+ * Usage: ./landlock_overhead.bt <target_cpu>
+ */
+
+#define TARGET_CPU $1
+
+t:syscalls:sys_enter_open, t:syscalls:sys_enter_openat, t:syscalls:sys_enter_openat2 /cpu == TARGET_CPU && !@open_syscall_start_time[tid]/
+{
+	@open_syscall_start_time[tid] = nsecs;
+}
+
+kfunc:hook_file_open /cpu == TARGET_CPU && @open_syscall_start_time[tid]/
+{
+	@hook_open_start_time[tid] = nsecs;
+}
+
+kretfunc:hook_file_open /cpu == TARGET_CPU && @open_syscall_start_time[tid] && @hook_open_start_time[tid]/
+{
+	$duration = nsecs - @hook_open_start_time[tid];
+	@hook_open_duration[tid] += $duration;
+	delete(@hook_open_start_time[tid]);
+}
+
+t:syscalls:sys_exit_open, t:syscalls:sys_exit_openat, t:syscalls:sys_exit_openat2 /cpu == TARGET_CPU && @open_syscall_start_time[tid]/
+{
+	if (@hook_open_duration[tid] == 0) {
+		@nb_not_landlocked_opens[comm] = count();
+		delete(@open_syscall_start_time[tid]);
+		return;
+	}
+
+	$duration_open_syscall = nsecs - @open_syscall_start_time[tid];
+	$duration_hook_file_open = @hook_open_duration[tid];
+
+	@latency_landlock_hook = lhist($duration_hook_file_open, 0, 2000, 50);
+	@latency_landlock_hook_min = min($duration_hook_file_open);
+	@latency_landlock_hook_max = max($duration_hook_file_open);
+	@latency_landlock_hook_avg = avg($duration_hook_file_open);
+	@latency_open_syscall = lhist($duration_open_syscall, 3000, 8000, 250);
+	@latency_open_syscall_min = min($duration_open_syscall);
+	@latency_open_syscall_max = max($duration_open_syscall);
+	@latency_open_syscall_avg = avg($duration_open_syscall);
+
+	$overhead_percent = ($duration_hook_file_open * 100) / $duration_open_syscall;
+	@landlock_hook_overhead = lhist($overhead_percent, 0, 100, 5);
+	@landlock_hook_overhead_min = min($overhead_percent);
+	@landlock_hook_overhead_max = max($overhead_percent);
+	@landlock_hook_overhead_avg = avg($overhead_percent);
+
+	delete(@open_syscall_start_time[tid]);
+	delete(@hook_open_duration[tid]);
+}
+
+END {
+	for ($kv : @nb_not_landlocked_opens) {
+		if ($kv.1 > 10) {
+			printf("WARN: %s had %d opens that did not call landlock hook\n", $kv.0, (int32)$kv.1);
+		}
+	}
+
+	printf("=> landlock hook took average %d ns (%d ns min, %d ns max)\n", (int32)@latency_landlock_hook_avg, (int32)@latency_landlock_hook_min, (int32)@latency_landlock_hook_max);
+	clear(@latency_landlock_hook_avg);
+	clear(@latency_landlock_hook_min);
+	clear(@latency_landlock_hook_max);
+	printf("=> open syscall took average %d ns (%d ns min, %d ns max)\n", (int32)@latency_open_syscall_avg, (int32)@latency_open_syscall_min, (int32)@latency_open_syscall_max);
+	clear(@latency_open_syscall_avg);
+	clear(@latency_open_syscall_min);
+	clear(@latency_open_syscall_max);
+	printf("=> landlock hook overhead (percent) average is %d (%d min, %d max)\n", (int32)@landlock_hook_overhead_avg, (int32)@landlock_hook_overhead_min, (int32)@landlock_hook_overhead_max);
+	clear(@landlock_hook_overhead_avg);
+	clear(@landlock_hook_overhead_min);
+	clear(@landlock_hook_overhead_max);
+
+	clear(@nb_not_landlocked_opens);
+}
