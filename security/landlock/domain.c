@@ -5,6 +5,7 @@
  * Copyright © 2016-2020 Mickaël Salaün <mic@digikod.net>
  * Copyright © 2018-2020 ANSSI
  * Copyright © 2024-2025 Microsoft Corporation
+ * Copyright © 2025      Tingmao Wang <m@maowtm.org>
  */
 
 #include <kunit/test.h>
@@ -23,6 +24,41 @@
 #include "common.h"
 #include "domain.h"
 #include "id.h"
+
+struct landlock_domain *landlock_alloc_domain(size_t num_inode_entries,
+					      u16 num_layers)
+{
+	struct landlock_domain *new_domain =
+		kzalloc(sizeof(struct landlock_domain), GFP_KERNEL_ACCOUNT);
+
+	if (!new_domain)
+		return NULL;
+	refcount_set(&new_domain->usage, 1);
+	new_domain->num_layers = num_layers;
+	if (landlock_hash_init(num_inode_entries, &new_domain->inode_table)) {
+		kfree(new_domain);
+		return NULL;
+	}
+
+	return new_domain;
+}
+
+static void free_domain(struct landlock_domain *const domain)
+{
+	might_sleep();
+
+	landlock_hash_free(&domain->inode_table, LANDLOCK_KEY_INODE);
+	kfree(domain);
+}
+
+void landlock_put_domain(struct landlock_domain *const domain)
+{
+	might_sleep();
+
+	if (domain && refcount_dec_and_test(&domain->usage)) {
+		free_domain(domain);
+	}
+}
 
 #ifdef CONFIG_AUDIT
 
