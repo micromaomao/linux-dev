@@ -200,6 +200,83 @@ void landlock_put_ruleset_deferred(struct landlock_ruleset *const ruleset);
 DEFINE_FREE(landlock_put_ruleset, struct landlock_ruleset *,
 	    if (!IS_ERR_OR_NULL(_T)) landlock_put_ruleset(_T))
 
+static void build_check_rule(void)
+{
+	const struct landlock_rule rule = {
+		.num_layers = ~0,
+	};
+
+	BUILD_BUG_ON(rule.num_layers < LANDLOCK_MAX_NUM_LAYERS);
+}
+
+static bool is_object_pointer(const enum landlock_key_type key_type)
+{
+	switch (key_type) {
+	case LANDLOCK_KEY_INODE:
+		return true;
+
+#if IS_ENABLED(CONFIG_INET)
+	case LANDLOCK_KEY_NET_PORT:
+		return false;
+#endif /* IS_ENABLED(CONFIG_INET) */
+
+	default:
+		WARN_ON_ONCE(1);
+		return false;
+	}
+}
+
+static inline struct landlock_rule *
+landlock_create_rule(const struct landlock_id id,
+		     const struct landlock_layer (*const layers)[],
+		     const u32 num_layers,
+		     const struct landlock_layer *const new_layer)
+{
+	struct landlock_rule *new_rule;
+	u32 new_num_layers;
+
+	build_check_rule();
+	if (new_layer) {
+		/* Should already be checked by landlock_merge_ruleset(). */
+		if (WARN_ON_ONCE(num_layers >= LANDLOCK_MAX_NUM_LAYERS))
+			return ERR_PTR(-E2BIG);
+		new_num_layers = num_layers + 1;
+	} else {
+		new_num_layers = num_layers;
+	}
+	new_rule = kzalloc(struct_size(new_rule, layers, new_num_layers),
+			   GFP_KERNEL_ACCOUNT);
+	if (!new_rule)
+		return ERR_PTR(-ENOMEM);
+	RB_CLEAR_NODE(&new_rule->node);
+	if (is_object_pointer(id.type)) {
+		/* This should have been caught by insert_rule(). */
+		WARN_ON_ONCE(!id.key.object);
+		landlock_get_object(id.key.object);
+	}
+
+	new_rule->key = id.key;
+	new_rule->num_layers = new_num_layers;
+	/* Copies the original layer stack. */
+	memcpy(new_rule->layers, layers,
+	       flex_array_size(new_rule, layers, num_layers));
+	if (new_layer)
+		/* Adds a copy of @new_layer on the layer stack. */
+		new_rule->layers[new_rule->num_layers - 1] = *new_layer;
+	return new_rule;
+}
+
+static inline void free_rule(struct landlock_rule *const rule,
+			     const enum landlock_key_type key_type)
+{
+	might_sleep();
+	if (!rule)
+		return;
+	if (is_object_pointer(key_type))
+		landlock_put_object(rule->key.object);
+	kfree(rule);
+}
+
 int landlock_insert_rule(struct landlock_ruleset *const ruleset,
 			 const struct landlock_id id,
 			 const access_mask_t access);
