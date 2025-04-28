@@ -5,6 +5,7 @@
  * Copyright © 2016-2020 Mickaël Salaün <mic@digikod.net>
  * Copyright © 2018-2020 ANSSI
  * Copyright © 2024-2025 Microsoft Corporation
+ * Copyright © 2025      Tingmao Wang <m@maowtm.org>
  */
 
 #ifndef _SECURITY_LANDLOCK_DOMAIN_H
@@ -20,6 +21,32 @@
 
 #include "access.h"
 #include "audit.h"
+#include "hash.h"
+
+struct landlock_domain {
+	struct landlock_hashtable inode_table;
+
+	/**
+	 * @usage: Reference count for this struct.
+	 */
+	refcount_t usage;
+
+	/**
+	 * @num_layers: Number of layers in this domain.
+	 */
+	u16 num_layers;
+};
+
+struct landlock_domain *landlock_alloc_domain(size_t num_inode_entries,
+					      u16 num_layers);
+
+static inline void landlock_get_domain(struct landlock_domain *const domain)
+{
+	if (domain)
+		refcount_inc(&domain->usage);
+}
+
+void landlock_put_domain(struct landlock_domain *const domain);
 
 enum landlock_log_status {
 	LANDLOCK_LOG_PENDING = 0,
