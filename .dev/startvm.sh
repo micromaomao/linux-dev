@@ -135,18 +135,6 @@ sudo chown $(id -u):$(id -g) "$ROOTFS_DIR/_runtime_init.sh"
 echo "stty rows $termheight cols $termwidth" > "$ROOTFS_DIR/_runtime_init.sh"
 
 DISK=vda.vhd
-if [ ! -e "$DISK" ]; then
-    touch "$DISK"
-    truncate -s 10G "$DISK"
-    # on some distributions, this is in /usr/sbin even though it technically doesn't require root
-    export PATH=$PATH:/usr/sbin
-    if ! sudo mkfs.ext4 -d "$ROOTFS_DIR" -F "$DISK"; then
-        echo "Failed to mkfs.ext4 $DISK"
-        rm "$DISK"
-        exit 1
-    fi
-    sudo chown $(id -u):$(id -g) "$DISK"
-fi
 
 if [[ $no_user_aslr == 1 ]]; then
     echo 'echo 0 > /proc/sys/kernel/randomize_va_space' >> "$ROOTFS_DIR/_runtime_init.sh"
@@ -267,6 +255,19 @@ qemuFlags+=(
     -pidfile .qemu.pid
     -gdb tcp:127.0.0.1:1234
 )
+
+if [ ! -e "$DISK" ]; then
+    touch "$DISK"
+    truncate -s 10G "$DISK"
+    # on some distributions, this is in /usr/sbin even though it technically doesn't require root
+    export PATH=$PATH:/usr/sbin
+    if ! sudo mkfs.ext4 -d "$ROOTFS_DIR" -F "$DISK"; then
+        echo "Failed to mkfs.ext4 $DISK"
+        rm "$DISK"
+        exit 1
+    fi
+    sudo chown $(id -u):$(id -g) "$DISK"
+fi
 
 {
     sleep 1;
