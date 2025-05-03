@@ -201,18 +201,20 @@ elif [[ $fs_type == "virtiofs" ]]; then
     qemuFlags+=(
         -chardev "socket,id=virtiofs,path=$virtiofs_socket_path"
         -device "vhost-user-fs-pci,queue-size=1024,chardev=virtiofs,tag=rootfs"
-        -object "memory-backend-file,id=mem,size=$memory,mem-path=/dev/shm,share=on"
-        -numa "node,memdev=mem"
     )
+fi
 
+if [[ $fs_type != "9pfs" ]]; then
     linuxsrc_virtiofs_socket_path=$(mktemp -u /tmp/virtiosock-XXXXXXXXXXX)
     sudo virtiofsd --socket-path="$linuxsrc_virtiofs_socket_path" --shared-dir="$LINUX_SOURCE_DIR" --inode-file-handles=prefer &
     linuxsrc_virtiofsd_pid=$!
     qemuFlags+=(
         -chardev "socket,id=linuxsrc_virtiofs,path=$linuxsrc_virtiofs_socket_path"
         -device "vhost-user-fs-pci,queue-size=1024,chardev=linuxsrc_virtiofs,tag=linuxsrc"
+        -object "memory-backend-file,id=mem,size=$memory,mem-path=/dev/shm,share=on"
+        -numa "node,memdev=mem"
     )
-    echo "mount -t virtiofs linuxsrc /linux" >> "$ROOTFS_DIR/_runtime_init.sh"
+    echo "mount --mkdir -t virtiofs linuxsrc /linux" >> "$ROOTFS_DIR/_runtime_init.sh"
 fi
 
 if [[ $network == 1 ]]; then
