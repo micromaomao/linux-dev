@@ -387,6 +387,7 @@ landlock_get_scope_mask(const struct landlock_ruleset *const ruleset,
 }
 
 bool landlock_unmask_layers(const struct landlock_ruleset *const domain,
+			    const struct landlock_domain *const domain2,
 			    const struct landlock_rule_ref ref,
 			    const access_mask_t access_request,
 			    layer_mask_t (*const layer_masks)[],

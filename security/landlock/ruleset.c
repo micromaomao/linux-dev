@@ -539,6 +539,7 @@ find_rule(const struct landlock_ruleset *const ruleset,
  * request are empty).
  */
 bool landlock_unmask_layers(const struct landlock_ruleset *const domain,
+				const struct landlock_domain *const domain2,
 			    const struct landlock_rule_ref ref,
 			    const access_mask_t access_request,
 			    layer_mask_t (*const layer_masks)[],
@@ -550,7 +551,10 @@ bool landlock_unmask_layers(const struct landlock_ruleset *const domain,
 	if (!access_request || !layer_masks)
 		return true;
 
-	rule = find_rule(domain, ref);
+	if (ref.type == LANDLOCK_KEY_INODE)
+		rule = landlock_hash_find(&domain2->inode_table, ref.key);
+	else
+		rule = find_rule(domain, ref);
 	if (!rule)
 		return false;
 
