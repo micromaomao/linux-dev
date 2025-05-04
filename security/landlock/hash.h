@@ -13,6 +13,8 @@
 
 #include "ruleset.h"
 
+#define LANDLOCK_HASH_LINEAR_THRESHOLD 4
+
 struct landlock_hashtable {
 	struct hlist_head *hlist;
 
@@ -37,7 +39,11 @@ static inline int landlock_hash_init(const size_t expected_num_entries,
 	size_t table_sz = 1;
 	int hash_bits = 0;
 
-	if (likely(expected_num_entries > 0)) {
+	/*
+	 * For small tables, we just have one slot, essentially making lookups
+	 * a linear search.  Doing a hash for small tables is not worth it.
+	 */
+	if (expected_num_entries > LANDLOCK_HASH_LINEAR_THRESHOLD) {
 		table_sz = roundup_pow_of_two(expected_num_entries);
 		hash_bits = fls_long(table_sz - 1);
 	}
@@ -81,6 +87,10 @@ static inline void landlock_hash_free(struct landlock_hashtable *ht,
 static inline u32 landlock_hash_key(const union landlock_key key,
 				    const int hash_bits)
 {
+	if (hash_bits == 0) {
+		return 0;
+	}
+
 	return hash_ptr((void *)key.data, hash_bits);
 }
 
