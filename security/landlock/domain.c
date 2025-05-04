@@ -160,6 +160,11 @@ landlock_merge_ruleset2(const struct landlock_domain *curr_domain,
 		return ERR_PTR(err);
 	}
 
+#ifdef DEBUG
+	pr_debug("landlock_merge_ruleset2: inode hash table:\n");
+	landlock_hash_debug_print(&new_domain->inode_table, LANDLOCK_KEY_INODE);
+#endif /* DEBUG */
+
 	return new_domain;
 }
 
