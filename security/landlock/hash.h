@@ -229,4 +229,66 @@ static inline int landlock_hash_upsert(struct landlock_hashtable *const ht,
 	return 0;
 }
 
+static inline void
+landlock_hash_debug_print(const struct landlock_hashtable *ht,
+			  const enum landlock_key_type key_type)
+{
+	size_t max_hlist_len = 0, slot_index = 0, num_rules = 0;
+
+	for (slot_index = 0; slot_index < (1ULL << ht->hash_bits);
+	     slot_index += 1) {
+		struct hlist_head *head = &ht->hlist[slot_index];
+		struct landlock_rule *rule;
+		size_t rule_index = 0;
+		spinlock_t *lock;
+
+		pr_debug("  [%zu]: first = %p\n", slot_index, head->first);
+
+		hlist_for_each_entry(rule, head, hlist) {
+			size_t j;
+
+			switch (key_type) {
+			case LANDLOCK_KEY_INODE:
+				lock = &rule->key.object->lock;
+				spin_lock(lock);
+				struct inode *inode =
+					((struct inode *)
+						 rule->key.object->underobj);
+				if (inode) {
+					pr_debug(
+						"    [%zu] rule: ino %lu (%p), %d layers\n",
+						rule_index, inode->i_ino, inode,
+						rule->num_layers);
+				} else {
+					pr_debug(
+						"    [%zu] rule: inode released, %d layers\n",
+						rule_index, rule->num_layers);
+				}
+				spin_unlock(lock);
+				break;
+			case LANDLOCK_KEY_NET_PORT:
+				pr_debug(
+					"    [%zu] rule: port %lu, %d layers\n",
+					rule_index, rule->key.data,
+					rule->num_layers);
+				break;
+			}
+			for (j = 0; j < rule->num_layers; j++) {
+				pr_debug("      layer %u: access %x\n",
+					 rule->layers[j].level,
+					 rule->layers[j].access);
+			}
+			rule_index += 1;
+			num_rules += 1;
+		}
+
+		if (rule_index > max_hlist_len)
+			max_hlist_len = rule_index;
+	}
+
+	pr_debug("  summary: %zu rules, %llu hash slots, "
+		 "%zu max hlist chain len\n",
+		 num_rules, (1ULL << ht->hash_bits), max_hlist_len);
+}
+
 #endif /* _SECURITY_LANDLOCK_HASH_H */
