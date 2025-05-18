@@ -10,6 +10,7 @@
 
 #include <linux/slab.h>
 #include <linux/hash.h>
+#include <linux/rculist.h>
 
 #include "ruleset.h"
 
@@ -125,3 +126,107 @@ static inline size_t landlock_hash_count(const struct landlock_hashtable *ht)
 	}
 	return num_entries;
 }
+
+/**
+ * @landlock_hash_insert - Insert a rule in the hashtable, taking
+ * ownership of the passed in struct landlock_rule. This function assumes
+ * that the rule is already in the hash table.
+ */
+static inline void landlock_hash_insert(const struct landlock_hashtable *ht,
+					struct landlock_rule *const new_rule)
+{
+	struct hlist_head *head =
+		&ht->hlist[landlock_hash_key(new_rule->key, ht->hash_bits)];
+
+	hlist_add_head(&new_rule->hlist, head);
+}
+
+static inline int
+landlock_hash_clone(struct landlock_hashtable *const dst,
+		    const struct landlock_hashtable *const src,
+		    const enum landlock_key_type key_type)
+{
+	struct landlock_rule *curr_rule, *new_rule;
+	struct landlock_id id = {
+		.type = key_type,
+	};
+	size_t i;
+
+	landlock_hash_for_each(curr_rule, src, i)
+	{
+		id.key = curr_rule->key;
+		new_rule = landlock_create_rule(id, &curr_rule->layers,
+						curr_rule->num_layers, NULL);
+
+		if (IS_ERR(new_rule)) {
+			return PTR_ERR(new_rule);
+		}
+
+		/*
+		 * new_rule->hlist is invalid, but should still be safe to pass to
+		 * hlist_add_head().
+		 */
+		landlock_hash_insert(dst, new_rule);
+	}
+
+	return 0;
+}
+
+/**
+ * @landlock_hash_upsert - Either insert a new rule with the new layer in
+ * the hashtable, or update an existing one, adding the new layer.
+ *
+ * Hash table must have at least one slot.  This function doesn't take any
+ * locks - it's only valid to call this on a newly created (not yet
+ * committed to creds) domain.
+ *
+ * May error with -ENOMEM.
+ */
+static inline int landlock_hash_upsert(struct landlock_hashtable *const ht,
+				       union landlock_key key,
+				       const enum landlock_key_type key_type,
+				       struct landlock_layer new_layer)
+{
+	size_t index = landlock_hash_key(key, ht->hash_bits);
+	struct hlist_head *head = &ht->hlist[index];
+	struct landlock_rule *curr_rule, *new_rule;
+	const struct landlock_id id = {
+		.type = key_type,
+		.key = key,
+	};
+
+	hlist_for_each_entry(curr_rule, head, hlist) {
+		if (curr_rule->key.data != key.data)
+			continue;
+
+		new_rule = landlock_create_rule(id, &curr_rule->layers,
+						curr_rule->num_layers,
+						&new_layer);
+		if (IS_ERR(new_rule))
+			return PTR_ERR(new_rule);
+
+		/*
+		 * Replace curr_rule with new_rule in place within the hlist
+		 * We don't really care about RCU... but there's no "hlist_replace"
+		 * We should be safe to call hlist_replace_rcu() without first
+		 * initializing new_rule->hlist
+		 */
+		hlist_replace_rcu(&curr_rule->hlist, &new_rule->hlist);
+		free_rule(curr_rule, key_type);
+		return 0;
+	}
+
+	/* No existing rules found, insert new one. */
+	new_rule = landlock_create_rule(id, NULL, 0, &new_layer);
+	if (IS_ERR(new_rule))
+		return PTR_ERR(new_rule);
+
+	/*
+	 * new_rule->hlist is invalid, but should still be safe to pass to
+	 * hlist_add_head().
+	 */
+	hlist_add_head(&new_rule->hlist, head);
+	return 0;
+}
+
+#endif /* _SECURITY_LANDLOCK_HASH_H */

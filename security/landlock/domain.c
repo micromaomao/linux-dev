@@ -77,6 +77,93 @@ void landlock_put_domain_deferred(struct landlock_domain *const domain)
 	}
 }
 
+/**
+ * @curr_table may be NULL.
+ */
+static int merge_domain_table(const enum landlock_key_type key_type,
+			      const struct landlock_hashtable *const curr_table,
+			      struct landlock_hashtable *const new_table,
+			      struct landlock_layer new_layer,
+			      const struct rb_root *ruleset_rb_root)
+{
+	int err;
+	struct landlock_rule *iter, *iter2;
+
+	if (curr_table) {
+		err = landlock_hash_clone(new_table, curr_table, key_type);
+		if (err) {
+			return err;
+		}
+	}
+
+	/* Merge in new rules */
+	rbtree_postorder_for_each_entry_safe(iter, iter2, ruleset_rb_root,
+					     node) {
+		WARN_ON_ONCE(iter->layers[0].level != 0);
+		WARN_ON_ONCE(iter->num_layers != 1);
+		new_layer.access = iter->layers[0].access;
+
+		err = landlock_hash_upsert(new_table, iter->key, key_type,
+					   new_layer);
+		if (err) {
+			return err;
+		}
+	}
+
+	return 0;
+}
+
+/**
+ * @landlock_merge_ruleset2 - Merge a ruleset with a (possibly NULL)
+ * domain, and return a new merged domain.
+ */
+struct landlock_domain *
+landlock_merge_ruleset2(const struct landlock_domain *curr_domain,
+			const struct landlock_ruleset *next_ruleset)
+{
+	size_t num_inodes = 0;
+	int err;
+	struct landlock_domain *new_domain;
+	struct landlock_layer new_layer = {
+		.level = 1,
+	};
+	struct landlock_rule *iter, *iter2;
+
+	if (WARN_ON_ONCE(!next_ruleset)) {
+		return ERR_PTR(-EINVAL);
+	}
+
+	if (curr_domain) {
+		new_layer.level = curr_domain->num_layers + 1;
+		num_inodes = landlock_hash_count(&curr_domain->inode_table);
+	}
+
+	/* Find new expected size of inode table */
+	rbtree_postorder_for_each_entry_safe(iter, iter2,
+					     &next_ruleset->root_inode, node) {
+		if (!curr_domain ||
+		    landlock_hash_find(&curr_domain->inode_table, iter->key) ==
+			    NULL) {
+			num_inodes += 1;
+		}
+	}
+
+	new_domain = landlock_alloc_domain(num_inodes, new_layer.level);
+	if (!new_domain)
+		return ERR_PTR(-ENOMEM);
+
+	err = merge_domain_table(LANDLOCK_KEY_INODE,
+				 curr_domain ? &curr_domain->inode_table : NULL,
+				 &new_domain->inode_table, new_layer,
+				 &next_ruleset->root_inode);
+	if (err) {
+		landlock_put_domain(new_domain);
+		return ERR_PTR(err);
+	}
+
+	return new_domain;
+}
+
 #ifdef CONFIG_AUDIT
 
 /**
