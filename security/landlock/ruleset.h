@@ -87,10 +87,16 @@ struct landlock_rule_ref {
  * struct landlock_rule - Access rights tied to an object
  */
 struct landlock_rule {
-	/**
-	 * @node: Node in the ruleset's red-black tree.
-	 */
-	struct rb_node node;
+	union {
+		/**
+		 * @node: Node in the ruleset's red-black tree.
+		 */
+		struct rb_node node;
+		/**
+		 * @hlist: Node in the domain's hash table.
+		 */
+		struct hlist_node hlist;
+	};
 	/**
 	 * @key: A union to identify either a kernel object (e.g. an inode) or
 	 * a raw data value (e.g. a network socket port). This is used as a key
@@ -248,7 +254,13 @@ landlock_create_rule(const struct landlock_rule_ref ref,
 			   GFP_KERNEL_ACCOUNT);
 	if (!new_rule)
 		return ERR_PTR(-ENOMEM);
+
+	/*
+	 * We assume the rule will be in a rbtree for now - in the
+	 * landlock_domain case caller can init the hlist afterward
+	 */
 	RB_CLEAR_NODE(&new_rule->node);
+
 	if (is_object_pointer(ref.type)) {
 		/* This should have been caught by insert_rule(). */
 		WARN_ON_ONCE(!ref.key.object);
