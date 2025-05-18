@@ -483,6 +483,7 @@ SYSCALL_DEFINE2(landlock_restrict_self, const int, ruleset_fd, const __u32,
 		*ruleset __free(landlock_put_ruleset) = NULL;
 	struct cred *new_cred;
 	struct landlock_cred_security *new_llcred;
+	struct landlock_domain *new_domain2;
 	bool __maybe_unused log_same_exec, log_new_exec, log_subdomains,
 		prev_log_subdomains;
 
@@ -551,6 +552,12 @@ SYSCALL_DEFINE2(landlock_restrict_self, const int, ruleset_fd, const __u32,
 		abort_creds(new_cred);
 		return PTR_ERR(new_dom);
 	}
+	new_domain2 = landlock_merge_ruleset2(new_llcred->domain2, ruleset);
+	if (IS_ERR(new_domain2)) {
+		landlock_put_ruleset(new_dom);
+		abort_creds(new_cred);
+		return PTR_ERR(new_domain2);
+	}
 
 #ifdef CONFIG_AUDIT
 	new_dom->hierarchy->log_same_exec = log_same_exec;
@@ -588,6 +595,8 @@ SYSCALL_DEFINE2(landlock_restrict_self, const int, ruleset_fd, const __u32,
 	/* Replaces the old (prepared) domain. */
 	landlock_put_ruleset(new_llcred->domain);
 	new_llcred->domain = new_dom;
+	landlock_put_domain(new_llcred->domain2);
+	new_llcred->domain2 = new_domain2;
 
 #ifdef CONFIG_AUDIT
 	new_llcred->domain_exec |= BIT(new_dom->num_layers - 1);

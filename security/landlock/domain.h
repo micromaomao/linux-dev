@@ -62,6 +62,10 @@ void landlock_put_domain(struct landlock_domain *const domain);
 
 void landlock_put_domain_deferred(struct landlock_domain *const domain);
 
+struct landlock_domain *
+landlock_merge_ruleset2(const struct landlock_domain *curr_domain,
+			const struct landlock_ruleset *new_ruleset);
+
 enum landlock_log_status {
 	LANDLOCK_LOG_PENDING = 0,
 	LANDLOCK_LOG_RECORDED,
