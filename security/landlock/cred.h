@@ -32,6 +32,7 @@ struct landlock_cred_security {
 	 * @domain: Immutable ruleset enforced on a task.
 	 */
 	struct landlock_ruleset *domain;
+	struct landlock_domain *domain2;
 
 #ifdef CONFIG_AUDIT
 	/**
