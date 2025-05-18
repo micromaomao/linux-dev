@@ -1844,6 +1844,7 @@ static bool control_current_fowner(struct fown_struct *const fown)
 static void hook_file_set_fowner(struct file *file)
 {
 	struct landlock_ruleset *prev_dom;
+	struct landlock_domain *prev_dom2;
 	struct landlock_cred_security fown_subject = {};
 	size_t fown_layer = 0;
 
@@ -1856,11 +1857,13 @@ static void hook_file_set_fowner(struct file *file)
 				current_cred(), signal_scope, &fown_layer);
 		if (new_subject) {
 			landlock_get_ruleset(new_subject->domain);
+			landlock_get_domain(new_subject->domain2);
 			fown_subject = *new_subject;
 		}
 	}
 
 	prev_dom = landlock_file(file)->fown_subject.domain;
+	prev_dom2 = landlock_file(file)->fown_subject.domain2;
 	landlock_file(file)->fown_subject = fown_subject;
 #ifdef CONFIG_AUDIT
 	landlock_file(file)->fown_layer = fown_layer;
@@ -1868,11 +1871,13 @@ static void hook_file_set_fowner(struct file *file)
 
 	/* May be called in an RCU read-side critical section. */
 	landlock_put_ruleset_deferred(prev_dom);
+	landlock_put_domain_deferred(prev_dom2);
 }
 
 static void hook_file_free_security(struct file *file)
 {
 	landlock_put_ruleset_deferred(landlock_file(file)->fown_subject.domain);
+	landlock_put_domain_deferred(landlock_file(file)->fown_subject.domain2);
 }
 
 static struct security_hook_list landlock_hooks[] __ro_after_init = {
