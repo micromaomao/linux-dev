@@ -60,6 +60,23 @@ void landlock_put_domain(struct landlock_domain *const domain)
 	}
 }
 
+static void free_domain_work(struct work_struct *const work)
+{
+	struct landlock_domain *domain;
+
+	domain = container_of(work, struct landlock_domain, work_free);
+	free_domain(domain);
+}
+
+/* Only called by hook_cred_free(). */
+void landlock_put_domain_deferred(struct landlock_domain *const domain)
+{
+	if (domain && refcount_dec_and_test(&domain->usage)) {
+		INIT_WORK(&domain->work_free, free_domain_work);
+		schedule_work(&domain->work_free);
+	}
+}
+
 #ifdef CONFIG_AUDIT
 
 /**
