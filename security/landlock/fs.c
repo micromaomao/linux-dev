@@ -325,7 +325,7 @@ int landlock_append_fs_rule(struct landlock_ruleset *const ruleset,
 			    access_mask_t access_rights)
 {
 	int err;
-	struct landlock_id id = {
+	struct landlock_rule_ref ref = {
 		.type = LANDLOCK_KEY_INODE,
 	};
 
@@ -339,17 +339,17 @@ int landlock_append_fs_rule(struct landlock_ruleset *const ruleset,
 	/* Transforms relative access rights to absolute ones. */
 	access_rights |= LANDLOCK_MASK_ACCESS_FS &
 			 ~landlock_get_fs_access_mask(ruleset, 0);
-	id.key.object = get_inode_object(d_backing_inode(path->dentry));
-	if (IS_ERR(id.key.object))
-		return PTR_ERR(id.key.object);
+	ref.key.object = get_inode_object(d_backing_inode(path->dentry));
+	if (IS_ERR(ref.key.object))
+		return PTR_ERR(ref.key.object);
 	mutex_lock(&ruleset->lock);
-	err = landlock_insert_rule(ruleset, id, access_rights);
+	err = landlock_insert_rule(ruleset, ref, access_rights);
 	mutex_unlock(&ruleset->lock);
 	/*
 	 * No need to check for an error because landlock_insert_rule()
 	 * increments the refcount for the new object if needed.
 	 */
-	landlock_put_object(id.key.object);
+	landlock_put_object(ref.key.object);
 	return err;
 }
 
@@ -366,7 +366,7 @@ find_rule(const struct landlock_ruleset *const domain,
 {
 	const struct landlock_rule *rule;
 	const struct inode *inode;
-	struct landlock_id id = {
+	struct landlock_rule_ref ref = {
 		.type = LANDLOCK_KEY_INODE,
 	};
 
@@ -376,8 +376,8 @@ find_rule(const struct landlock_ruleset *const domain,
 
 	inode = d_backing_inode(dentry);
 	rcu_read_lock();
-	id.key.object = rcu_dereference(landlock_inode(inode)->object);
-	rule = landlock_find_rule(domain, id);
+	ref.key.object = rcu_dereference(landlock_inode(inode)->object);
+	rule = landlock_find_rule(domain, ref);
 	rcu_read_unlock();
 	return rule;
 }

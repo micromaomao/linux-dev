@@ -104,7 +104,7 @@ static bool is_object_pointer(const enum landlock_key_type key_type)
 }
 
 static struct landlock_rule *
-create_rule(const struct landlock_id id,
+create_rule(const struct landlock_rule_ref ref,
 	    const struct landlock_layer (*const layers)[], const u32 num_layers,
 	    const struct landlock_layer *const new_layer)
 {
@@ -125,13 +125,13 @@ create_rule(const struct landlock_id id,
 	if (!new_rule)
 		return ERR_PTR(-ENOMEM);
 	RB_CLEAR_NODE(&new_rule->node);
-	if (is_object_pointer(id.type)) {
+	if (is_object_pointer(ref.type)) {
 		/* This should have been caught by insert_rule(). */
-		WARN_ON_ONCE(!id.key.object);
-		landlock_get_object(id.key.object);
+		WARN_ON_ONCE(!ref.key.object);
+		landlock_get_object(ref.key.object);
 	}
 
-	new_rule->key = id.key;
+	new_rule->key = ref.key;
 	new_rule->num_layers = new_num_layers;
 	/* Copies the original layer stack. */
 	memcpy(new_rule->layers, layers,
@@ -186,8 +186,8 @@ static void build_check_ruleset(void)
  * insert_rule - Create and insert a rule in a ruleset
  *
  * @ruleset: The ruleset to be updated.
- * @id: The ID to build the new rule with.  The underlying kernel object, if
- *      any, must be held by the caller.
+ * @ref: The reference to build the new rule with.  The underlying kernel
+ *       object, if any, must be held by the caller.
  * @layers: One or multiple layers to be copied into the new rule.
  * @num_layers: The number of @layers entries.
  *
@@ -201,7 +201,7 @@ static void build_check_ruleset(void)
  * access rights.
  */
 static int insert_rule(struct landlock_ruleset *const ruleset,
-		       const struct landlock_id id,
+		       const struct landlock_rule_ref ref,
 		       const struct landlock_layer (*const layers)[],
 		       const size_t num_layers)
 {
@@ -215,10 +215,10 @@ static int insert_rule(struct landlock_ruleset *const ruleset,
 	if (WARN_ON_ONCE(!layers))
 		return -ENOENT;
 
-	if (is_object_pointer(id.type) && WARN_ON_ONCE(!id.key.object))
+	if (is_object_pointer(ref.type) && WARN_ON_ONCE(!ref.key.object))
 		return -ENOENT;
 
-	root = get_root(ruleset, id.type);
+	root = get_root(ruleset, ref.type);
 	if (IS_ERR(root))
 		return PTR_ERR(root);
 
@@ -227,9 +227,9 @@ static int insert_rule(struct landlock_ruleset *const ruleset,
 		struct landlock_rule *const this =
 			rb_entry(*walker_node, struct landlock_rule, node);
 
-		if (this->key.data != id.key.data) {
+		if (this->key.data != ref.key.data) {
 			parent_node = *walker_node;
-			if (this->key.data < id.key.data)
+			if (this->key.data < ref.key.data)
 				walker_node = &((*walker_node)->rb_right);
 			else
 				walker_node = &((*walker_node)->rb_left);
@@ -261,20 +261,20 @@ static int insert_rule(struct landlock_ruleset *const ruleset,
 		 * Intersects access rights when it is a merge between a
 		 * ruleset and a domain.
 		 */
-		new_rule = create_rule(id, &this->layers, this->num_layers,
+		new_rule = create_rule(ref, &this->layers, this->num_layers,
 				       &(*layers)[0]);
 		if (IS_ERR(new_rule))
 			return PTR_ERR(new_rule);
 		rb_replace_node(&this->node, &new_rule->node, root);
-		free_rule(this, id.type);
+		free_rule(this, ref.type);
 		return 0;
 	}
 
-	/* There is no match for @id. */
+	/* There is no match for @ref. */
 	build_check_ruleset();
 	if (ruleset->num_rules >= LANDLOCK_MAX_NUM_RULES)
 		return -E2BIG;
-	new_rule = create_rule(id, layers, num_layers, NULL);
+	new_rule = create_rule(ref, layers, num_layers, NULL);
 	if (IS_ERR(new_rule))
 		return PTR_ERR(new_rule);
 	rb_link_node(&new_rule->node, parent_node, walker_node);
@@ -296,7 +296,7 @@ static void build_check_layer(void)
 
 /* @ruleset must be locked by the caller. */
 int landlock_insert_rule(struct landlock_ruleset *const ruleset,
-			 const struct landlock_id id,
+			 const struct landlock_rule_ref ref,
 			 const access_mask_t access)
 {
 	struct landlock_layer layers[] = { {
@@ -306,7 +306,7 @@ int landlock_insert_rule(struct landlock_ruleset *const ruleset,
 	} };
 
 	build_check_layer();
-	return insert_rule(ruleset, id, &layers, ARRAY_SIZE(layers));
+	return insert_rule(ruleset, ref, &layers, ARRAY_SIZE(layers));
 }
 
 static int merge_tree(struct landlock_ruleset *const dst,
@@ -331,7 +331,7 @@ static int merge_tree(struct landlock_ruleset *const dst,
 		struct landlock_layer layers[] = { {
 			.level = dst->num_layers,
 		} };
-		const struct landlock_id id = {
+		const struct landlock_rule_ref ref = {
 			.key = walker_rule->key,
 			.type = key_type,
 		};
@@ -344,7 +344,7 @@ static int merge_tree(struct landlock_ruleset *const dst,
 
 		layers[0].access = walker_rule->layers[0].access;
 
-		err = insert_rule(dst, id, &layers, ARRAY_SIZE(layers));
+		err = insert_rule(dst, ref, &layers, ARRAY_SIZE(layers));
 		if (err)
 			return err;
 	}
@@ -413,12 +413,12 @@ static int inherit_tree(struct landlock_ruleset *const parent,
 	/* Copies the @parent inode or network tree. */
 	rbtree_postorder_for_each_entry_safe(walker_rule, next_rule,
 					     parent_root, node) {
-		const struct landlock_id id = {
+		const struct landlock_rule_ref ref = {
 			.key = walker_rule->key,
 			.type = key_type,
 		};
 
-		err = insert_rule(child, id, &walker_rule->layers,
+		err = insert_rule(child, ref, &walker_rule->layers,
 				  walker_rule->num_layers);
 		if (err)
 			return err;
@@ -581,12 +581,12 @@ landlock_merge_ruleset(struct landlock_ruleset *const parent,
  */
 const struct landlock_rule *
 landlock_find_rule(const struct landlock_ruleset *const ruleset,
-		   const struct landlock_id id)
+		   const struct landlock_rule_ref ref)
 {
 	const struct rb_root *root;
 	const struct rb_node *node;
 
-	root = get_root((struct landlock_ruleset *)ruleset, id.type);
+	root = get_root((struct landlock_ruleset *)ruleset, ref.type);
 	if (IS_ERR(root))
 		return NULL;
 	node = root->rb_node;
@@ -595,9 +595,9 @@ landlock_find_rule(const struct landlock_ruleset *const ruleset,
 		struct landlock_rule *this =
 			rb_entry(node, struct landlock_rule, node);
 
-		if (this->key.data == id.key.data)
+		if (this->key.data == ref.key.data)
 			return this;
-		if (this->key.data < id.key.data)
+		if (this->key.data < ref.key.data)
 			node = node->rb_right;
 		else
 			node = node->rb_left;

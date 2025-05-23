@@ -23,19 +23,19 @@ int landlock_append_net_rule(struct landlock_ruleset *const ruleset,
 			     const u16 port, access_mask_t access_rights)
 {
 	int err;
-	const struct landlock_id id = {
+	const struct landlock_rule_ref ref = {
 		.key.data = (__force uintptr_t)htons(port),
 		.type = LANDLOCK_KEY_NET_PORT,
 	};
 
-	BUILD_BUG_ON(sizeof(port) > sizeof(id.key.data));
+	BUILD_BUG_ON(sizeof(port) > sizeof(ref.key.data));
 
 	/* Transforms relative access rights to absolute ones. */
 	access_rights |= LANDLOCK_MASK_ACCESS_NET &
 			 ~landlock_get_net_access_mask(ruleset, 0);
 
 	mutex_lock(&ruleset->lock);
-	err = landlock_insert_rule(ruleset, id, access_rights);
+	err = landlock_insert_rule(ruleset, ref, access_rights);
 	mutex_unlock(&ruleset->lock);
 
 	return err;
@@ -49,7 +49,7 @@ static int current_check_access_socket(struct socket *const sock,
 	__be16 port;
 	layer_mask_t layer_masks[LANDLOCK_NUM_ACCESS_NET] = {};
 	const struct landlock_rule *rule;
-	struct landlock_id id = {
+	struct landlock_rule_ref ref = {
 		.type = LANDLOCK_KEY_NET_PORT,
 	};
 	const struct access_masks masks = {
@@ -171,10 +171,10 @@ static int current_check_access_socket(struct socket *const sock,
 			return -EINVAL;
 	}
 
-	id.key.data = (__force uintptr_t)port;
-	BUILD_BUG_ON(sizeof(port) > sizeof(id.key.data));
+	ref.key.data = (__force uintptr_t)port;
+	BUILD_BUG_ON(sizeof(port) > sizeof(ref.key.data));
 
-	rule = landlock_find_rule(subject->domain, id);
+	rule = landlock_find_rule(subject->domain, ref);
 	access_request = landlock_init_layer_masks(subject->domain,
 						   access_request, &layer_masks,
 						   LANDLOCK_KEY_NET_PORT);

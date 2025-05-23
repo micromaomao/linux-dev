@@ -69,9 +69,9 @@ enum landlock_key_type {
 };
 
 /**
- * struct landlock_id - Unique rule identifier for a ruleset
+ * struct landlock_rule_ref - Rule reference for a ruleset
  */
-struct landlock_id {
+struct landlock_rule_ref {
 	/**
 	 * @key: Identifies either a kernel object (e.g. an inode) or
 	 * a raw value (e.g. a TCP port).
@@ -201,7 +201,7 @@ DEFINE_FREE(landlock_put_ruleset, struct landlock_ruleset *,
 	    if (!IS_ERR_OR_NULL(_T)) landlock_put_ruleset(_T))
 
 int landlock_insert_rule(struct landlock_ruleset *const ruleset,
-			 const struct landlock_id id,
+			 const struct landlock_rule_ref ref,
 			 const access_mask_t access);
 
 struct landlock_ruleset *
@@ -210,7 +210,7 @@ landlock_merge_ruleset(struct landlock_ruleset *const parent,
 
 const struct landlock_rule *
 landlock_find_rule(const struct landlock_ruleset *const ruleset,
-		   const struct landlock_id id);
+		   const struct landlock_rule_ref ref);
 
 static inline void landlock_get_ruleset(struct landlock_ruleset *const ruleset)
 {
