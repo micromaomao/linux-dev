@@ -8,6 +8,7 @@
 #include <linux/path.h>
 
 #include "access.h"
+#include "domain.h"
 #include "ruleset.h"
 
 #define CREATE_TRACE_POINTS

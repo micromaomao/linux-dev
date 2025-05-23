@@ -21,6 +21,7 @@
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/workqueue.h>
+#include <trace/events/landlock.h>
 
 #include "access.h"
 #include "audit.h"
@@ -628,6 +629,8 @@ bool landlock_unmask_layers(const struct landlock_ruleset *const domain,
 	rule = find_rule(domain, ref);
 	if (!rule)
 		return false;
+
+	trace_landlock_check_rule(domain, &ref, access_request, rule);
 
 	/*
 	 * An access is granted if, for each policy layer, at least one rule
