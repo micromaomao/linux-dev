@@ -579,9 +579,9 @@ landlock_merge_ruleset(struct landlock_ruleset *const parent,
 /*
  * The returned access has the same lifetime as @ruleset.
  */
-const struct landlock_rule *
-landlock_find_rule(const struct landlock_ruleset *const ruleset,
-		   const struct landlock_rule_ref ref)
+static const struct landlock_rule *
+find_rule(const struct landlock_ruleset *const ruleset,
+	  const struct landlock_rule_ref ref)
 {
 	const struct rb_root *root;
 	const struct rb_node *node;
@@ -613,15 +613,19 @@ landlock_find_rule(const struct landlock_ruleset *const ruleset,
  * Returns true if the request is allowed (i.e. relevant layer masks for the
  * request are empty).
  */
-bool landlock_unmask_layers(const struct landlock_rule *const rule,
+bool landlock_unmask_layers(const struct landlock_ruleset *const domain,
+			    const struct landlock_rule_ref ref,
 			    const access_mask_t access_request,
 			    layer_mask_t (*const layer_masks)[],
 			    const size_t masks_array_size)
 {
 	size_t layer_level;
+	const struct landlock_rule *rule;
 
 	if (!access_request || !layer_masks)
 		return true;
+
+	rule = find_rule(domain, ref);
 	if (!rule)
 		return false;
 

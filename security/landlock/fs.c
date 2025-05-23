@@ -356,30 +356,27 @@ int landlock_append_fs_rule(struct landlock_ruleset *const ruleset,
 /* Access-control management */
 
 /*
- * The lifetime of the returned rule is tied to @domain.
- *
- * Returns NULL if no rule is found or if @dentry is negative.
+ * Returns true if an object is tied to @dentry, and updates @ref accordingly.
  */
-static const struct landlock_rule *
-find_rule(const struct landlock_ruleset *const domain,
-	  const struct dentry *const dentry)
+static bool find_rule_ref(const struct dentry *const dentry,
+			  struct landlock_rule_ref *ref)
 {
-	const struct landlock_rule *rule;
 	const struct inode *inode;
-	struct landlock_rule_ref ref = {
-		.type = LANDLOCK_KEY_INODE,
-	};
+
+	/*
+	 * We do not strictly need an RCU read-side critical section if
+	 * ref->key.object is not dereferenced or if a domain's rule own a reference
+	 * to it, but it is simpler and safer to always require one.
+	 */
+	lockdep_assert_in_rcu_read_lock();
 
 	/* Ignores nonexistent leafs. */
-	if (d_is_negative(dentry))
-		return NULL;
+	if (!dentry || d_is_negative(dentry))
+		return false;
 
 	inode = d_backing_inode(dentry);
-	rcu_read_lock();
-	ref.key.object = rcu_dereference(landlock_inode(inode)->object);
-	rule = landlock_find_rule(domain, ref);
-	rcu_read_unlock();
-	return rule;
+	ref->key.object = rcu_dereference(landlock_inode(inode)->object);
+	return true;
 }
 
 /*
@@ -809,25 +806,36 @@ static bool is_access_to_paths_allowed(
 		is_dom_check = false;
 	}
 
-	if (unlikely(dentry_child1)) {
-		landlock_unmask_layers(
-			find_rule(domain, dentry_child1),
-			landlock_init_layer_masks(
-				domain, LANDLOCK_MASK_ACCESS_FS,
-				&_layer_masks_child1, LANDLOCK_KEY_INODE),
-			&_layer_masks_child1, ARRAY_SIZE(_layer_masks_child1));
-		layer_masks_child1 = &_layer_masks_child1;
-		child1_is_directory = d_is_dir(dentry_child1);
-	}
-	if (unlikely(dentry_child2)) {
-		landlock_unmask_layers(
-			find_rule(domain, dentry_child2),
-			landlock_init_layer_masks(
-				domain, LANDLOCK_MASK_ACCESS_FS,
-				&_layer_masks_child2, LANDLOCK_KEY_INODE),
-			&_layer_masks_child2, ARRAY_SIZE(_layer_masks_child2));
-		layer_masks_child2 = &_layer_masks_child2;
-		child2_is_directory = d_is_dir(dentry_child2);
+	scoped_guard(rcu)
+	{
+		struct landlock_rule_ref ref = {
+			.type = LANDLOCK_KEY_INODE,
+		};
+
+		if (unlikely(find_rule_ref(dentry_child1, &ref))) {
+			landlock_unmask_layers(domain, ref,
+					       landlock_init_layer_masks(
+						       domain,
+						       LANDLOCK_MASK_ACCESS_FS,
+						       &_layer_masks_child1,
+						       LANDLOCK_KEY_INODE),
+					       &_layer_masks_child1,
+					       ARRAY_SIZE(_layer_masks_child1));
+			layer_masks_child1 = &_layer_masks_child1;
+			child1_is_directory = d_is_dir(dentry_child1);
+		}
+		if (unlikely(find_rule_ref(dentry_child2, &ref))) {
+			landlock_unmask_layers(domain, ref,
+					       landlock_init_layer_masks(
+						       domain,
+						       LANDLOCK_MASK_ACCESS_FS,
+						       &_layer_masks_child2,
+						       LANDLOCK_KEY_INODE),
+					       &_layer_masks_child2,
+					       ARRAY_SIZE(_layer_masks_child2));
+			layer_masks_child2 = &_layer_masks_child2;
+			child2_is_directory = d_is_dir(dentry_child2);
+		}
 	}
 
 	walker_path = *path;
@@ -838,7 +846,6 @@ static bool is_access_to_paths_allowed(
 	 */
 	while (true) {
 		struct dentry *parent_dentry;
-		const struct landlock_rule *rule;
 
 		/*
 		 * If at least all accesses allowed on the destination are
@@ -880,17 +887,32 @@ static bool is_access_to_paths_allowed(
 				break;
 		}
 
-		rule = find_rule(domain, walker_path.dentry);
-		allowed_parent1 = allowed_parent1 ||
-				  landlock_unmask_layers(
-					  rule, access_masked_parent1,
-					  layer_masks_parent1,
-					  ARRAY_SIZE(*layer_masks_parent1));
-		allowed_parent2 = allowed_parent2 ||
-				  landlock_unmask_layers(
-					  rule, access_masked_parent2,
-					  layer_masks_parent2,
-					  ARRAY_SIZE(*layer_masks_parent2));
+		scoped_guard(rcu)
+		{
+			struct landlock_rule_ref ref = {
+				.type = LANDLOCK_KEY_INODE,
+			};
+
+			if (find_rule_ref(walker_path.dentry, &ref)) {
+				allowed_parent1 =
+					allowed_parent1 ||
+					landlock_unmask_layers(
+						domain, ref,
+						access_masked_parent1,
+						layer_masks_parent1,
+						ARRAY_SIZE(
+							*layer_masks_parent1));
+
+				allowed_parent2 =
+					allowed_parent2 ||
+					landlock_unmask_layers(
+						domain, ref,
+						access_masked_parent2,
+						layer_masks_parent2,
+						ARRAY_SIZE(
+							*layer_masks_parent2));
+			}
+		}
 
 		/* Stops when a rule from each layer grants access. */
 		if (allowed_parent1 && allowed_parent2)
@@ -1050,15 +1072,23 @@ static bool collect_domain_accesses(
 		struct dentry *parent_dentry;
 
 		/* Gets all layers allowing all domain accesses. */
-		if (landlock_unmask_layers(find_rule(domain, dir), access_dom,
-					   layer_masks_dom,
-					   ARRAY_SIZE(*layer_masks_dom))) {
-			/*
-			 * Stops when all handled accesses are allowed by at
-			 * least one rule in each layer.
-			 */
-			ret = true;
-			break;
+		scoped_guard(rcu)
+		{
+			struct landlock_rule_ref ref = {
+				.type = LANDLOCK_KEY_INODE,
+			};
+
+			if (find_rule_ref(dir, &ref) &&
+			    landlock_unmask_layers(
+				    domain, ref, access_dom, layer_masks_dom,
+				    ARRAY_SIZE(*layer_masks_dom))) {
+				/*
+				* Stops when all handled accesses are allowed by at
+				* least one rule in each layer.
+				*/
+				ret = true;
+				break;
+			}
 		}
 
 		/* We should not reach a root other than @mnt_root. */

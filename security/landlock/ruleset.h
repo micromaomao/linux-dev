@@ -44,7 +44,7 @@ union landlock_key {
 	/**
 	 * @object: Pointer to identify a kernel object (e.g. an inode).
 	 */
-	struct landlock_object *object;
+	struct landlock_object __rcu *object;
 	/**
 	 * @data: Raw data to identify an arbitrary 32-bit value
 	 * (e.g. a TCP port).
@@ -208,10 +208,6 @@ struct landlock_ruleset *
 landlock_merge_ruleset(struct landlock_ruleset *const parent,
 		       struct landlock_ruleset *const ruleset);
 
-const struct landlock_rule *
-landlock_find_rule(const struct landlock_ruleset *const ruleset,
-		   const struct landlock_rule_ref ref);
-
 static inline void landlock_get_ruleset(struct landlock_ruleset *const ruleset)
 {
 	if (ruleset)
@@ -301,7 +297,8 @@ landlock_get_scope_mask(const struct landlock_ruleset *const ruleset,
 	return ruleset->access_masks[layer_level].scope;
 }
 
-bool landlock_unmask_layers(const struct landlock_rule *const rule,
+bool landlock_unmask_layers(const struct landlock_ruleset *const domain,
+			    const struct landlock_rule_ref ref,
 			    const access_mask_t access_request,
 			    layer_mask_t (*const layer_masks)[],
 			    const size_t masks_array_size);
