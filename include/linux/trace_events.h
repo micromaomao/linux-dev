@@ -54,6 +54,9 @@ trace_print_hex_dump_seq(struct trace_seq *p, const char *prefix_str,
 			 int prefix_type, int rowsize, int groupsize,
 			 const void *buf, size_t len, bool ascii);
 
+const char *trace_print_untrusted_str_seq(struct trace_seq *s, const char *str);
+
+
 struct trace_iterator;
 struct trace_event;
 
