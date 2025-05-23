@@ -11,6 +11,7 @@
 #define _SECURITY_LANDLOCK_FS_H
 
 #include <linux/build_bug.h>
+#include <linux/cleanup.h>
 #include <linux/fs.h>
 #include <linux/init.h>
 #include <linux/rcupdate.h>
@@ -127,5 +128,7 @@ __init void landlock_add_fs_hooks(void);
 int landlock_append_fs_rule(struct landlock_ruleset *const ruleset,
 			    const struct path *const path,
 			    access_mask_t access_hierarchy);
+
+DEFINE_FREE(__putname, char *, if (_T) __putname(_T))
 
 #endif /* _SECURITY_LANDLOCK_FS_H */

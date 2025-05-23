@@ -36,6 +36,7 @@
 #include <linux/types.h>
 #include <linux/wait_bit.h>
 #include <linux/workqueue.h>
+#include <trace/events/landlock.h>
 #include <uapi/linux/fiemap.h>
 #include <uapi/linux/landlock.h>
 
@@ -345,6 +346,27 @@ int landlock_append_fs_rule(struct landlock_ruleset *const ruleset,
 	mutex_lock(&ruleset->lock);
 	err = landlock_insert_rule(ruleset, ref, access_rights);
 	mutex_unlock(&ruleset->lock);
+
+	if (!err && trace_landlock_add_rule_fs_enabled()) {
+		const char *pathname;
+		/* Does not handle deleted files. */
+		char *buffer __free(__putname) = __getname();
+
+		if (buffer) {
+			const char *absolute_path =
+				d_absolute_path(path, buffer, PATH_MAX);
+			if (!IS_ERR_OR_NULL(absolute_path))
+				pathname = absolute_path;
+			else
+				pathname = "<too_long>";
+		} else {
+			/* Same format as audit_log_d_path(). */
+			pathname = "<no_memory>";
+		}
+		trace_landlock_add_rule_fs(ruleset, &ref, access_rights, path,
+					   pathname);
+	}
+
 	/*
 	 * No need to check for an error because landlock_insert_rule()
 	 * increments the refcount for the new object if needed.
