@@ -216,14 +216,38 @@ static void mkdir_parents(struct __test_metadata *const _metadata,
 	free(walker);
 }
 
+static void
+maybe_warn_about_permission_on_cwd(struct __test_metadata *const _metadata,
+				   int err)
+{
+	char abspath_buf[255];
+
+	if (err == EACCES) {
+		const char *realp = realpath(".", abspath_buf);
+
+		if (realp == NULL)
+			realp = ".";
+
+		TH_LOG("Hint: fs_tests requires permissions for uid %u on test directory %s "
+		       "and files under it (even when running as root).",
+		       getuid(), realp);
+		TH_LOG("      Try chmod a+rwX -R %s", realp);
+	}
+}
+
 static void create_directory(struct __test_metadata *const _metadata,
 			     const char *const path)
 {
 	mkdir_parents(_metadata, path);
 	ASSERT_EQ(0, mkdir(path, 0700))
 	{
+		int err = errno;
+
 		TH_LOG("Failed to create directory \"%s\": %s", path,
-		       strerror(errno));
+		       strerror(err));
+
+		if (strcmp(path, TMP_DIR) == 0)
+			maybe_warn_about_permission_on_cwd(_metadata, err);
 	}
 }
 
@@ -1985,18 +2009,22 @@ TEST_F_FORK(layout1, relative_chroot_chdir)
 static void copy_file(struct __test_metadata *const _metadata,
 		      const char *const src_path, const char *const dst_path)
 {
-	int dst_fd, src_fd;
+	int dst_fd, src_fd, err;
 	struct stat statbuf;
 
 	dst_fd = open(dst_path, O_WRONLY | O_TRUNC | O_CLOEXEC);
 	ASSERT_LE(0, dst_fd)
 	{
-		TH_LOG("Failed to open \"%s\": %s", dst_path, strerror(errno));
+		err = errno;
+		TH_LOG("Failed to open \"%s\": %s", dst_path, strerror(err));
+		maybe_warn_about_permission_on_cwd(_metadata, err);
 	}
 	src_fd = open(src_path, O_RDONLY | O_CLOEXEC);
 	ASSERT_LE(0, src_fd)
 	{
-		TH_LOG("Failed to open \"%s\": %s", src_path, strerror(errno));
+		err = errno;
+		TH_LOG("Failed to open \"%s\": %s", src_path, strerror(err));
+		maybe_warn_about_permission_on_cwd(_metadata, err);
 	}
 	ASSERT_EQ(0, fstat(src_fd, &statbuf));
 	ASSERT_EQ(statbuf.st_size,
