@@ -5,6 +5,7 @@
  * Copyright © 2017-2020 Mickaël Salaün <mic@digikod.net>
  * Copyright © 2020 ANSSI
  * Copyright © 2020-2022 Microsoft Corporation
+ * Copyright © 2025 Tingmao Wang <m@maowtm.org>
  */
 
 #define _GNU_SOURCE
@@ -303,10 +304,9 @@ static void prepare_layout_opt(struct __test_metadata *const _metadata,
 	 * for tests relying on pivot_root(2) and move_mount(2).
 	 */
 	set_cap(_metadata, CAP_SYS_ADMIN);
-	ASSERT_EQ(0, unshare(CLONE_NEWNS | CLONE_NEWCGROUP));
-	ASSERT_EQ(0, mount_opt(mnt, TMP_DIR))
+	ASSERT_EQ(0, unshare(CLONE_NEWNS | CLONE_NEWCGROUP))
 	{
-		TH_LOG("Failed to mount the %s filesystem: %s", mnt->type,
+		TH_LOG("Failed to create new mount namespace: %s",
 		       strerror(errno));
 		/*
 		 * FIXTURE_TEARDOWN() is not called when FIXTURE_SETUP()
@@ -314,6 +314,12 @@ static void prepare_layout_opt(struct __test_metadata *const _metadata,
 		 * avoid cascading errors with other tests that don't depend on
 		 * the same filesystem.
 		 */
+		remove_path(TMP_DIR);
+	}
+	ASSERT_EQ(0, mount_opt(mnt, TMP_DIR))
+	{
+		TH_LOG("Failed to mount the %s filesystem: %s", mnt->type,
+		       strerror(errno));
 		remove_path(TMP_DIR);
 	}
 	ASSERT_EQ(0, mount(NULL, TMP_DIR, NULL, MS_PRIVATE | MS_REC, NULL));
