@@ -28,6 +28,8 @@
 #include <linux/types.h>
 #include <linux/uaccess.h>
 #include <uapi/linux/landlock.h>
+#include <linux/proc_fs.h>
+#include <linux/sort.h>
 
 #include "cred.h"
 #include "domain.h"
@@ -569,3 +571,96 @@ SYSCALL_DEFINE2(landlock_restrict_self, const int, ruleset_fd, const __u32,
 
 	return commit_creds(new_cred);
 }
+
+static int ruleset_dump_compare(const void *node1, const void *node2)
+{
+	const struct landlock_rule *rule1 =
+		*(const struct landlock_rule **)node1;
+	const struct landlock_rule *rule2 =
+		*(const struct landlock_rule **)node2;
+
+	// if (rule1->key.data < rule2->key.data)
+	// 	return -1;
+	// if (rule1->key.data > rule2->key.data)
+	// 	return 1;
+	if (rule1 > rule2)
+		return 1;
+	if (rule1 < rule2)
+		return -1;
+	return 0;
+}
+
+static int procfs_landlock_ruleset_show(struct seq_file *m, void *v)
+{
+	struct landlock_cred_security *llcred;
+	struct landlock_ruleset *ruleset;
+	struct landlock_rule *pos, *n;
+	struct inode *inode;
+	struct landlock_rule **sorted_arr __free(kfree) = NULL;
+	size_t i = 0;
+
+	rcu_read_lock();
+	llcred = landlock_cred(current->cred);
+	if (llcred && llcred->domain) {
+		ruleset = llcred->domain;
+		sorted_arr = kmalloc_array(ruleset->num_rules,
+					   sizeof(*sorted_arr), GFP_KERNEL);
+		if (!sorted_arr) {
+			rcu_read_unlock();
+			return -ENOMEM;
+		}
+
+		rbtree_postorder_for_each_entry_safe(
+			pos, n, &ruleset->root_inode, node) {
+			sorted_arr[i++] = pos;
+		}
+		sort(sorted_arr, i, sizeof(*sorted_arr), ruleset_dump_compare,
+		     NULL);
+
+		seq_printf(m, "Ruleset: %p\n", ruleset);
+		seq_printf(m, "  Inode tree:\n");
+		for (i = 0; i < ruleset->num_rules; i++) {
+			pos = sorted_arr[i];
+			seq_printf(m, "    %p", pos);
+			if (i > 0) {
+				off_t ptr_offset =
+					((uintptr_t)pos) -
+					((uintptr_t)sorted_arr[i - 1]);
+				size_t rule_size =
+					sizeof(*pos) +
+					flex_array_size(
+						sorted_arr[i - 1], layers,
+						sorted_arr[i - 1]->num_layers);
+				seq_printf(
+					m,
+					" (+%ld (rule itself was %lu bytes))",
+					ptr_offset, rule_size);
+			}
+			seq_printf(m, ": inode ");
+			inode = (struct inode *)pos->key.object->underobj;
+			if (inode) {
+				seq_printf(m, "%lu in fs ", inode->i_ino);
+				if (inode->i_sb && inode->i_sb->s_type)
+					seq_printf(m, "%s",
+						   inode->i_sb->s_type->name);
+				else
+					seq_puts(m, "???");
+				seq_puts(m, "\n");
+			} else
+				seq_printf(m, "(deallocated)\n");
+		}
+	} else {
+		seq_printf(m, "Not landlocked\n");
+	}
+
+	rcu_read_unlock();
+	return 0;
+}
+
+static int __init init_proc_landlock(void)
+{
+	proc_create_single("dump_landlock_domain", 0, NULL,
+			   procfs_landlock_ruleset_show);
+	return 0;
+}
+fs_initcall(init_proc_landlock);
