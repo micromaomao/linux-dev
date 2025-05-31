@@ -772,6 +772,9 @@ static bool is_access_to_paths_allowed(
 		_layer_masks_child2[LANDLOCK_NUM_ACCESS_FS];
 	layer_mask_t(*layer_masks_child1)[LANDLOCK_NUM_ACCESS_FS] = NULL,
 	(*layer_masks_child2)[LANDLOCK_NUM_ACCESS_FS] = NULL;
+	unsigned rename_seqcount;
+	bool pathwalk_ref = false;
+	const struct landlock_rule *rule;
 
 	if (!access_request_parent1 && !access_request_parent2)
 		return true;
@@ -834,13 +837,21 @@ static bool is_access_to_paths_allowed(
 	}
 
 	walker_path = *path;
+
+	rename_seqcount = read_seqbegin(&rename_lock);
+	if (rename_seqcount % 2 == 1) {
+		pathwalk_ref = true;
+		path_get(&walker_path);
+	}
+
+	rule = find_rule_rcu(domain, walker_path.dentry);
+
 	/*
 	 * We need to walk through all the hierarchy to not miss any relevant
 	 * restriction.
 	 */
 	while (true) {
-		struct dentry *parent_dentry;
-		const struct landlock_rule *rule;
+		struct dentry *parent_dentry, *rechecked_parent;
 
 		/*
 		 * If at least all accesses allowed on the destination are
@@ -882,7 +893,6 @@ static bool is_access_to_paths_allowed(
 				break;
 		}
 
-		rule = find_rule_rcu(domain, walker_path.dentry);
 		allowed_parent1 = allowed_parent1 ||
 				  landlock_unmask_layers(
 					  rule, access_masked_parent1,
@@ -900,13 +910,16 @@ static bool is_access_to_paths_allowed(
 jump_up:
 		if (walker_path.dentry == walker_path.mnt->mnt_root) {
 			/* follow_up gets the parent and puts the passed in path */
-			path_get(&walker_path);
+			if (!pathwalk_ref)
+				path_get(&walker_path);
 			if (follow_up(&walker_path)) {
-				path_put(&walker_path);
+				if (!pathwalk_ref)
+					path_put(&walker_path);
 				/* Ignores hidden mount points. */
 				goto jump_up;
 			} else {
-				path_put(&walker_path);
+				if (!pathwalk_ref)
+					path_put(&walker_path);
 				/*
 				 * Stops at the real root.  Denies access
 				 * because not all layers have granted access.
@@ -926,8 +939,33 @@ jump_up:
 			}
 			break;
 		}
-		parent_dentry = walker_path.dentry->d_parent;
-		walker_path.dentry = parent_dentry;
+		if (!pathwalk_ref) {
+			parent_dentry = walker_path.dentry->d_parent;
+			rule = find_rule_rcu(domain, parent_dentry);
+			if (read_seqretry(&rename_lock, rename_seqcount)) {
+				pathwalk_ref = true;
+				path_get(&walker_path);
+				rechecked_parent =
+					dget_parent(walker_path.dentry);
+				dput(walker_path.dentry);
+				walker_path.dentry = rechecked_parent;
+				if (rechecked_parent != parent_dentry) {
+					rule = find_rule_rcu(
+						domain, walker_path.dentry);
+				}
+			} else {
+				walker_path.dentry = parent_dentry;
+			}
+		} else {
+			parent_dentry = dget_parent(walker_path.dentry);
+			dput(walker_path.dentry);
+			walker_path.dentry = parent_dentry;
+			rule = find_rule_rcu(domain, walker_path.dentry);
+		}
+	}
+
+	if (pathwalk_ref) {
+		path_put(&walker_path);
 	}
 
 	rcu_read_unlock();
@@ -1055,8 +1093,8 @@ static bool collect_domain_accesses(
 
 	while (true) {
 		/* Gets all layers allowing all domain accesses. */
-		if (landlock_unmask_layers(find_rule_rcu(domain, dir), access_dom,
-					   layer_masks_dom,
+		if (landlock_unmask_layers(find_rule_rcu(domain, dir),
+					   access_dom, layer_masks_dom,
 					   ARRAY_SIZE(*layer_masks_dom))) {
 			/*
 			 * Stops when all handled accesses are allowed by at
