@@ -2449,10 +2449,14 @@ void d_delete(struct dentry * dentry)
 			__d_drop(dentry);
 		dentry->d_flags &= ~DCACHE_CANT_MOUNT;
 		dentry_unlink_inode(dentry);
+trace_printk("d_count = 1, making dentry %pd negative\n",
+			     dentry);
 	} else {
 		__d_drop(dentry);
 		spin_unlock(&dentry->d_lock);
 		spin_unlock(&inode->i_lock);
+trace_printk("d_count = %d, not making dentry %pd negative\n",
+			     dentry->d_lockref.count, dentry);
 	}
 }
 EXPORT_SYMBOL(d_delete);

@@ -362,7 +362,7 @@ int landlock_append_fs_rule(struct landlock_ruleset *const ruleset,
  */
 static const struct landlock_rule *
 find_rule_rcu(const struct landlock_ruleset *const domain,
-	  const struct dentry *const dentry)
+	      const struct dentry *const dentry)
 {
 	const struct landlock_rule *rule;
 	const struct inode *inode;
@@ -957,12 +957,38 @@ jump_up:
 		}
 		if (!pathwalk_ref) {
 			parent_dentry = walker_path.dentry->d_parent;
+
+			///// DEBUG
+			if (walker_path.dentry != path->dentry) {
+				for (int i = 0; i < 100000; i++)
+					READ_ONCE(walker_path.dentry->d_lockref
+							  .count);
+			}
+			///// DEBUG
+
 			rule = find_rule_rcu(domain, parent_dentry);
 			if (read_seqretry(&rename_lock, rename_seqcount)) {
 				pathwalk_ref = true;
+				trace_printk(
+					"read_seqretry on rename_lock failed while walking from %s\n",
+					walker_path.dentry->d_name.name);
+				trace_printk(
+					"  dentry for %s is %s\n",
+					walker_path.dentry->d_name.name,
+					d_backing_inode(walker_path.dentry) ==
+							NULL ?
+						"negative" :
+						"positive");
 				path_get(&walker_path);
 				rechecked_parent =
 					dget_parent(walker_path.dentry);
+				trace_printk(
+					"  for rechecked parent (%s), dentry is %s\n",
+					rechecked_parent->d_name.name,
+					d_backing_inode(rechecked_parent) ==
+							NULL ?
+						"negative" :
+						"positive");
 				dput(walker_path.dentry);
 				walker_path.dentry = rechecked_parent;
 				if (rechecked_parent != parent_dentry) {
