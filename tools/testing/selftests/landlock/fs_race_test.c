@@ -18,7 +18,7 @@
 #define NUM_SUBDIRS 1000
 #define TEST_DIR TMP_DIR "/fs_race_test"
 #define SUBDIR_NAME_FORMAT "s%dd1"
-#define SUBSUBDIR_NAME_FORMAT "s%dd2"
+#define SUBDIR2_NAME "d2"
 #define TEST_FILE_NAME "file"
 #define TEST_TIME 1000
 
@@ -26,19 +26,9 @@
  * tmp
  * └── fs_race_test
  *     ├── s0d1
- *     │   └── file
- *     |── s1d1
- *     └── ...
- *
- * or
- *
- * tmp
- * └── fs_race_test
- *     ├── s0d1
- *     │   └── s0d2
+ *     │   └── d02
  *     │       └── file
  *     |── s1d1
- *     |   └── s1d2
  *     └── ...
  */
 
@@ -47,10 +37,9 @@ FIXTURE(layout)
 	int base_dir_fd;
 	bool need_subdir_cleanup;
 	int subdir_fds[NUM_SUBDIRS];
-	bool has_subsubdir;
-	int subsubdir_fds[NUM_SUBDIRS];
+	int subdir2_fd;
+	int subdir2_at;
 	int ruleset_fd;
-	int test_file_at;
 };
 
 static void create_subdirs(struct __test_metadata *const _metadata,
@@ -74,29 +63,23 @@ static void create_subdirs(struct __test_metadata *const _metadata,
 			TH_LOG("Failed to open " TEST_DIR "/%s: %s", subdir,
 			       strerror(errno));
 		}
+	}
 
-		if (self->has_subsubdir) {
-			char subsubdir[20];
-			snprintf(subsubdir, sizeof(subsubdir),
-				 SUBSUBDIR_NAME_FORMAT, i);
-
-			err = mkdirat(self->subdir_fds[i], subsubdir, 0755);
-			ASSERT_TRUE(err == 0 || errno == EEXIST)
-			{
-				TH_LOG("Failed to create " TEST_DIR
-				       "/%s/%s: %s",
-				       subdir, subsubdir, strerror(errno));
-			}
-			self->subsubdir_fds[i] =
-				openat(self->subdir_fds[i], subsubdir, O_PATH);
-			ASSERT_NE(self->subsubdir_fds[i], -1)
-			{
-				TH_LOG("Failed to open " TEST_DIR "/%s/%s: %s",
-				       subdir, subsubdir, strerror(errno));
-			}
-		} else {
-			self->subsubdir_fds[i] = -1;
-		}
+	self->subdir2_at = 0;
+	err = mkdirat(self->subdir_fds[self->subdir2_at], SUBDIR2_NAME, 0755);
+	ASSERT_TRUE(err == 0)
+	{
+		TH_LOG("Failed to create " TEST_DIR "/" SUBDIR_NAME_FORMAT
+		       "/" SUBDIR2_NAME ": %s",
+		       self->subdir2_at, strerror(errno));
+	}
+	self->subdir2_fd = openat(self->subdir_fds[self->subdir2_at],
+				  SUBDIR2_NAME, O_PATH);
+	ASSERT_NE(self->subdir2_fd, -1)
+	{
+		TH_LOG("Failed to open " TEST_DIR "/" SUBDIR_NAME_FORMAT
+		       "/" SUBDIR2_NAME ": %s",
+		       self->subdir2_at, strerror(errno));
 	}
 
 	self->need_subdir_cleanup = true;
@@ -107,40 +90,43 @@ static void cleanup_subdirs(struct __test_metadata *const _metadata,
 {
 	int i, err;
 	char subdir[20];
-	char subsubdir[20];
 
 	if (!self->need_subdir_cleanup)
 		return;
 
 	self->need_subdir_cleanup = false;
 
-	for (i = 0; i < NUM_SUBDIRS; i++) {
-		snprintf(subdir, sizeof(subdir), SUBDIR_NAME_FORMAT, i);
-		if (self->has_subsubdir) {
-			snprintf(subsubdir, sizeof(subsubdir),
-				 SUBSUBDIR_NAME_FORMAT, i);
-
-			if (self->subsubdir_fds[i] != -1) {
-				close(self->subsubdir_fds[i]);
-				self->subsubdir_fds[i] = -1;
-
-				err = unlinkat(self->subdir_fds[i], subsubdir,
-					       AT_REMOVEDIR);
-				ASSERT_TRUE(err == 0 || errno == ENOENT)
-				{
-					TH_LOG("Failed to remove " TEST_DIR
-					       "/%s/%s: %s",
-					       subdir, subsubdir,
-					       strerror(errno));
-				}
-			}
+	if (self->subdir2_fd != -1) {
+		err = unlinkat(self->subdir2_fd, TEST_FILE_NAME, 0);
+		ASSERT_TRUE(err == 0 || errno == ENOENT)
+		{
+			TH_LOG("Failed to remove " TEST_DIR
+			       "/" SUBDIR_NAME_FORMAT "/" SUBDIR2_NAME
+			       "/" TEST_FILE_NAME ": %s",
+			       self->subdir2_at, strerror(errno));
 		}
+		close(self->subdir2_fd);
+		self->subdir2_fd = -1;
 
+		err = unlinkat(self->subdir_fds[self->subdir2_at], SUBDIR2_NAME,
+			       AT_REMOVEDIR);
+		ASSERT_TRUE(err == 0 || errno == ENOENT)
+		{
+			TH_LOG("Failed to remove " TEST_DIR
+			       "/" SUBDIR_NAME_FORMAT "/" SUBDIR2_NAME ": %s",
+			       self->subdir2_at, strerror(errno));
+		}
+		self->subdir2_at = -1;
+	}
+
+	for (i = 0; i < NUM_SUBDIRS; i++) {
 		if (self->subdir_fds[i] == -1)
 			continue;
+
 		close(self->subdir_fds[i]);
 		self->subdir_fds[i] = -1;
 
+		snprintf(subdir, sizeof(subdir), SUBDIR_NAME_FORMAT, i);
 		err = unlinkat(self->base_dir_fd, subdir, AT_REMOVEDIR);
 		ASSERT_TRUE(err == 0 || errno == ENOENT)
 		{
@@ -195,40 +181,28 @@ static void cleanup_test_dir(struct __test_metadata *const _metadata,
 	}
 }
 
-static int test_file_dfd(struct __test_metadata *const _metadata,
-			 struct _test_data_layout *const self, int at)
-{
-	if (self->has_subsubdir) {
-		return self->subsubdir_fds[at];
-	} else {
-		return self->subdir_fds[at];
-	}
-}
-
 static void create_test_file(struct __test_metadata *const _metadata,
 			     struct _test_data_layout *const self)
 {
 	int dfd;
 	int fd;
 
-	ASSERT_EQ(-1, self->test_file_at);
-
-	self->test_file_at = 0;
-	dfd = test_file_dfd(_metadata, self, self->test_file_at);
+	ASSERT_NE(-1, self->subdir2_at);
+	dfd = self->subdir2_fd;
 	ASSERT_NE(-1, dfd);
 
 	fd = openat(dfd, TEST_FILE_NAME, O_CREAT | O_RDWR, 0644);
 	ASSERT_NE(-1, fd)
 	{
-		TH_LOG("Failed to create " TEST_DIR "/%s: %s", TEST_FILE_NAME,
-		       strerror(errno));
+		TH_LOG("Failed to create " TEST_DIR "/" SUBDIR_NAME_FORMAT
+		       "/" SUBDIR2_NAME "/" TEST_FILE_NAME ": %s",
+		       self->subdir2_at, strerror(errno));
 		return;
 	}
 	close(fd);
 }
 
 struct shared_region {
-	int test_file_at_dfd;
 	bool stop;
 };
 
@@ -240,71 +214,41 @@ struct shared_region {
 #define WRITE_ONCE(x, val) (*(volatile typeof(x) *)&(x) = (val))
 #endif
 
-static void move_test_file_and_rmdir(struct __test_metadata *const _metadata,
-				     struct _test_data_layout *const self,
-				     int to, struct shared_region *shr)
+static void move_subdir2_and_rmdir(struct __test_metadata *const _metadata,
+				   struct _test_data_layout *const self, int to)
 {
-	int from_fd, to_fd, err;
+	int from, from_fd, to_fd, err;
 	char pathbuf[255];
 
-	ASSERT_NE(-1, self->test_file_at);
-	ASSERT_FALSE(self->test_file_at == to);
+	ASSERT_NE(-1, self->subdir2_at);
+	ASSERT_NE(to, self->subdir2_at);
 
-	from_fd = test_file_dfd(_metadata, self, self->test_file_at);
-	to_fd = test_file_dfd(_metadata, self, to);
+	from = self->subdir2_at;
+	from_fd = self->subdir_fds[from];
+	to_fd = self->subdir_fds[to];
 
 	ASSERT_NE(-1, from_fd);
 	ASSERT_NE(-1, to_fd);
 
-	err = renameat(from_fd, TEST_FILE_NAME, to_fd, TEST_FILE_NAME);
+	err = renameat(from_fd, SUBDIR2_NAME, to_fd, SUBDIR2_NAME);
 	ASSERT_EQ(0, err)
 	{
-		TH_LOG("Failed to move test file from subdir %d to subdir %d: %s",
-		       self->test_file_at, to, strerror(errno));
-	}
-	WRITE_ONCE(shr->test_file_at_dfd, to_fd);
-	if (self->has_subsubdir) {
-		close(self->subsubdir_fds[self->test_file_at]);
-		self->subsubdir_fds[self->test_file_at] = -1;
-		snprintf(pathbuf, sizeof(pathbuf), SUBSUBDIR_NAME_FORMAT,
-			 self->test_file_at);
-		err = unlinkat(self->subdir_fds[self->test_file_at], pathbuf,
-			       AT_REMOVEDIR);
-		ASSERT_NE(-1, err)
-		{
-			TH_LOG("Failed to remove " TEST_DIR "/%s: %s", pathbuf,
-			       strerror(errno));
-		}
+		TH_LOG("Failed to move " SUBDIR2_NAME
+		       " from " SUBDIR_NAME_FORMAT " to " SUBDIR_NAME_FORMAT
+		       ": %s",
+		       from, to, strerror(errno));
 	}
 
-	close(self->subdir_fds[self->test_file_at]);
-	self->subdir_fds[self->test_file_at] = -1;
-	snprintf(pathbuf, sizeof(pathbuf), SUBDIR_NAME_FORMAT,
-		 self->test_file_at);
+	self->subdir2_at = to;
+	close(self->subdir_fds[from]);
+	self->subdir_fds[from] = -1;
+	snprintf(pathbuf, sizeof(pathbuf), SUBDIR_NAME_FORMAT, from);
 	err = unlinkat(self->base_dir_fd, pathbuf, AT_REMOVEDIR);
 	ASSERT_NE(-1, err)
 	{
 		TH_LOG("Failed to remove " TEST_DIR "/%s: %s", pathbuf,
 		       strerror(errno));
 	}
-
-	self->test_file_at = to;
-}
-
-static void cleanup_test_file(struct __test_metadata *const _metadata,
-			      struct _test_data_layout *const self)
-{
-	if (self->test_file_at == -1)
-		return;
-
-	int dfd = test_file_dfd(_metadata, self, self->test_file_at);
-	int err = unlinkat(dfd, TEST_FILE_NAME, 0);
-	ASSERT_EQ(0, err)
-	{
-		TH_LOG("Failed to remove " TEST_DIR "/%s: %s", TEST_FILE_NAME,
-		       strerror(errno));
-	}
-	self->test_file_at = -1;
 }
 
 static void create_ruleset(struct __test_metadata *const _metadata,
@@ -382,7 +326,7 @@ static int child_restrict_self(int ruleset_fd)
 	return 0;
 }
 
-static int child_process(struct shared_region *shr, int ruleset_fd)
+static int child_process(int subdir2_fd, int ruleset_fd, bool *stop_sign)
 {
 	int err;
 
@@ -391,23 +335,17 @@ static int child_process(struct shared_region *shr, int ruleset_fd)
 		return err;
 	}
 
-	while (!READ_ONCE(shr->stop)) {
-		int dfd = READ_ONCE(shr->test_file_at_dfd);
-		err = openat(dfd, TEST_FILE_NAME, O_RDONLY);
+	while (!READ_ONCE(*stop_sign)) {
+		err = openat(subdir2_fd, TEST_FILE_NAME, O_RDONLY);
 		char errstr[512];
 		int n;
 		if (err < 0) {
-			if (errno == ENOENT || errno == EBADF) {
-				continue;
-			} else {
-				err = errno;
-				n = snprintf(errstr, sizeof(errstr),
-					     "openat(%d, " TEST_FILE_NAME
-					     "): %s\n",
-					     dfd, strerror(err));
-				write(STDERR_FILENO, errstr, n + 1);
-				return err;
-			}
+			err = errno;
+			n = snprintf(errstr, sizeof(errstr),
+				     "openat(%d -> " SUBDIR2_NAME ", " TEST_FILE_NAME "): %s\n",
+				     subdir2_fd, strerror(err));
+			write(STDERR_FILENO, errstr, n + 1);
+			return err;
 		}
 		close(err);
 	}
@@ -432,13 +370,11 @@ static void do_test(struct __test_metadata *const _metadata,
 		return;
 	}
 
-	WRITE_ONCE(shr->test_file_at_dfd,
-		   test_file_dfd(_metadata, self, self->test_file_at));
 	WRITE_ONCE(shr->stop, false);
 
 	child_pid = fork();
 	if (child_pid == 0) {
-		_exit(child_process(shr, self->ruleset_fd));
+		_exit(child_process(self->subdir2_fd, self->ruleset_fd, &shr->stop));
 		return;
 	}
 
@@ -451,7 +387,7 @@ static void do_test(struct __test_metadata *const _metadata,
 	self->ruleset_fd = -1;
 
 	for (int i = 1; i < NUM_SUBDIRS; i++) {
-		move_test_file_and_rmdir(_metadata, self, i, shr);
+		move_subdir2_and_rmdir(_metadata, self, i);
 	}
 
 	WRITE_ONCE(shr->stop, true);
@@ -466,44 +402,33 @@ static void do_test(struct __test_metadata *const _metadata,
 	{
 		TH_LOG("Child process terminated with exit code %d", status);
 	}
-
-	cleanup_test_file(_metadata, self);
-}
-
-static void test_loop(struct __test_metadata *const _metadata,
-		      struct _test_data_layout *const self, int timeout)
-{
-	int start_time = time(NULL);
-	while (time(NULL) - start_time < timeout) {
-		create_subdirs(_metadata, self);
-		create_ruleset(_metadata, self);
-		do_test(_metadata, self);
-	}
-	cleanup_subdirs(_metadata, self);
 }
 
 FIXTURE_SETUP(layout)
 {
 	create_test_dir(_metadata, self);
-	self->test_file_at = -1;
+	self->subdir2_at = -1;
+	self->subdir2_fd = -1;
+	self->ruleset_fd = -1;
+	for (int i = 0; i < NUM_SUBDIRS; i++) {
+		self->subdir_fds[i] = -1;
+	}
 };
 
 FIXTURE_TEARDOWN(layout)
 {
-	cleanup_subdirs(_metadata, self);
 	cleanup_test_dir(_metadata, self);
 }
 
-// TEST_F_TIMEOUT(layout, pathwalk_test_depth1, TEST_TIME + 10)
-// {
-// 	self->has_subsubdir = false;
-// 	test_loop(_metadata, self, TEST_TIME);
-// }
-
-TEST_F_TIMEOUT(layout, pathwalk_test_depth2, TEST_TIME + 10)
+TEST_F_TIMEOUT(layout, pathwalk_race_test, TEST_TIME + 10)
 {
-	self->has_subsubdir = true;
-	test_loop(_metadata, self, TEST_TIME);
+	int start_time = time(NULL);
+	while (time(NULL) - start_time < TEST_TIME) {
+		create_subdirs(_metadata, self);
+		create_ruleset(_metadata, self);
+		do_test(_metadata, self);
+		cleanup_subdirs(_metadata, self);
+	}
 }
 
 TEST_HARNESS_MAIN
