@@ -815,6 +815,7 @@ static bool is_access_to_paths_allowed(
 
 	rcu_read_lock();
 
+restart_pathwalk:
 	if (unlikely(dentry_child1)) {
 		landlock_unmask_layers(
 			find_rule_rcu(domain, dentry_child1),
@@ -838,18 +839,22 @@ static bool is_access_to_paths_allowed(
 
 	walker_path = *path;
 
-	/*
-	 * Attempt to do a pathwalk without taking dentry references first,
-	 * but if any rename happens while we are doing this, give up and do a
-	 * walk with dget_parent instead.  This prevents wrong denials in the
-	 * presence of a move followed by an immediate rmdir of the old
-	 * parent, where even when both the original and the new parent has
-	 * allow rules, we might still hit a negative dentry (the deleted old
-	 * parent) and being unable to find either rules.
-	 */
-	rename_seqcount = read_seqbegin(&rename_lock);
-	if (rename_seqcount % 2 == 1) {
-		pathwalk_ref = true;
+	if (!pathwalk_ref) {
+		/*
+		* Attempt to do a pathwalk without taking dentry references first,
+		* but if any rename happens while we are doing this, give up and do a
+		* walk with dget_parent instead.  This prevents wrong denials in the
+		* presence of a move followed by an immediate rmdir of the old
+		* parent, where even when both the original and the new parent has
+		* allow rules, we might still hit a negative dentry (the deleted old
+		* parent) and being unable to find either rules.
+		*/
+		rename_seqcount = read_seqbegin(&rename_lock);
+		if (rename_seqcount % 2 == 1) {
+			pathwalk_ref = true;
+			path_get(&walker_path);
+		}
+	} else {
 		path_get(&walker_path);
 	}
 
@@ -979,22 +984,7 @@ jump_up:
 							NULL ?
 						"negative" :
 						"positive");
-				path_get(&walker_path);
-				rechecked_parent =
-					dget_parent(walker_path.dentry);
-				trace_printk(
-					"  for rechecked parent (%s), dentry is %s\n",
-					rechecked_parent->d_name.name,
-					d_backing_inode(rechecked_parent) ==
-							NULL ?
-						"negative" :
-						"positive");
-				dput(walker_path.dentry);
-				walker_path.dentry = rechecked_parent;
-				if (rechecked_parent != parent_dentry) {
-					rule = find_rule_rcu(
-						domain, walker_path.dentry);
-				}
+				goto restart_pathwalk;
 			} else {
 				walker_path.dentry = parent_dentry;
 			}
@@ -1131,12 +1121,15 @@ static bool collect_domain_accesses(
 	if (is_nouser_or_private(dir))
 		return true;
 
+	rcu_read_lock();
+
+restart_pathwalk:
 	access_dom = landlock_init_layer_masks(domain, LANDLOCK_MASK_ACCESS_FS,
 					       layer_masks_dom,
 					       LANDLOCK_KEY_INODE);
 
-	rcu_read_lock();
-	/*
+	if (!pathwalk_ref) {
+		/*
 	 * Attempt to do a pathwalk without taking dentry references first,
 	 * but if any rename happens while we are doing this, give up and do a
 	 * walk with dget_parent instead.  This prevents wrong denials in the
@@ -1145,9 +1138,12 @@ static bool collect_domain_accesses(
 	 * allow rules, we might still hit a negative dentry (the deleted old
 	 * parent) and being unable to find either rules.
 	 */
-	rename_seqcount = read_seqbegin(&rename_lock);
-	if (rename_seqcount % 2 == 1) {
-		pathwalk_ref = true;
+		rename_seqcount = read_seqbegin(&rename_lock);
+		if (rename_seqcount % 2 == 1) {
+			pathwalk_ref = true;
+			dget(dir);
+		}
+	} else {
 		dget(dir);
 	}
 	rule = find_rule_rcu(domain, dir);
@@ -1180,13 +1176,7 @@ static bool collect_domain_accesses(
 			rule = find_rule_rcu(domain, dir);
 			if (read_seqretry(&rename_lock, rename_seqcount)) {
 				pathwalk_ref = true;
-				dget(dir);
-				rechecked_parent = dget_parent(dir);
-				dput(dir);
-				dir = rechecked_parent;
-				if (rechecked_parent != parent_dentry) {
-					rule = find_rule_rcu(domain, dir);
-				}
+				goto restart_pathwalk;
 			} else {
 				dir = parent_dentry;
 			}
