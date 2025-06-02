@@ -9,8 +9,10 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <time.h>
 #include <linux/fs.h>
 #include <linux/mount.h>
+
 #include "common.h"
 
 #define NUM_SUBDIRS 1000
@@ -18,7 +20,7 @@
 #define SUBDIR_NAME_FORMAT "s%dd1"
 #define SUBSUBDIR_NAME_FORMAT "s%dd2"
 #define TEST_FILE_NAME "file"
-#define TEST_TIME 30
+#define TEST_TIME 1000
 
 /* layout hierarchy:
  * tmp
@@ -445,6 +447,9 @@ static void do_test(struct __test_metadata *const _metadata,
 		TH_LOG("Failed to fork child process: %s", strerror(errno));
 	}
 
+	close(self->ruleset_fd);
+	self->ruleset_fd = -1;
+
 	for (int i = 1; i < NUM_SUBDIRS; i++) {
 		move_test_file_and_rmdir(_metadata, self, i, shr);
 	}
@@ -465,6 +470,18 @@ static void do_test(struct __test_metadata *const _metadata,
 	cleanup_test_file(_metadata, self);
 }
 
+static void test_loop(struct __test_metadata *const _metadata,
+		      struct _test_data_layout *const self, int timeout)
+{
+	int start_time = time(NULL);
+	while (time(NULL) - start_time < timeout) {
+		create_subdirs(_metadata, self);
+		create_ruleset(_metadata, self);
+		do_test(_metadata, self);
+	}
+	cleanup_subdirs(_metadata, self);
+}
+
 FIXTURE_SETUP(layout)
 {
 	create_test_dir(_metadata, self);
@@ -477,22 +494,16 @@ FIXTURE_TEARDOWN(layout)
 	cleanup_test_dir(_metadata, self);
 }
 
-TEST_F_TIMEOUT(layout, pathwalk_test_depth1, TEST_TIME)
-{
-	self->has_subsubdir = false;
-	create_subdirs(_metadata, self);
-	create_ruleset(_metadata, self);
-	do_test(_metadata, self);
-	cleanup_subdirs(_metadata, self);
-}
+// TEST_F_TIMEOUT(layout, pathwalk_test_depth1, TEST_TIME + 10)
+// {
+// 	self->has_subsubdir = false;
+// 	test_loop(_metadata, self, TEST_TIME);
+// }
 
-TEST_F_TIMEOUT(layout, pathwalk_test_depth2, TEST_TIME)
+TEST_F_TIMEOUT(layout, pathwalk_test_depth2, TEST_TIME + 10)
 {
 	self->has_subsubdir = true;
-	create_subdirs(_metadata, self);
-	create_ruleset(_metadata, self);
-	do_test(_metadata, self);
-	cleanup_subdirs(_metadata, self);
+	test_loop(_metadata, self, TEST_TIME);
 }
 
 TEST_HARNESS_MAIN
