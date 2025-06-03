@@ -954,14 +954,6 @@ jump_up:
 		if (!pathwalk_ref) {
 			parent_dentry = walker_path.dentry->d_parent;
 
-			///// DEBUG
-			if (walker_path.dentry != path->dentry) {
-				for (int i = 0; i < 100000; i++)
-					READ_ONCE(walker_path.dentry->d_lockref
-							  .count);
-			}
-			///// DEBUG
-
 			rule = find_rule_rcu(domain, parent_dentry);
 			if (read_seqretry(&rename_lock, rename_seqcount)) {
 				pathwalk_ref = true;
