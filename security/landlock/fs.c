@@ -839,16 +839,14 @@ restart_pathwalk:
 
 	walker_path = *path;
 
+	/*
+	 * Attempt to do a pathwalk without taking dentry references first,
+	 * but if any rename happens while we are doing this, give up and do a
+	 * walk with dget_parent instead.  See comments in
+	 * collect_domain_accesses().
+	 */
+
 	if (!pathwalk_ref) {
-		/*
-		* Attempt to do a pathwalk without taking dentry references first,
-		* but if any rename happens while we are doing this, give up and do a
-		* walk with dget_parent instead.  This prevents wrong denials in the
-		* presence of a move followed by an immediate rmdir of the old
-		* parent, where even when both the original and the new parent has
-		* allow rules, we might still hit a negative dentry (the deleted old
-		* parent) and being unable to find either rules.
-		*/
 		rename_seqcount = read_seqbegin(&rename_lock);
 		if (rename_seqcount % 2 == 1) {
 			pathwalk_ref = true;
@@ -859,20 +857,13 @@ restart_pathwalk:
 	}
 
 	rule = find_rule_rcu(domain, walker_path.dentry);
-	/*
-	 * We don't need to check rename_seqcount here because we haven't
-	 * followed any d_parent yet, and the d_inode of the path being
-	 * accessed can't change under us.  But once we start walking up the
-	 * path, we need to check the seqcount to make sure the rule we got
-	 * isn't based on a wrong/changing/negative dentry.
-	 */
 
 	/*
 	 * We need to walk through all the hierarchy to not miss any relevant
 	 * restriction.
 	 */
 	while (true) {
-		struct dentry *parent_dentry, *rechecked_parent;
+		struct dentry *parent_dentry;
 
 		/*
 		 * If at least all accesses allowed on the destination are
@@ -1114,7 +1105,7 @@ static bool collect_domain_accesses(
 	bool pathwalk_ref = false;
 	unsigned rename_seqcount;
 	const struct landlock_rule *rule;
-	struct dentry *parent_dentry, *rechecked_parent;
+	struct dentry *parent_dentry;
 
 	if (WARN_ON_ONCE(!domain || !mnt_root || !dir || !layer_masks_dom))
 		return true;
@@ -1128,16 +1119,17 @@ restart_pathwalk:
 					       layer_masks_dom,
 					       LANDLOCK_KEY_INODE);
 
-	if (!pathwalk_ref) {
-		/*
-	 * Attempt to do a pathwalk without taking dentry references first,
-	 * but if any rename happens while we are doing this, give up and do a
-	 * walk with dget_parent instead.  This prevents wrong denials in the
-	 * presence of a move followed by an immediate rmdir of the old
-	 * parent, where even when both the original and the new parent has
-	 * allow rules, we might still hit a negative dentry (the deleted old
-	 * parent) and being unable to find either rules.
+	/*
+	 * Attempt to do a pathwalk without taking dentry references first, but
+	 * if any rename happens while we are doing this, give up and do a walk
+	 * with dget_parent instead.  This prevents wrong denials in the
+	 * presence of a move followed by an immediate rmdir of the old parent,
+	 * where even when both the original and the new parent has allow
+	 * rules, we might still hit a negative dentry (the deleted old parent)
+	 * and being unable to find either rules.
 	 */
+
+	if (!pathwalk_ref) {
 		rename_seqcount = read_seqbegin(&rename_lock);
 		if (rename_seqcount % 2 == 1) {
 			pathwalk_ref = true;
@@ -1150,9 +1142,10 @@ restart_pathwalk:
 	/*
 	 * We don't need to check rename_seqcount here because we haven't
 	 * followed any d_parent yet, and the d_inode of the path being
-	 * accessed can't change under us.  But once we start walking up the
-	 * path, we need to check the seqcount to make sure the rule we got
-	 * isn't based on a wrong/changing/negative dentry.
+	 * accessed can't change under us as we have ref on path.dentry.  But
+	 * once we start walking up the path, we need to check the seqcount to
+	 * make sure the rule we got isn't based on a wrong/changing/negative
+	 * dentry.
 	 */
 
 	while (true) {
