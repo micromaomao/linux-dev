@@ -846,8 +846,8 @@ restart_pathwalk:
 	 */
 
 	if (!pathwalk_ref) {
-		rename_seqcount = read_seqbegin(&rename_lock);
-		if (rename_seqcount % 2 == 1) {
+		rename_seqcount = raw_read_seqcount(&rename_lock.seqcount);
+		if (rename_seqcount & 1) {
 			pathwalk_ref = true;
 			path_get(&walker_path);
 		}
@@ -1110,8 +1110,8 @@ restart_pathwalk:
 	 */
 
 	if (!pathwalk_ref) {
-		rename_seqcount = read_seqbegin(&rename_lock);
-		if (rename_seqcount % 2 == 1) {
+		rename_seqcount = raw_read_seqcount(&rename_lock.seqcount);
+		if (rename_seqcount & 1) {
 			pathwalk_ref = true;
 			dget(dir);
 		}
