@@ -1153,6 +1153,11 @@ restart_pathwalk:
 			} else {
 				dir = parent_dentry;
 			}
+		} else {
+			parent_dentry = dget_parent(dir);
+			dput(dir);
+			dir = parent_dentry;
+			rule = find_rule_rcu(domain, dir);
 		}
 	}
 
