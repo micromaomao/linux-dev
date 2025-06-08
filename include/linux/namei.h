@@ -86,7 +86,24 @@ extern int follow_down_one(struct path *);
 extern int follow_down(struct path *path, unsigned int flags);
 extern int follow_up(struct path *);
 
-bool path_walk_parent(struct path *path, const struct path *root);
+struct parent_iterator {
+	struct path path;
+	struct path root;
+	bool rcu;
+	/* expected seq of path->dentry */
+	unsigned next_seq;
+	unsigned m_seq, r_seq;
+};
+
+#define PATH_WALK_PARENT_UPDATED		0
+#define PATH_WALK_PARENT_ALREADY_ROOT	-1
+#define PATH_WALK_PARENT_RETRY			-2
+
+void path_walk_parent_start(struct parent_iterator *pit,
+			    const struct path *path, const struct path *root,
+			    bool ref_less);
+int path_walk_parent(struct parent_iterator *pit, struct path *next_parent);
+int path_walk_parent_end(struct parent_iterator *pit);
 
 extern struct dentry *lock_rename(struct dentry *, struct dentry *);
 extern struct dentry *lock_rename_child(struct dentry *, struct dentry *);

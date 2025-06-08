@@ -375,6 +375,9 @@ find_rule(const struct landlock_ruleset *const domain,
 		return NULL;
 
 	inode = d_backing_inode(dentry);
+	if (unlikely(!inode))
+		/* this can happen in reference-less path walk. Let outside retry. */
+		return NULL;
 	rcu_read_lock();
 	id.key.object = rcu_dereference(landlock_inode(inode)->object);
 	rule = landlock_find_rule(domain, id);
@@ -767,10 +770,15 @@ static bool is_access_to_paths_allowed(
 	     child1_is_directory = true, child2_is_directory = true;
 	struct path walker_path;
 	access_mask_t access_masked_parent1, access_masked_parent2;
+	layer_mask_t _layer_mask_parent_1_init[LANDLOCK_NUM_ACCESS_FS],
+		_layer_mask_parent_2_init[LANDLOCK_NUM_ACCESS_FS];
 	layer_mask_t _layer_masks_child1[LANDLOCK_NUM_ACCESS_FS],
 		_layer_masks_child2[LANDLOCK_NUM_ACCESS_FS];
 	layer_mask_t(*layer_masks_child1)[LANDLOCK_NUM_ACCESS_FS] = NULL,
 	(*layer_masks_child2)[LANDLOCK_NUM_ACCESS_FS] = NULL;
+	struct parent_iterator iter;
+	bool restart_pathwalk = false;
+	int err;
 
 	if (!access_request_parent1 && !access_request_parent2)
 		return true;
@@ -783,6 +791,15 @@ static bool is_access_to_paths_allowed(
 
 	if (WARN_ON_ONCE(!layer_masks_parent1))
 		return false;
+
+	memcpy(_layer_mask_parent_1_init, layer_masks_parent1,
+	       sizeof(*layer_masks_parent1));
+	if (unlikely(layer_masks_parent2)) {
+		memcpy(_layer_mask_parent_2_init, layer_masks_parent2,
+		       sizeof(*layer_masks_parent2));
+	}
+
+restart_pathwalk:
 
 	allowed_parent1 = is_layer_masks_allowed(layer_masks_parent1);
 
@@ -830,15 +847,15 @@ static bool is_access_to_paths_allowed(
 		child2_is_directory = d_is_dir(dentry_child2);
 	}
 
+	path_walk_parent_start(&iter, path, NULL, !restart_pathwalk);
 	walker_path = *path;
-	path_get(&walker_path);
+
 	/*
 	 * We need to walk through all the hierarchy to not miss any relevant
 	 * restriction.
 	 */
 	while (true) {
 		const struct landlock_rule *rule;
-		struct path root = {};
 
 		/*
 		 * If at least all accesses allowed on the destination are
@@ -896,8 +913,22 @@ static bool is_access_to_paths_allowed(
 		if (allowed_parent1 && allowed_parent2)
 			break;
 
-		if (path_walk_parent(&walker_path, &root))
+		switch (path_walk_parent(&iter, &walker_path)) {
+		case PATH_WALK_PARENT_UPDATED:
 			continue;
+		case PATH_WALK_PARENT_RETRY:
+			path_walk_parent_end(&iter);
+			memcpy(layer_masks_parent1, _layer_mask_parent_1_init,
+			       sizeof(*layer_masks_parent1));
+			if (layer_masks_parent2)
+				memcpy(layer_masks_parent2,
+				       _layer_mask_parent_2_init,
+				       sizeof(*layer_masks_parent2));
+			restart_pathwalk = true;
+			goto restart_pathwalk;
+		case PATH_WALK_PARENT_ALREADY_ROOT:
+			break;
+		}
 
 		if (unlikely(IS_ROOT(walker_path.dentry))) {
 			/*
@@ -913,7 +944,17 @@ static bool is_access_to_paths_allowed(
 		}
 		break;
 	}
-	path_put(&walker_path);
+
+	err = path_walk_parent_end(&iter);
+	if (err == -EAGAIN) {
+		memcpy(layer_masks_parent1, _layer_mask_parent_1_init,
+		       sizeof(*layer_masks_parent1));
+		if (layer_masks_parent2)
+			memcpy(layer_masks_parent2, _layer_mask_parent_2_init,
+			       sizeof(*layer_masks_parent2));
+		restart_pathwalk = true;
+		goto restart_pathwalk;
+	}
 
 	if (!allowed_parent1) {
 		log_request_parent1->type = LANDLOCK_REQUEST_FS_ACCESS;

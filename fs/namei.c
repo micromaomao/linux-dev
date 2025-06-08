@@ -1425,6 +1425,30 @@ static bool choose_mountpoint(struct mount *m, const struct path *root,
 }
 
 /**
+ * acquires rcu read lock if rcu == true.
+ */
+void path_walk_parent_start(struct parent_iterator *pit, const struct path *path,
+			   const struct path *root, bool ref_less)
+{
+	pit->path = *path;
+
+	pit->root.mnt = NULL;
+	pit->root.dentry = NULL;
+	if (root)
+		pit->root = *root;
+
+	pit->rcu = ref_less;
+	if (ref_less) {
+		pit->m_seq = read_seqbegin(&mount_lock);
+		pit->r_seq = read_seqbegin(&rename_lock);
+		pit->next_seq = read_seqcount_begin(&pit->path.dentry->d_seq);
+		rcu_read_lock();
+	} else {
+		path_get(&pit->path);
+	}
+}
+
+/**
  * path_walk_parent - Walk to the parent of path
  * @path: input and output path.
  * @root: root of the path walk, do not go beyond this root. If @root is
@@ -1446,34 +1470,91 @@ static bool choose_mountpoint(struct mount *m, const struct path *root,
  *           // stop walking
  *
  * Returns:
- *  true  - if @path is updated to its parent.
- *  false - if @path is already the root (real root or @root).
+ *  PATH_WALK_PARENT_UPDATED      - if @path is updated to its parent.
+ *  PATH_WALK_PARENT_ALREADY_ROOT - if @path is already the root (real root or @root).
+ *  PATH_WALK_PARENT_RETRY        - reference-less path walk failed. Caller should restart with rcu == false.
  */
-bool path_walk_parent(struct path *path, const struct path *root)
+int path_walk_parent(struct parent_iterator *pit, struct path *next_parent)
 {
 	struct dentry *parent;
+	struct path *path = &pit->path;
+	struct path *root = &pit->root;
+	unsigned mountpoint_d_seq;
 
 	if (path_equal(path, root))
 		return false;
 
 	if (unlikely(path->dentry == path->mnt->mnt_root)) {
-		struct path p;
+		struct path upper_mountpoint;
 
-		if (!choose_mountpoint(real_mount(path->mnt), root, &p))
-			return false;
-		path_put(path);
-		*path = p;
+		if (pit->rcu) {
+			if (!choose_mountpoint_rcu(real_mount(path->mnt), root,
+						   &upper_mountpoint,
+						   &mountpoint_d_seq)) {
+				return PATH_WALK_PARENT_ALREADY_ROOT;
+			}
+			if (read_seqcount_retry(&path->dentry->d_seq,
+						pit->next_seq)) {
+				return PATH_WALK_PARENT_RETRY;
+			}
+			*path = upper_mountpoint;
+			pit->next_seq = mountpoint_d_seq;
+		} else {
+			if (!choose_mountpoint(real_mount(path->mnt), root,
+					       &upper_mountpoint))
+				return PATH_WALK_PARENT_ALREADY_ROOT;
+			path_put(path);
+			*path = upper_mountpoint;
+		}
 	}
 
 	if (unlikely(IS_ROOT(path->dentry)))
-		return false;
+		return PATH_WALK_PARENT_ALREADY_ROOT;
 
-	parent = dget_parent(path->dentry);
-	dput(path->dentry);
-	path->dentry = parent;
-	return true;
+	if (pit->rcu) {
+		parent = READ_ONCE(path->dentry->d_parent);
+		if (read_seqcount_retry(&path->dentry->d_seq, pit->next_seq)) {
+			return PATH_WALK_PARENT_RETRY;
+		}
+		path->dentry = parent;
+		pit->next_seq = read_seqcount_begin(&parent->d_seq);
+	} else {
+		parent = dget_parent(path->dentry);
+		dput(path->dentry);
+		path->dentry = parent;
+	}
+
+	if (next_parent)
+		*next_parent = *path;
+
+	return PATH_WALK_PARENT_UPDATED;
 }
 EXPORT_SYMBOL_GPL(path_walk_parent);
+
+/**
+ * releases rcu read lock if rcu == true.
+ * Returns -EAGAIN if rcu path walk failed.
+ */
+int path_walk_parent_end(struct parent_iterator *pit)
+{
+	bool need_restart = false;
+
+	if (pit->rcu) {
+		rcu_read_unlock();
+		/* do we need these if we're checking d_seq throughout? */
+		if (read_seqretry(&mount_lock, pit->m_seq) ||
+		    read_seqretry(&rename_lock, pit->r_seq)) {
+			need_restart = true;
+		}
+	} else {
+		path_put(&pit->path);
+	}
+
+	if (need_restart)
+		return -EAGAIN;
+
+	return 0;
+}
 
 /*
  * Perform an automount
