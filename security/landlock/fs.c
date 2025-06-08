@@ -946,7 +946,7 @@ restart_pathwalk:
 	}
 
 	err = path_walk_parent_end(&iter);
-	if (err == -EAGAIN) {
+	if (unlikely(err == -EAGAIN)) {
 		memcpy(layer_masks_parent1, _layer_mask_parent_1_init,
 		       sizeof(*layer_masks_parent1));
 		if (layer_masks_parent2)
@@ -954,6 +954,9 @@ restart_pathwalk:
 			       sizeof(*layer_masks_parent2));
 		restart_pathwalk = true;
 		goto restart_pathwalk;
+	} else if (unlikely(err)) {
+		WARN_ON_ONCE(1);
+		return err;
 	}
 
 	if (!allowed_parent1) {
