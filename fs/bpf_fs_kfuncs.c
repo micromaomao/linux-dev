@@ -327,23 +327,18 @@ __bpf_kfunc_end_defs();
 
 /* open-coded path iterator */
 struct bpf_iter_path {
-	__u64 __opaque[2];
-} __aligned(8);
-
-struct bpf_iter_path_kern {
-	struct path path;
+	__u64 __opaque[sizeof(struct parent_iterator) / sizeof(__u64)];
 } __aligned(8);
 
 __bpf_kfunc_start_defs();
 
-__bpf_kfunc int bpf_iter_path_new(struct bpf_iter_path *it,
-				  struct path *start,
+__bpf_kfunc int bpf_iter_path_new(struct bpf_iter_path *it, struct path *start,
 				  __u64 flags)
 {
-	struct bpf_iter_path_kern *kit = (void *)it;
+	struct parent_iterator *pit = (void *)it;
 
-	BUILD_BUG_ON(sizeof(*kit) > sizeof(*it));
-	BUILD_BUG_ON(__alignof__(*kit) != __alignof__(*it));
+	BUILD_BUG_ON(sizeof(*pit) > sizeof(*it));
+	BUILD_BUG_ON(__alignof__(*pit) != __alignof__(*it));
 
 	if (flags) {
 		/*
@@ -351,45 +346,51 @@ __bpf_kfunc int bpf_iter_path_new(struct bpf_iter_path *it,
 		 * kit->path so that it be passed to path_put() safely.
 		 * Note: path_put() is no-op for zero'ed path.
 		 */
-		memset(&kit->path, 0, sizeof(struct path));
+		memset(pit, 0, sizeof(*pit));
 		return -EINVAL;
 	}
 
-	kit->path = *start;
-	path_get(&kit->path);
-
-	return 0;
-}
-
-__bpf_kfunc struct path *bpf_iter_path_next(struct bpf_iter_path *it)
-{
-	struct bpf_iter_path_kern *kit = (void *)it;
-	struct path root = {};
-
 	/*
-	 * "root" is zero'ed. Therefore, unless the loop is explicitly
+	 * "root" is NULL. Therefore, unless the loop is explicitly
 	 * terminated, bpf_iter_path_next() will continue looping until
 	 * we've reached the global root of the VFS.
 	 *
 	 * If a root of walk is needed, the user can check "path" against
 	 * that root on each iteration.
 	 */
-	if (!path_walk_parent(&kit->path, &root)) {
+	path_walk_parent_start(pit, start, NULL, false);
+
+	return 0;
+}
+
+__bpf_kfunc struct path *bpf_iter_path_next(struct bpf_iter_path *it)
+{
+	struct parent_iterator *pit = (void *)it;
+	struct path p;
+
+	switch (path_walk_parent(pit, &p)) {
+	case PATH_WALK_PARENT_UPDATED:
+		return &pit->path;
+	case PATH_WALK_PARENT_ALREADY_ROOT:
 		/*
 		 * Return NULL, but keep valid kit->path. _destroy() will
 		 * always path_put(&kit->path).
 		 */
 		return NULL;
+	default:
+		WARN_ONCE(
+			1,
+			"did not expect any other return from path_walk_parent");
 	}
 
-	return &kit->path;
+	return &pit->path;
 }
 
 __bpf_kfunc void bpf_iter_path_destroy(struct bpf_iter_path *it)
 {
-	struct bpf_iter_path_kern *kit = (void *)it;
+	struct parent_iterator *pit = (void *)it;
 
-	path_put(&kit->path);
+	path_walk_parent_end(pit);
 }
 
 __bpf_kfunc_end_defs();
