@@ -4779,7 +4779,7 @@ TEST_F_FORK(layout1_bind, reparent_cross_mount)
 
 /*
  * Make sure access to file through a disconnected path works as expected.
- * This test uses s4d1 as the move target.
+ * This test moves s1d3 to s4d1.
  */
 TEST_F_FORK(layout1_bind, path_disconnected)
 {
@@ -4866,9 +4866,9 @@ TEST_F_FORK(layout1_bind, path_disconnected)
 }
 
 /*
- * Test that we can rename to make files disconnected, and rename it back,
- * under landlock.  This test uses s4d2 as the move target, so that we can
- * have a rule allowing refers on the move target's immediate parent.
+ * Test that renameat with disconnected paths works under landlock.  This
+ * test moves s1d3 to s4d2, so that we can have a rule allowing refers on
+ * the move target's immediate parent.
  */
 TEST_F_FORK(layout1_bind, path_disconnected_rename)
 {
@@ -4998,7 +4998,7 @@ TEST_F_FORK(layout1_bind, path_disconnected_rename)
 	ASSERT_EQ(0,
 		  renameat(bind_s1d3_fd, file1_name, bind_s1d3_fd, file2_name))
 	{
-		TH_LOG("Failed to rename %s to %s through disconnected %s: %s",
+		TH_LOG("Failed to rename %s to %s within disconnected %s: %s",
 		       file1_name, file2_name, bind_dir_s1d3, strerror(errno));
 	}
 	ASSERT_EQ(0, test_open_rel(bind_s1d3_fd, file2_name, O_RDONLY));
