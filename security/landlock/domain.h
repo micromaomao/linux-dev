@@ -5,6 +5,7 @@
  * Copyright © 2016-2020 Mickaël Salaün <mic@digikod.net>
  * Copyright © 2018-2020 ANSSI
  * Copyright © 2024-2025 Microsoft Corporation
+ * Copyright © 2025      Tingmao Wang <m@maowtm.org>
  */
 
 #ifndef _SECURITY_LANDLOCK_DOMAIN_H
@@ -20,6 +21,108 @@
 
 #include "access.h"
 #include "audit.h"
+#include "ruleset.h"
+
+struct landlock_domain_index {
+	/**
+	 * @key: The landlock object or port identifier.
+	 */
+	union landlock_key key;
+	/**
+	 * @layer_index: The index of the first landlock_layer corresponding
+	 * to this key in the relevant subarray.
+	 */
+	u32 layer_index;
+};
+
+struct landlock_domain {
+	/**
+	 * @num_layers: Number of layers in this domain.  This enables to
+	 * check that all the layers allow an access request.
+	 */
+	u32 num_layers;
+	/**
+	 * @num_fs_indices: Number of non-overlapping (i.e. not for the same
+	 * object) inode rules.
+	 */
+	u32 num_fs_indices;
+	/**
+	 * @num_net_indices: Number of non-overlapping (i.e. not for the same
+	 * port) network rules.
+	 */
+	u32 num_net_indices;
+	/**
+	 * @num_fs_layers: Number of landlock_layer in the fs_layers array.
+	 */
+	u32 num_fs_layers;
+	/**
+	 * @num_net_layers: Number of landlock_layer in the net_layers array.
+	 */
+	u32 num_net_layers;
+	/**
+	 * @len_rules: Total length (in units of uintptr_t) of the rules
+	 * array.  Used to check accesses are not out of bounds, but in theory
+	 * this is always derivable from the other length fields.
+	 */
+	u32 len_rules;
+	/**
+	 * @rules: The rest of this struct consists of 5 dynamically-sized,
+	 * arrays placed one after another, the contents of which are to be
+	 * accessed with dom_ helper macros defined in this header.  They are:
+	 *
+	 *     struct access_masks access_masks[num_layers];
+	 *     (possible alignment padding here)
+	 *     struct landlock_domain_index fs_indices[num_fs_indices];
+	 *     struct landlock_domain_index net_indices[num_net_indices];
+	 *     struct landlock_layer fs_layers[num_fs_layers];
+	 *     struct landlock_layer net_layers[num_net_layers];
+	 *     (possible alignment padding here)
+	 */
+	uintptr_t rules[] __counted_by(len_rules);
+};
+
+#define dom_access_masks(dom) ((struct access_masks *)((dom)->rules))
+
+#define _dom_fs_indices_offset(dom)                                        \
+	(ALIGN(array_size((dom)->num_layers, sizeof(struct access_masks)), \
+	       sizeof(uintptr_t)))
+
+#define dom_fs_indices(dom)                                      \
+	((struct landlock_domain_index *)((char *)(dom)->rules + \
+					  _dom_fs_indices_offset(dom)))
+
+#define _dom_net_indices_offset(dom)       \
+	(_dom_fs_indices_offset(dom) +     \
+	 array_size((dom)->num_fs_indices, \
+		    sizeof(struct landlock_domain_index)))
+
+#define dom_net_indices(dom)                                     \
+	((struct landlock_domain_index *)((char *)(dom)->rules + \
+					  _dom_net_indices_offset(dom)))
+
+#define _dom_fs_layers_offset(dom)          \
+	(_dom_net_indices_offset(dom) +     \
+	 array_size((dom)->num_net_indices, \
+		    sizeof(struct landlock_domain_index)))
+
+#define dom_fs_layers(dom)                                \
+	((struct landlock_layer *)((char *)(dom)->rules + \
+				   _dom_fs_layers_offset(dom)))
+
+#define _dom_net_layers_offset(dom)   \
+	(_dom_fs_layers_offset(dom) + \
+	 array_size((dom)->num_fs_layers, sizeof(struct landlock_layer)))
+
+#define dom_net_layers(dom)                               \
+	((struct landlock_layer *)((char *)(dom)->rules + \
+				   _dom_net_layers_offset(dom)))
+
+#define dom_rules_len(dom)                                        \
+	(ALIGN(_dom_net_layers_offset(dom) +                      \
+		       array_size((dom)->num_net_layers,          \
+				  sizeof(struct landlock_layer)), \
+	       sizeof(uintptr_t)) /                               \
+	 sizeof(uintptr_t))
 
 enum landlock_log_status {
 	LANDLOCK_LOG_PENDING = 0,

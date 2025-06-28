@@ -24,6 +24,13 @@
 #include "domain.h"
 #include "id.h"
 
+static void __maybe_unused build_check_domain(void)
+{
+	BUILD_BUG_ON(LANDLOCK_MAX_NUM_RULES >= U32_MAX);
+	BUILD_BUG_ON(LANDLOCK_MAX_NUM_RULES * LANDLOCK_MAX_NUM_LAYERS >=
+		     U32_MAX);
+}
+
 #ifdef CONFIG_AUDIT
 
 /**
