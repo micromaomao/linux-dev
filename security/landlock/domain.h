@@ -198,6 +198,10 @@ bool landlock_merge_walk_step(
 	u32 *const indices_written, struct landlock_layer *const out_layers,
 	u32 *const layers_written);
 
+struct landlock_domain *
+landlock_domain_merge_ruleset(const struct landlock_domain *parent,
+			      struct landlock_ruleset *ruleset);
+
 enum landlock_log_status {
 	LANDLOCK_LOG_PENDING = 0,
 	LANDLOCK_LOG_RECORDED,
