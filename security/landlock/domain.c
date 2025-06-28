@@ -25,7 +25,7 @@
 #include "domain.h"
 #include "id.h"
 
-static void __maybe_unused build_check_domain(void)
+static void build_check_domain(void)
 {
 	BUILD_BUG_ON(LANDLOCK_MAX_NUM_RULES >= U32_MAX);
 	BUILD_BUG_ON(LANDLOCK_MAX_NUM_RULES * LANDLOCK_MAX_NUM_LAYERS >=
@@ -360,6 +360,242 @@ bool landlock_merge_walk_step(
 	}
 
 	return true;
+}
+
+/**
+ * merge_rules_pass - Do one full merge walk for both fs and net, and
+ * optionally copy over indices and layers.
+ *
+ * @parent: Parent domain, or NULL if there is no parent.
+ * @child: Child domain.  num_layers must be set to the new level.
+ * @ruleset: Ruleset to be merged.  Must hold the ruleset lock across
+ * calls to this function.
+ * @only_calc_sizes: Whether this is a size-calculation pass, or the final
+ * merge pass.
+ *
+ * If @only_calc_sizes is true, child->num_{fs,net}_{indices,layers} will
+ * be updated.  Otherwise, the function writes to child->rules and checks
+ * that the number of indices and layers written matches with previously
+ * stored numbers in @child.
+ */
+static int merge_rules_pass(const struct landlock_domain *parent,
+			    struct landlock_domain *child,
+			    struct landlock_ruleset *ruleset,
+			    bool only_calc_sizes) __must_hold(&ruleset->lock)
+{
+	u32 next_index, new_level, indices_written, layers_written;
+	const struct landlock_rule *next_rule;
+
+	if (WARN_ON_ONCE(!ruleset || !child))
+		return -EINVAL;
+
+	new_level = child->num_layers;
+	/* We should have checked new_level <= LANDLOCK_MAX_NUM_LAYERS already */
+	if (WARN_ON_ONCE(new_level == 0 || new_level > LANDLOCK_MAX_NUM_LAYERS))
+		return -EINVAL;
+
+	next_index = 0;
+	next_rule = container_of(rb_first(&ruleset->root_inode),
+				 struct landlock_rule, node);
+	indices_written = 0;
+	layers_written = 0;
+
+	build_check_domain();
+
+	while (landlock_merge_walk_step(
+		parent ? dom_fs_indices(parent) : NULL,
+		parent ? parent->num_fs_indices : 0,
+		parent ? dom_fs_layers(parent) : NULL,
+		parent ? parent->num_fs_layers : 0, new_level, &next_index,
+		&next_rule, only_calc_sizes ? NULL : dom_fs_indices(child),
+		&indices_written, only_calc_sizes ? NULL : dom_fs_layers(child),
+		&layers_written)) {
+		if (indices_written >= U32_MAX || layers_written >= U32_MAX)
+			return -E2BIG;
+		/*
+		 * Best effort safety check - if we fail, we've already corrupted
+		 * stuff.
+		 */
+		BUG_ON(!only_calc_sizes &&
+		       (indices_written > child->num_fs_indices ||
+			layers_written > child->num_fs_layers));
+	}
+
+	if (only_calc_sizes) {
+		child->num_fs_indices = indices_written;
+		child->num_fs_layers = layers_written;
+	} else if (WARN_ON_ONCE(indices_written != child->num_fs_indices ||
+				layers_written != child->num_fs_layers))
+		return -EINVAL;
+
+#if IS_ENABLED(CONFIG_INET)
+	next_index = 0;
+	next_rule = container_of(rb_first(&ruleset->root_net_port),
+				 struct landlock_rule, node);
+	indices_written = 0;
+	layers_written = 0;
+
+	while (landlock_merge_walk_step(
+		parent ? dom_net_indices(parent) : NULL,
+		parent ? parent->num_net_indices : 0,
+		parent ? dom_net_layers(parent) : NULL,
+		parent ? parent->num_net_layers : 0, new_level, &next_index,
+		&next_rule, only_calc_sizes ? NULL : dom_net_indices(child),
+		&indices_written,
+		only_calc_sizes ? NULL : dom_net_layers(child),
+		&layers_written)) {
+		/*
+		 * Best effort safety check - if we fail, we've already corrupted
+		 * stuff.
+		 */
+		BUG_ON(!only_calc_sizes &&
+		       (indices_written > child->num_net_indices ||
+			layers_written > child->num_net_layers));
+	}
+
+	if (only_calc_sizes) {
+		child->num_net_indices = indices_written;
+		child->num_net_layers = layers_written;
+	} else if (WARN_ON_ONCE(indices_written != child->num_net_indices ||
+				layers_written != child->num_net_layers)) {
+		return -EINVAL;
+	}
+#endif /* IS_ENABLED(CONFIG_INET) */
+
+	return 0;
+}
+
+/**
+ * Populate handled access masks and hierarchy for the child.
+ *
+ * @parent: Parent domain, or NULL if there is no parent.
+ * @child: Child domain to be populated.
+ * @ruleset: Ruleset to be merged.  Must hold the ruleset lock.
+ */
+static int inherit_domain(const struct landlock_domain *parent,
+			  struct landlock_domain *child,
+			  struct landlock_ruleset *ruleset)
+	__must_hold(&ruleset->lock)
+{
+	if (WARN_ON_ONCE(!child || !ruleset || !child->hierarchy ||
+			 child->num_layers < 1 || ruleset->num_layers != 1)) {
+		return -EINVAL;
+	}
+
+	if (parent) {
+		if (WARN_ON_ONCE(child->num_layers != parent->num_layers + 1))
+			return -EINVAL;
+
+		/* Copies the parent layer stack. */
+		memcpy(dom_access_masks(child), dom_access_masks(parent),
+		       array_size(parent->num_layers,
+				  sizeof(*dom_access_masks(child))));
+
+		if (WARN_ON_ONCE(!parent->hierarchy))
+			return -EINVAL;
+
+		landlock_get_hierarchy(parent->hierarchy);
+		child->hierarchy->parent = parent->hierarchy;
+	}
+
+	/* Stacks the new layer. */
+	dom_access_masks(child)[child->num_layers - 1] =
+		landlock_upgrade_handled_access_masks(ruleset->access_masks[0]);
+
+	return 0;
+}
+
+/**
+ * landlock_domain_merge_ruleset - Merge a ruleset and a parent domain
+ * into a new domain.
+ *
+ * @parent: Parent domain.
+ * @ruleset: Ruleset to be merged.  This function will take the mutex on
+ * this ruleset while merging.
+ *
+ * The current task is requesting to be restricted.  The subjective credentials
+ * must not be in an overridden state. cf. landlock_init_hierarchy_log().
+ *
+ * Returns the intersection of @parent and @ruleset, or returns @parent if
+ * @ruleset is empty, or returns a duplicate of @ruleset if @parent is empty.
+ */
+struct landlock_domain *
+landlock_domain_merge_ruleset(const struct landlock_domain *parent,
+			      struct landlock_ruleset *ruleset)
+{
+	struct landlock_domain *new_dom __free(landlock_put_domain) = NULL;
+	struct landlock_hierarchy *new_hierarchy __free(kfree) = NULL;
+	struct landlock_domain new_dom_sizes = {};
+	u32 new_level;
+	int err;
+
+	might_sleep();
+	if (WARN_ON_ONCE(!ruleset))
+		return ERR_PTR(-EINVAL);
+
+	if (parent) {
+		if (parent->num_layers >= LANDLOCK_MAX_NUM_LAYERS)
+			return ERR_PTR(-E2BIG);
+		new_level = parent->num_layers + 1;
+	} else {
+		new_level = 1;
+	}
+
+	new_dom_sizes.num_layers = new_level;
+
+	/* Allocate this now so we fail early */
+	new_hierarchy = kzalloc(sizeof(*new_hierarchy), GFP_KERNEL_ACCOUNT);
+	if (!new_hierarchy)
+		return ERR_PTR(-ENOMEM);
+
+	/*
+	 * Figure out how many indices and layer structs.  From this point
+	 * until we actually merge in the ruleset, ruleset must not change.
+	 */
+	mutex_lock(&ruleset->lock);
+	err = merge_rules_pass(parent, &new_dom_sizes, ruleset, true);
+	if (err)
+		goto out_unlock;
+
+	/*
+	 * Ok, we know the required size now, allocate the domain and merge in
+	 * the indices and rules.
+	 */
+	new_dom = landlock_alloc_domain(&new_dom_sizes);
+	if (!new_dom) {
+		err = -ENOMEM;
+		goto out_unlock;
+	}
+	new_dom->hierarchy = new_hierarchy;
+	new_hierarchy = NULL;
+	refcount_set(&new_dom->hierarchy->usage, 1);
+
+	err = merge_rules_pass(parent, new_dom, ruleset, false);
+	if (err) {
+		/* new_dom can contain invalid landlock_object references. */
+		kfree(new_dom);
+		new_dom = NULL;
+		goto out_unlock;
+	}
+
+	for (size_t i = 0; i < new_dom->num_fs_indices; i++)
+		landlock_get_object(dom_fs_indices(new_dom)[i].key.object);
+
+	err = inherit_domain(parent, new_dom, ruleset);
+	if (err)
+		goto out_unlock;
+
+	mutex_unlock(&ruleset->lock);
+
+	err = landlock_init_hierarchy_log(new_dom->hierarchy);
+	if (err)
+		return ERR_PTR(err);
+
+	return no_free_ptr(new_dom);
+
+out_unlock:
+	mutex_unlock(&ruleset->lock);
+	return ERR_PTR(err);
 }
 
 #ifdef CONFIG_AUDIT
