@@ -433,15 +433,10 @@ construct_test_domain(struct kunit *const test,
 		l++;
 	}
 
-	dom_sizes.len_rules = dom_rules_len(&dom_sizes);
-
-	dom = kmalloc(struct_size(dom, rules, dom_sizes.len_rules), GFP_KERNEL);
+	dom = landlock_alloc_domain(&dom_sizes);
 	KUNIT_EXPECT_NOT_NULL(test, dom);
 	if (!dom)
 		return ERR_PTR(-ENOMEM);
-
-	memcpy(dom, &dom_sizes, sizeof(dom_sizes));
-	memset(dom->rules, 0, dom_sizes.len_rules * sizeof(uintptr_t));
 
 	ind = &tconfig->indices[0];
 	if (!use_net)
@@ -645,8 +640,7 @@ _do_test_merge(struct kunit *const test, const struct dom_test_config *const tc,
 	new_dom_sizes.len_rules = dom_rules_len(&new_dom_sizes);
 	KUNIT_ASSERT_TRUE(test, domain_check_valid_bounds(&new_dom_sizes));
 
-	new_dom = kmalloc(struct_size(new_dom, rules, new_dom_sizes.len_rules),
-			  GFP_KERNEL);
+	new_dom = landlock_alloc_domain(&new_dom_sizes);
 	KUNIT_EXPECT_NOT_NULL(test, new_dom);
 	if (!new_dom)
 		return NULL;
