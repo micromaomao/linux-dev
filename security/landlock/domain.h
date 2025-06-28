@@ -251,6 +251,10 @@ landlock_domain_find(const struct landlock_domain_index *const indices_arr,
 	for (layer = (found_rule).layers_start;    \
 	     layer < (found_rule).layers_end; layer++)
 
+struct landlock_domain *
+landlock_domain_merge_ruleset(const struct landlock_domain *parent,
+			      struct landlock_ruleset *ruleset);
+
 enum landlock_log_status {
 	LANDLOCK_LOG_PENDING = 0,
 	LANDLOCK_LOG_RECORDED,
