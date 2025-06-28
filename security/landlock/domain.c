@@ -51,6 +51,102 @@ static void build_check_domain(void)
 }
 
 /**
+ * landlock_alloc_domain - allocate a new domain given known sizes.  The
+ * caller must then at least fill in the indices and layers arrays before
+ * trying to free this domain.
+ *
+ * @sizes: A "fake" struct landlock_domain which just contains various
+ * num_* numbers.  This function will call dom_rules_len() to compute the
+ * total rules array length, and copy over the number fields.
+ * sizes.usage, sizes.hierarchy and sizes.work_free are ignored.
+ */
+struct landlock_domain *
+landlock_alloc_domain(const struct landlock_domain *sizes)
+{
+	u32 len_rules = dom_rules_len(sizes);
+	struct landlock_domain *new_dom = kzalloc(
+		struct_size(new_dom, rules, len_rules), GFP_KERNEL_ACCOUNT);
+
+	if (!new_dom)
+		return NULL;
+
+	memcpy(new_dom, sizes, sizeof(*sizes));
+	new_dom->hierarchy = NULL;
+	new_dom->work_free =
+		kzalloc(sizeof(*new_dom->work_free), GFP_KERNEL_ACCOUNT);
+	if (!new_dom->work_free) {
+		kfree(new_dom);
+		return NULL;
+	}
+	new_dom->work_free->domain = new_dom;
+	refcount_set(&new_dom->usage, 1);
+	new_dom->len_rules = len_rules;
+
+	return new_dom;
+}
+
+static void free_domain(struct landlock_domain *const domain)
+{
+	struct landlock_domain_index *fs_indices, ind;
+	u32 i, num_fs_indices;
+
+	might_sleep();
+	if (WARN_ON_ONCE(!domain))
+		return;
+	fs_indices = dom_fs_indices(domain);
+	num_fs_indices = domain->num_fs_indices;
+	if (WARN_ON_ONCE((uintptr_t *)(fs_indices + num_fs_indices) -
+				 domain->rules >
+			 domain->len_rules))
+		return;
+
+	for (i = 0; i < num_fs_indices; i++) {
+		ind = fs_indices[i];
+		landlock_put_object(ind.key.object);
+	}
+
+	landlock_put_hierarchy(domain->hierarchy);
+	domain->hierarchy = NULL;
+	kfree(domain->work_free);
+	domain->work_free = NULL;
+	kfree(domain);
+}
+
+void landlock_put_domain(struct landlock_domain *const domain)
+{
+	might_sleep();
+
+	if (domain && refcount_dec_and_test(&domain->usage))
+		free_domain(domain);
+}
+
+static void free_domain_work(struct work_struct *const work)
+{
+	struct landlock_domain_work_free *const fw =
+		container_of(work, struct landlock_domain_work_free, work);
+	struct landlock_domain *domain = fw->domain;
+
+	free_domain(domain);
+	/* the work_free struct will be freed by free_domain */
+}
+
+/*
+ * Schedule work to free a landlock_domain, useful in a non-sleepable
+ * context.
+ */
+void landlock_put_domain_deferred(struct landlock_domain *const domain)
+{
+	if (domain && refcount_dec_and_test(&domain->usage)) {
+		INIT_WORK(&domain->work_free->work, free_domain_work);
+
+		if (WARN_ON_ONCE(domain->work_free->domain != domain))
+			return;
+
+		schedule_work(&domain->work_free->work);
+	}
+}
+
+/**
  * dom_calculate_merged_sizes - Calculate the eventual size of the part of
  * a new domain for a given rule size (i.e. either fs or net).  Correct
  * usage requires the caller to hold the ruleset lock throughout the

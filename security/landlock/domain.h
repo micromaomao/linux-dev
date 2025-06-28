@@ -44,7 +44,30 @@ struct landlock_domain_index {
 	u32 layer_index;
 };
 
+struct landlock_domain_work_free {
+	struct work_struct work;
+	struct landlock_domain *domain;
+};
+
 struct landlock_domain {
+	/**
+	 * @hierarchy: Enables hierarchy identification even when a parent
+	 * domain vanishes.  This is needed for the ptrace protection.
+	 */
+	struct landlock_hierarchy *hierarchy;
+	/**
+	 * @work_free: Enables to free a domain within a lockless section.
+	 * This is only used by landlock_put_domain_deferred() when @usage
+	 * reaches zero. This is a pointer to an allocated struct in order to
+	 * minimize the size of this struct. To prevent needing to allocate
+	 * when freeing, this is pre-allocated on domain creation.
+	 */
+	struct landlock_domain_work_free *work_free;
+	/**
+	 * @usage: Number of processes (i.e. domains) or file descriptors
+	 * referencing this ruleset.
+	 */
+	refcount_t usage;
 	/**
 	 * @num_layers: Number of layers in this domain.  This enables to
 	 * check that all the layers allow an access request.
@@ -157,6 +180,21 @@ DEFINE_COALESCED_HASH_TABLE(struct landlock_domain_index, dom_hash, key,
 			    next_collision,
 			    hash_long(elem->key.data, 32) % table_size,
 			    dom_index_is_empty(elem))
+
+struct landlock_domain *
+landlock_alloc_domain(const struct landlock_domain *sizes);
+
+static inline void landlock_get_domain(struct landlock_domain *const domain)
+{
+	if (domain)
+		refcount_inc(&domain->usage);
+}
+
+void landlock_put_domain(struct landlock_domain *const domain);
+void landlock_put_domain_deferred(struct landlock_domain *const domain);
+
+DEFINE_FREE(landlock_put_domain, struct landlock_domain *,
+	    if (!IS_ERR_OR_NULL(_T)) landlock_put_domain(_T))
 
 struct landlock_found_rule {
 	const struct landlock_layer *layers_start;
