@@ -9,3 +9,5 @@ landlock-$(CONFIG_AUDIT) += \
 	id.o \
 	audit.o \
 	domain.o
+
+landlock-$(CONFIG_SECURITY_LANDLOCK_KUNIT_TEST) += domain_array_tests.o
