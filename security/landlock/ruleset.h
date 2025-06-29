@@ -27,7 +27,7 @@ struct landlock_hierarchy;
  */
 struct landlock_layer {
 	/**
-	 * @level: Position of this layer in the layer stack.
+	 * @level: Position of this layer in the layer stack.  Starts from 1.
 	 */
 	u16 level;
 	/**
@@ -203,10 +203,6 @@ DEFINE_FREE(landlock_put_ruleset, struct landlock_ruleset *,
 int landlock_insert_rule(struct landlock_ruleset *const ruleset,
 			 const struct landlock_id id,
 			 const access_mask_t access);
-
-struct landlock_ruleset *
-landlock_merge_ruleset(struct landlock_ruleset *const parent,
-		       struct landlock_ruleset *const ruleset);
 
 const struct landlock_rule *
 landlock_find_rule(const struct landlock_ruleset *const ruleset,
