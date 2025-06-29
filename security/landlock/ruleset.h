@@ -204,10 +204,6 @@ int landlock_insert_rule(struct landlock_ruleset *const ruleset,
 			 const struct landlock_id id,
 			 const access_mask_t access);
 
-struct landlock_ruleset *
-landlock_merge_ruleset(struct landlock_ruleset *const parent,
-		       struct landlock_ruleset *const ruleset);
-
 static inline struct landlock_rule *
 landlock_find_in_tree(const struct rb_root *const root,
 		      const union landlock_key key)
@@ -227,10 +223,6 @@ landlock_find_in_tree(const struct rb_root *const root,
 	}
 	return NULL;
 }
-
-const struct landlock_rule *
-landlock_find_rule(const struct landlock_ruleset *const ruleset,
-		   const struct landlock_id id);
 
 static inline void landlock_get_ruleset(struct landlock_ruleset *const ruleset)
 {
