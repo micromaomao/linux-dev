@@ -48,10 +48,8 @@ static int current_check_access_socket(struct socket *const sock,
 {
 	__be16 port;
 	layer_mask_t layer_masks[LANDLOCK_NUM_ACCESS_NET] = {};
-	const struct landlock_rule *rule;
-	struct landlock_id id = {
-		.type = LANDLOCK_KEY_NET_PORT,
-	};
+	struct landlock_found_rule rule;
+	union landlock_key key;
 	const struct access_masks masks = {
 		.net = access_request,
 	};
@@ -171,10 +169,10 @@ static int current_check_access_socket(struct socket *const sock,
 			return -EINVAL;
 	}
 
-	id.key.data = (__force uintptr_t)port;
-	BUILD_BUG_ON(sizeof(port) > sizeof(id.key.data));
+	key.data = (__force uintptr_t)port;
+	BUILD_BUG_ON(sizeof(port) > sizeof(key.data));
 
-	rule = landlock_find_rule(subject->domain, id);
+	rule = dom_find_index_net(subject->domain, key);
 	access_request = landlock_init_layer_masks(subject->domain,
 						   access_request, &layer_masks,
 						   LANDLOCK_KEY_NET_PORT);

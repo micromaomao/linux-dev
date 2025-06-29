@@ -17,7 +17,7 @@
 
 #include "access.h"
 #include "limits.h"
-#include "ruleset.h"
+#include "domain.h"
 #include "setup.h"
 
 /**
@@ -114,7 +114,7 @@ landlock_get_applicable_subject(const struct cred *const cred,
 	const union access_masks_all masks_all = {
 		.masks = masks,
 	};
-	const struct landlock_ruleset *domain;
+	const struct landlock_domain *domain;
 	ssize_t layer_level;
 
 	if (!cred)
@@ -127,7 +127,7 @@ landlock_get_applicable_subject(const struct cred *const cred,
 	for (layer_level = domain->num_layers - 1; layer_level >= 0;
 	     layer_level--) {
 		union access_masks_all layer = {
-			.masks = domain->access_masks[layer_level],
+			.masks = dom_access_masks(domain)[layer_level],
 		};
 
 		if (layer.all & masks_all.all) {
