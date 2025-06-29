@@ -150,6 +150,16 @@ landlock_domain_find(const struct landlock_domain *dom,
 	for (layer = (found_rule).layers_start;    \
 	     layer < (found_rule).layers_end; layer++)
 
+bool landlock_merge_walk_step(
+	const struct landlock_domain_index *dom_ind_array,
+	const u32 dom_num_indices,
+	const struct landlock_layer *const dom_layer_array,
+	const u32 dom_num_layers, const u32 new_level, u32 *const next_index,
+	const struct landlock_rule **const next_rule,
+	struct landlock_domain_index *const out_indices,
+	u32 *const indices_written, struct landlock_layer *const out_layers,
+	u32 *const layers_written);
+
 enum landlock_log_status {
 	LANDLOCK_LOG_PENDING = 0,
 	LANDLOCK_LOG_RECORDED,
