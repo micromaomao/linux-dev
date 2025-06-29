@@ -176,6 +176,13 @@ landlock_domain_find(const struct landlock_domain *const dom,
 				 domain_find_cmp_func);
 
 	if (found) {
+		if (WARN_ON_ONCE(found->layer_start >= num_layers ||
+				 found->layer_end > num_layers ||
+				 found->layer_start > found->layer_end ||
+				 (uintptr_t *)&layers_arr[found->layer_end] >
+					 &dom->rules[dom->len_rules]))
+			return out_found_rule;
+
 		out_found_rule.layers_start = &layers_arr[found->layer_start];
 		out_found_rule.layers_end = &layers_arr[found->layer_end];
 	}
