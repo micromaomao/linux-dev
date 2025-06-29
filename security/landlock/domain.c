@@ -22,6 +22,7 @@
 #include <linux/uidgid.h>
 
 #include "access.h"
+#include "audit.h"
 #include "common.h"
 #include "domain.h"
 #include "id.h"
@@ -781,6 +782,18 @@ landlock_get_deny_masks(const access_mask_t all_existing_optional_access,
 						  access_bit, __fls(mask));
 	}
 	return deny_masks;
+}
+
+void landlock_put_hierarchy(struct landlock_hierarchy *hierarchy)
+{
+	while (hierarchy && refcount_dec_and_test(&hierarchy->usage)) {
+		const struct landlock_hierarchy *const freeme = hierarchy;
+
+		landlock_log_drop_domain(hierarchy);
+		landlock_free_hierarchy_details(hierarchy);
+		hierarchy = hierarchy->parent;
+		kfree(freeme);
+	}
 }
 
 #ifdef CONFIG_SECURITY_LANDLOCK_KUNIT_TEST

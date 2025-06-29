@@ -20,7 +20,6 @@
 #include <linux/slab.h>
 
 #include "access.h"
-#include "audit.h"
 #include "ruleset.h"
 
 struct landlock_domain_index {
@@ -340,16 +339,6 @@ landlock_get_hierarchy(struct landlock_hierarchy *const hierarchy)
 		refcount_inc(&hierarchy->usage);
 }
 
-static inline void landlock_put_hierarchy(struct landlock_hierarchy *hierarchy)
-{
-	while (hierarchy && refcount_dec_and_test(&hierarchy->usage)) {
-		const struct landlock_hierarchy *const freeme = hierarchy;
-
-		landlock_log_drop_domain(hierarchy);
-		landlock_free_hierarchy_details(hierarchy);
-		hierarchy = hierarchy->parent;
-		kfree(freeme);
-	}
-}
+void landlock_put_hierarchy(struct landlock_hierarchy *hierarchy);
 
 #endif /* _SECURITY_LANDLOCK_DOMAIN_H */
