@@ -149,6 +149,8 @@ static int domain_find_cmp_func(const void *_key, const void *_index)
 		return -1;
 }
 
+#define dom_linear_search_threshold 16
+
 /**
  * landlock_domain_find - search for a key in a domain.  Don't use this
  * function directly, but use one of the dom_find_index_*() macros
@@ -169,11 +171,23 @@ landlock_domain_find(const struct landlock_domain *const dom,
 		     const u32 num_layers, const union landlock_key key)
 {
 	struct landlock_found_rule out_found_rule = {};
-	struct landlock_domain_index *found;
+	struct landlock_domain_index *found = NULL;
 
-	found = __inline_bsearch((void *)&key, (void *)indices_arr, num_indices,
-				 sizeof(struct landlock_domain_index),
-				 domain_find_cmp_func);
+	if (likely(num_indices <= dom_linear_search_threshold)) {
+		/* Do a linear search for small arrays */
+		for (u32 i = 0; i < num_indices; i++) {
+			if (indices_arr[i].key.data == key.data) {
+				found = (struct landlock_domain_index
+						 *)&indices_arr[i];
+				break;
+			}
+		}
+	} else {
+		found = __inline_bsearch((void *)&key, (void *)indices_arr,
+					 num_indices,
+					 sizeof(struct landlock_domain_index),
+					 domain_find_cmp_func);
+	}
 
 	if (found) {
 		if (WARN_ON_ONCE(found->layer_end > num_layers))
