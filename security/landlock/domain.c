@@ -5,6 +5,7 @@
  * Copyright © 2016-2020 Mickaël Salaün <mic@digikod.net>
  * Copyright © 2018-2020 ANSSI
  * Copyright © 2024-2025 Microsoft Corporation
+ * Copyright © 2025      Tingmao Wang <m@maowtm.org>
  */
 
 #include <kunit/test.h>
@@ -29,6 +30,69 @@ static void __maybe_unused build_check_domain(void)
 	BUILD_BUG_ON(LANDLOCK_MAX_NUM_RULES >= U32_MAX);
 	BUILD_BUG_ON(LANDLOCK_MAX_NUM_RULES * LANDLOCK_MAX_NUM_LAYERS >=
 		     U32_MAX);
+}
+
+/**
+ * landlock_domain_find - search for a key in a domain.  Don't use this
+ * function directly, but use one of the dom_find_index_*() macros
+ * instead.
+ *
+ * @dom: The domain to search in.
+ * @indices_arr: The indices array to search in.
+ * @num_indices: The number of elements in @indices_arr.
+ * @layers_arr: The layers array.
+ * @num_layers: The number of elements in @layers_arr.
+ * @key: The key to search for.
+ */
+struct landlock_found_rule
+landlock_domain_find(const struct landlock_domain *const dom,
+		     const struct landlock_domain_index *const indices_arr,
+		     const u32 num_indices,
+		     const struct landlock_layer *const layers_arr,
+		     const u32 num_layers, const union landlock_key key)
+{
+	struct landlock_found_rule out_found_rule = {};
+	u32 left = 0, right = num_indices;
+	u32 l_start, l_end;
+
+	if (WARN_ON_ONCE(!dom || !indices_arr || !layers_arr))
+		return out_found_rule;
+
+	if (WARN_ON_ONCE((uintptr_t *)layers_arr <= dom->rules))
+		return out_found_rule;
+
+	while (left < right) {
+		const u32 mid = left + (right - left) / 2;
+		const struct landlock_domain_index *const curr_mid =
+			&indices_arr[mid];
+
+		if (curr_mid->key.data == key.data) {
+			l_start = curr_mid->layer_index;
+			if (mid + 1 < num_indices)
+				l_end = indices_arr[mid + 1].layer_index;
+			else
+				l_end = num_layers;
+
+			if (WARN_ON_ONCE(l_start >= num_layers ||
+					 l_end > num_layers || l_start > l_end))
+				return out_found_rule;
+
+			if (WARN_ON_ONCE((uintptr_t *)&layers_arr[l_end] >
+					 &dom->rules[dom->len_rules]))
+				return out_found_rule;
+
+			out_found_rule.layers_start = &layers_arr[l_start];
+			out_found_rule.layers_end = &layers_arr[l_end];
+
+			return out_found_rule;
+		} else if (curr_mid->key.data < key.data) {
+			left = mid + 1;
+		} else {
+			right = mid;
+		}
+	}
+
+	return out_found_rule;
 }
 
 #ifdef CONFIG_AUDIT
