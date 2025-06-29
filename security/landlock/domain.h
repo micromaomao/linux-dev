@@ -28,10 +28,14 @@ struct landlock_domain_index {
 	 */
 	union landlock_key key;
 	/**
-	 * @layer_index: The index of the first landlock_layer corresponding
+	 * @layer_start: The index of the first landlock_layer corresponding
 	 * to this key in the relevant subarray.
 	 */
-	u32 layer_index;
+	u32 layer_start;
+	/**
+	 * @layer_end: The non-inclusive end of this rule's range of layers.
+	 */
+	u32 layer_end;
 };
 
 struct landlock_domain_work_free {

@@ -176,11 +176,8 @@ landlock_domain_find(const struct landlock_domain *const dom,
 				 domain_find_cmp_func);
 
 	if (found) {
-		out_found_rule.layers_start = &layers_arr[found->layer_index];
-		out_found_rule.layers_end = &layers_arr[num_layers];
-		if (found + 1 < indices_arr + num_indices)
-			out_found_rule.layers_end =
-				&layers_arr[(found + 1)->layer_index];
+		out_found_rule.layers_start = &layers_arr[found->layer_start];
+		out_found_rule.layers_end = &layers_arr[found->layer_end];
 	}
 
 	return out_found_rule;
@@ -291,30 +288,26 @@ bool landlock_merge_walk_step(
 	*indices_written += 1;
 
 	if (index) {
-		u32 layer_i, layer_end, inc;
+		u32 layer_start, layer_end, inc;
 
 		if (out_index) {
 			out_index->key = index->key;
-			out_index->layer_index = *layers_written;
+			out_index->layer_start = *layers_written;
 		}
 
-		layer_i = index->layer_index;
-		if ((*next_index) + 1 < dom_num_indices)
-			layer_end =
-				dom_ind_array[(*next_index) + 1].layer_index;
-		else
-			layer_end = dom_num_layers;
+		layer_start = index->layer_start;
+		layer_end = index->layer_end;
 
 		if (out_layers) {
-			while (layer_i < layer_end) {
-				l = &dom_layer_array[layer_i++];
+			while (layer_start < layer_end) {
+				l = &dom_layer_array[layer_start++];
 				WARN_ON_ONCE(l->level >= new_level);
 				if (WARN_ON_ONCE(*layers_written >= U32_MAX))
 					return false;
 				out_layers[(*layers_written)++] = *l;
 			}
 		} else {
-			inc = layer_end - layer_i;
+			inc = layer_end - layer_start;
 			if (WARN_ON_ONCE(*layers_written > U32_MAX - inc))
 				return false;
 			*layers_written += inc;
@@ -328,7 +321,7 @@ bool landlock_merge_walk_step(
 
 		if (out_index && !index) {
 			out_index->key = rule->key;
-			out_index->layer_index = *layers_written;
+			out_index->layer_start = *layers_written;
 		}
 
 		WARN_ON_ONCE(rule->num_layers != 1);
@@ -350,6 +343,10 @@ bool landlock_merge_walk_step(
 						  struct landlock_rule, node);
 		else
 			*next_rule = NULL;
+	}
+
+	if (out_index) {
+		out_index->layer_end = *layers_written;
 	}
 
 	return true;

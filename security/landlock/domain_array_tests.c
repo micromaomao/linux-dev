@@ -163,7 +163,7 @@ static const struct dom_test_config kunit_dom_test_cases[] = {
 		(const uintptr_t[]){ 123, 0 },
 		(const access_mask_t[]){ LANDLOCK_ACCESS_FS_READ_FILE, 0 },
 		(const struct landlock_domain_index[]){
-			{ .key = { .data = 123 }, .layer_index = 0 },
+			{ .key = { .data = 123 }, .layer_start = 0 },
 			{ .key = { .data = 0 } },
 		},
 		(const struct landlock_layer[]){
@@ -184,7 +184,7 @@ static const struct dom_test_config kunit_dom_test_cases[] = {
 		(const uintptr_t[]){ 123, 0 },
 		(const access_mask_t[]){ LANDLOCK_ACCESS_FS_READ_FILE, 0 },
 		(const struct landlock_domain_index[]){
-			{ .key = { .data = 123 }, .layer_index = 0 },
+			{ .key = { .data = 123 }, .layer_start = 0 },
 			{ .key = { .data = 0 } },
 		},
 		(const struct landlock_layer[]){
@@ -196,7 +196,7 @@ static const struct dom_test_config kunit_dom_test_cases[] = {
 		/* Simple merge - existing rule */
 		1,
 		(const struct landlock_domain_index[]){
-			{ .key = { .data = 123 }, .layer_index = 0 },
+			{ .key = { .data = 123 }, .layer_start = 0 },
 			{ .key = { .data = 0 } },
 		},
 		(const struct landlock_layer[]){
@@ -207,7 +207,7 @@ static const struct dom_test_config kunit_dom_test_cases[] = {
 		(const uintptr_t[]){ 123, 0 },
 		(const access_mask_t[]){ LANDLOCK_ACCESS_FS_READ_FILE, 0 },
 		(const struct landlock_domain_index[]){
-			{ .key = { .data = 123 }, .layer_index = 0 },
+			{ .key = { .data = 123 }, .layer_start = 0 },
 			{ .key = { .data = 0 } },
 		},
 		(const struct landlock_layer[]){
@@ -220,7 +220,7 @@ static const struct dom_test_config kunit_dom_test_cases[] = {
 		/* Simple merge - new rule */
 		1,
 		(const struct landlock_domain_index[]){
-			{ .key = { .data = 123 }, .layer_index = 0 },
+			{ .key = { .data = 123 }, .layer_start = 0 },
 			{ .key = { .data = 0 } },
 		},
 		(const struct landlock_layer[]){
@@ -231,8 +231,8 @@ static const struct dom_test_config kunit_dom_test_cases[] = {
 		(const uintptr_t[]){ 234, 0 },
 		(const access_mask_t[]){ LANDLOCK_ACCESS_FS_READ_FILE, 0 },
 		(const struct landlock_domain_index[]){
-			{ .key = { .data = 123 }, .layer_index = 0 },
-			{ .key = { .data = 234 }, .layer_index = 1 },
+			{ .key = { .data = 123 }, .layer_start = 0 },
+			{ .key = { .data = 234 }, .layer_start = 1 },
 			{ .key = { .data = 0 } },
 		},
 		(const struct landlock_layer[]){
@@ -245,9 +245,9 @@ static const struct dom_test_config kunit_dom_test_cases[] = {
 		/* Merge into new and existing rules in one go */
 		1,
 		(const struct landlock_domain_index[]){
-			{ .key = { .data = 123 }, .layer_index = 0 },
-			{ .key = { .data = 234 }, .layer_index = 1 },
-			{ .key = { .data = 567 }, .layer_index = 2 },
+			{ .key = { .data = 123 }, .layer_start = 0 },
+			{ .key = { .data = 234 }, .layer_start = 1 },
+			{ .key = { .data = 567 }, .layer_start = 2 },
 			{ .key = { .data = 0 } },
 		},
 		(const struct landlock_layer[]){
@@ -263,10 +263,10 @@ static const struct dom_test_config kunit_dom_test_cases[] = {
 						 LANDLOCK_ACCESS_FS_WRITE_FILE,
 					 LANDLOCK_ACCESS_FS_WRITE_FILE, 0 },
 		(const struct landlock_domain_index[]){
-			{ .key = { .data = 123 }, .layer_index = 0 },
-			{ .key = { .data = 234 }, .layer_index = 2 },
-			{ .key = { .data = 456 }, .layer_index = 4 },
-			{ .key = { .data = 567 }, .layer_index = 5 },
+			{ .key = { .data = 123 }, .layer_start = 0 },
+			{ .key = { .data = 234 }, .layer_start = 2 },
+			{ .key = { .data = 456 }, .layer_start = 4 },
+			{ .key = { .data = 567 }, .layer_start = 5 },
 			{ .key = { .data = 0 } },
 		},
 		(const struct landlock_layer[]){
@@ -289,8 +289,8 @@ static const struct dom_test_config kunit_dom_test_cases[] = {
 		/* Multiple layers */
 		2,
 		(const struct landlock_domain_index[]){
-			{ .key = { .data = 123 }, .layer_index = 0 },
-			{ .key = { .data = 456 }, .layer_index = 1 },
+			{ .key = { .data = 123 }, .layer_start = 0 },
+			{ .key = { .data = 456 }, .layer_start = 1 },
 			{ .key = { .data = 0 } },
 		},
 		(const struct landlock_layer[]){
@@ -305,8 +305,8 @@ static const struct dom_test_config kunit_dom_test_cases[] = {
 		(const uintptr_t[]){ 123, 456, 0 },
 		(const access_mask_t[]){ 4, 5, 0 },
 		(const struct landlock_domain_index[]){
-			{ .key = { .data = 123 }, .layer_index = 0 },
-			{ .key = { .data = 456 }, .layer_index = 2 },
+			{ .key = { .data = 123 }, .layer_start = 0 },
+			{ .key = { .data = 456 }, .layer_start = 2 },
 			{ .key = { .data = 0 } },
 		},
 		(const struct landlock_layer[]){
@@ -324,11 +324,11 @@ static const struct dom_test_config kunit_dom_test_cases[] = {
 		/* Layer gaps */
 		3,
 		(const struct landlock_domain_index[]){
-			{ .key = { .data = 123 }, .layer_index = 0 },
-			{ .key = { .data = 456 }, .layer_index = 2 },
-			{ .key = { .data = 500 }, .layer_index = 4 },
-			{ .key = { .data = 567 }, .layer_index = 5 },
-			{ .key = { .data = 789 }, .layer_index = 6 },
+			{ .key = { .data = 123 }, .layer_start = 0 },
+			{ .key = { .data = 456 }, .layer_start = 2 },
+			{ .key = { .data = 500 }, .layer_start = 4 },
+			{ .key = { .data = 567 }, .layer_start = 5 },
+			{ .key = { .data = 789 }, .layer_start = 6 },
 			{ .key = { .data = 0 } },
 		},
 		(const struct landlock_layer[]){
@@ -355,13 +355,13 @@ static const struct dom_test_config kunit_dom_test_cases[] = {
 					 LANDLOCK_ACCESS_FS_EXECUTE,
 					 LANDLOCK_ACCESS_FS_IOCTL_DEV, 0 },
 		(const struct landlock_domain_index[]){
-			{ .key = { .data = 1 }, .layer_index = 0 },
-			{ .key = { .data = 123 }, .layer_index = 1 },
-			{ .key = { .data = 456 }, .layer_index = 4 },
-			{ .key = { .data = 500 }, .layer_index = 7 },
-			{ .key = { .data = 567 }, .layer_index = 8 },
-			{ .key = { .data = 789 }, .layer_index = 10 },
-			{ .key = { .data = 999 }, .layer_index = 12 },
+			{ .key = { .data = 1 }, .layer_start = 0 },
+			{ .key = { .data = 123 }, .layer_start = 1 },
+			{ .key = { .data = 456 }, .layer_start = 4 },
+			{ .key = { .data = 500 }, .layer_start = 7 },
+			{ .key = { .data = 567 }, .layer_start = 8 },
+			{ .key = { .data = 789 }, .layer_start = 10 },
+			{ .key = { .data = 999 }, .layer_start = 12 },
 			{ .key = { .data = 0 } },
 		},
 		(const struct landlock_layer[]){
@@ -390,8 +390,8 @@ static const struct dom_test_config kunit_dom_test_cases[] = {
 	{
 		2,
 		(const struct landlock_domain_index[]){
-			{ .key = { .data = 123 }, .layer_index = 0 },
-			{ .key = { .data = 456 }, .layer_index = 1 },
+			{ .key = { .data = 123 }, .layer_start = 0 },
+			{ .key = { .data = 456 }, .layer_start = 1 },
 			{ .key = { .data = 0 } },
 		},
 		(const struct landlock_layer[]){
@@ -482,7 +482,7 @@ static void _test_domain_find(struct kunit *const test,
 			else
 				expected_end = dom->num_net_layers;
 		} else {
-			expected_end = (ind + 1)->layer_index;
+			expected_end = (ind + 1)->layer_start;
 		}
 
 		if (!use_net) {
@@ -494,7 +494,7 @@ static void _test_domain_find(struct kunit *const test,
 		}
 
 		KUNIT_ASSERT_TRUE(test, dom_find_success(found_rule));
-		KUNIT_ASSERT_EQ(test, ind->layer_index,
+		KUNIT_ASSERT_EQ(test, ind->layer_start,
 				found_rule.layers_start - layers_arr);
 		KUNIT_ASSERT_GE(test, expected_end,
 				found_rule.layers_end - layers_arr);
@@ -681,9 +681,9 @@ static void assert_indices_eq(struct kunit *const test,
 				    "Index %zu: expected key %zu, got %zu", i,
 				    expected[i].key.data, actual[i].key.data);
 		KUNIT_ASSERT_EQ_MSG(
-			test, expected[i].layer_index, actual[i].layer_index,
+			test, expected[i].layer_start, actual[i].layer_start,
 			"Index %zu: expected layer index %u, got %u", i,
-			expected[i].layer_index, actual[i].layer_index);
+			expected[i].layer_start, actual[i].layer_start);
 	}
 }
 
