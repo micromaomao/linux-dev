@@ -11,7 +11,6 @@
 #include <kunit/test.h>
 #include <linux/bitops.h>
 #include <linux/bits.h>
-#include <linux/bsearch.h>
 #include <linux/cred.h>
 #include <linux/file.h>
 #include <linux/mm.h>
@@ -130,74 +129,6 @@ void landlock_put_domain_deferred(struct landlock_domain *const domain)
 
 		schedule_work(&domain->work_free->work);
 	}
-}
-
-static int domain_find_cmp_func(const void *_key, const void *_index)
-{
-	const union landlock_key *key = _key;
-	const struct landlock_domain_index *index = _index;
-
-	if (index->key.data == key->data)
-		return 0;
-	else if (index->key.data < key->data)
-		/*
-		 * If the thing I'm looking at is less than search key, search in
-		 * the right.  See bsearch.h
-		 */
-		return 1;
-	else
-		return -1;
-}
-
-#define dom_linear_search_threshold 16
-
-/**
- * landlock_domain_find - search for a key in a domain.  Don't use this
- * function directly, but use one of the dom_find_index_*() macros
- * instead.
- *
- * @dom: The domain to search in.
- * @indices_arr: The indices array to search in.
- * @num_indices: The number of elements in @indices_arr.
- * @layers_arr: The layers array.
- * @num_layers: The number of elements in @layers_arr.
- * @key: The key to search for.
- */
-struct landlock_found_rule
-landlock_domain_find(const struct landlock_domain *const dom,
-		     const struct landlock_domain_index *const indices_arr,
-		     const u32 num_indices,
-		     const struct landlock_layer *const layers_arr,
-		     const u32 num_layers, const union landlock_key key)
-{
-	struct landlock_found_rule out_found_rule = {};
-	struct landlock_domain_index *found = NULL;
-
-	if (likely(num_indices <= dom_linear_search_threshold)) {
-		/* Do a linear search for small arrays */
-		for (u32 i = 0; i < num_indices; i++) {
-			if (indices_arr[i].key.data == key.data) {
-				found = (struct landlock_domain_index
-						 *)&indices_arr[i];
-				break;
-			}
-		}
-	} else {
-		found = __inline_bsearch((void *)&key, (void *)indices_arr,
-					 num_indices,
-					 sizeof(struct landlock_domain_index),
-					 domain_find_cmp_func);
-	}
-
-	if (found) {
-		if (WARN_ON_ONCE(found->layer_end > num_layers))
-			return out_found_rule;
-
-		out_found_rule.layers_start = &layers_arr[found->layer_start];
-		out_found_rule.layers_end = &layers_arr[found->layer_end];
-	}
-
-	return out_found_rule;
 }
 
 /**
