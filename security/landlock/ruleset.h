@@ -238,31 +238,6 @@ static inline void landlock_get_ruleset(struct landlock_ruleset *const ruleset)
 		refcount_inc(&ruleset->usage);
 }
 
-/**
- * landlock_union_access_masks - Return all access rights handled in the
- *				 domain
- *
- * @domain: Landlock ruleset (used as a domain)
- *
- * Returns: an access_masks result of the OR of all the domain's access masks.
- */
-static inline struct access_masks
-landlock_union_access_masks(const struct landlock_ruleset *const domain)
-{
-	union access_masks_all matches = {};
-	size_t layer_level;
-
-	for (layer_level = 0; layer_level < domain->num_layers; layer_level++) {
-		union access_masks_all layer = {
-			.masks = domain->access_masks[layer_level],
-		};
-
-		matches.all |= layer.all;
-	}
-
-	return matches.masks;
-}
-
 static inline void
 landlock_add_fs_access_mask(struct landlock_ruleset *const ruleset,
 			    const access_mask_t fs_access_mask,
@@ -313,23 +288,5 @@ landlock_get_net_access_mask(const struct landlock_ruleset *const ruleset,
 {
 	return ruleset->access_masks[layer_level].net;
 }
-
-static inline access_mask_t
-landlock_get_scope_mask(const struct landlock_ruleset *const ruleset,
-			const u16 layer_level)
-{
-	return ruleset->access_masks[layer_level].scope;
-}
-
-bool landlock_unmask_layers(const struct landlock_rule *const rule,
-			    const access_mask_t access_request,
-			    layer_mask_t (*const layer_masks)[],
-			    const size_t masks_array_size);
-
-access_mask_t
-landlock_init_layer_masks(const struct landlock_ruleset *const domain,
-			  const access_mask_t access_request,
-			  layer_mask_t (*const layer_masks)[],
-			  const enum landlock_key_type key_type);
 
 #endif /* _SECURITY_LANDLOCK_RULESET_H */

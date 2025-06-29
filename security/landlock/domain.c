@@ -21,6 +21,7 @@
 #include <linux/uidgid.h>
 
 #include "access.h"
+#include "audit.h"
 #include "common.h"
 #include "domain.h"
 #include "id.h"
@@ -788,7 +789,83 @@ landlock_get_deny_masks(const access_mask_t all_existing_optional_access,
 	return deny_masks;
 }
 
+#endif /* CONFIG_AUDIT */
+
+void landlock_put_hierarchy(struct landlock_hierarchy *hierarchy)
+{
+	while (hierarchy && refcount_dec_and_test(&hierarchy->usage)) {
+		const struct landlock_hierarchy *const freeme = hierarchy;
+
+		landlock_log_drop_domain(hierarchy);
+		landlock_free_hierarchy_details(hierarchy);
+		hierarchy = hierarchy->parent;
+		kfree(freeme);
+	}
+}
+
+/*
+ * @layer_masks is read and may be updated according to the access request and
+ * the matching rule.
+ * @masks_array_size must be equal to ARRAY_SIZE(*layer_masks).
+ *
+ * Returns true if the request is allowed (i.e. relevant layer masks for the
+ * request are empty).
+ */
+bool landlock_unmask_layers(const struct landlock_found_rule rule,
+			    const access_mask_t access_request,
+			    layer_mask_t (*const layer_masks)[],
+			    const size_t masks_array_size)
+{
+	const struct landlock_layer *layer;
+
+	if (!access_request || !layer_masks)
+		return true;
+
+	if (rule.layers_start == rule.layers_end)
+		return false;
+
+	if (WARN_ON_ONCE(rule.layers_start > rule.layers_end))
+		return false;
+
+	/* We should not have layers_start being NULL but layers_end not */
+	if (WARN_ON_ONCE(rule.layers_start == NULL))
+		return false;
+
+	/*
+	 * An access is granted if, for each policy layer, at least one rule
+	 * encountered on the pathwalk grants the requested access,
+	 * regardless of its position in the layer stack.  We must then check
+	 * the remaining layers for each inode, from the first added layer to
+	 * the last one.  When there is multiple requested accesses, for each
+	 * policy layer, the full set of requested accesses may not be granted
+	 * by only one rule, but by the union (binary OR) of multiple rules.
+	 * E.g. /a/b <execute> + /a <read> => /a/b <execute + read>
+	 */
+	dom_rule_for_each_layer(rule, layer)
+	{
+		const layer_mask_t layer_bit = BIT_ULL(layer->level - 1);
+		const unsigned long access_req = access_request;
+		unsigned long access_bit;
+		bool is_empty;
+
+		/*
+		 * Records in @layer_masks which layer grants access to each requested
+		 * access: bit cleared if the related layer grants access.
+		 */
+		is_empty = true;
+		for_each_set_bit(access_bit, &access_req, masks_array_size) {
+			if (layer->access & BIT_ULL(access_bit))
+				(*layer_masks)[access_bit] &= ~layer_bit;
+			is_empty = is_empty && !(*layer_masks)[access_bit];
+		}
+		if (is_empty)
+			return true;
+	}
+	return false;
+}
+
 #ifdef CONFIG_SECURITY_LANDLOCK_KUNIT_TEST
+#ifdef CONFIG_AUDIT
 
 static void test_landlock_get_deny_masks(struct kunit *const test)
 {
@@ -816,9 +893,11 @@ static void test_landlock_get_deny_masks(struct kunit *const test)
 					&layers1, ARRAY_SIZE(layers1)));
 }
 
+#endif /* CONFIG_AUDIT */
 #endif /* CONFIG_SECURITY_LANDLOCK_KUNIT_TEST */
 
 #ifdef CONFIG_SECURITY_LANDLOCK_KUNIT_TEST
+#ifdef CONFIG_AUDIT
 
 static struct kunit_case test_cases[] = {
 	/* clang-format off */
@@ -835,6 +914,5 @@ static struct kunit_suite test_suite = {
 
 kunit_test_suite(test_suite);
 
-#endif /* CONFIG_SECURITY_LANDLOCK_KUNIT_TEST */
-
 #endif /* CONFIG_AUDIT */
+#endif /* CONFIG_SECURITY_LANDLOCK_KUNIT_TEST */
