@@ -124,6 +124,32 @@ struct landlock_domain {
 	       sizeof(uintptr_t)) /                               \
 	 sizeof(uintptr_t))
 
+struct landlock_found_rule {
+	const struct landlock_layer *layers_start;
+	const struct landlock_layer *layers_end;
+};
+
+struct landlock_found_rule
+landlock_domain_find(const struct landlock_domain *dom,
+		     const struct landlock_domain_index *indices_arr,
+		     u32 num_indices, const struct landlock_layer *layers_arr,
+		     u32 num_layers, union landlock_key key);
+
+#define dom_find_index_fs(dom, key)                                           \
+	landlock_domain_find(dom, dom_fs_indices(dom), (dom)->num_fs_indices, \
+			     dom_fs_layers(dom), (dom)->num_fs_layers, key)
+
+#define dom_find_index_net(dom, key)                                      \
+	landlock_domain_find(dom, dom_net_indices(dom),                   \
+			     (dom)->num_net_indices, dom_net_layers(dom), \
+			     (dom)->num_net_layers, key)
+
+#define dom_find_success(found_rule) ((found_rule).layers_start != NULL)
+
+#define dom_rule_for_each_layer(found_rule, layer) \
+	for (layer = (found_rule).layers_start;    \
+	     layer < (found_rule).layers_end; layer++)
+
 enum landlock_log_status {
 	LANDLOCK_LOG_PENDING = 0,
 	LANDLOCK_LOG_RECORDED,

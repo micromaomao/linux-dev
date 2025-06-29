@@ -5,11 +5,13 @@
  * Copyright © 2016-2020 Mickaël Salaün <mic@digikod.net>
  * Copyright © 2018-2020 ANSSI
  * Copyright © 2024-2025 Microsoft Corporation
+ * Copyright © 2025      Tingmao Wang <m@maowtm.org>
  */
 
 #include <kunit/test.h>
 #include <linux/bitops.h>
 #include <linux/bits.h>
+#include <linux/bsearch.h>
 #include <linux/cred.h>
 #include <linux/file.h>
 #include <linux/mm.h>
@@ -29,6 +31,65 @@ static void __maybe_unused build_check_domain(void)
 	BUILD_BUG_ON(LANDLOCK_MAX_NUM_RULES >= U32_MAX);
 	BUILD_BUG_ON(LANDLOCK_MAX_NUM_RULES * LANDLOCK_MAX_NUM_LAYERS >=
 		     U32_MAX);
+}
+
+static int domain_find_cmp_func(const void *_key, const void *_index)
+{
+	const union landlock_key *key = _key;
+	const struct landlock_domain_index *index = _index;
+
+	if (index->key.data == key->data)
+		return 0;
+	else if (index->key.data < key->data)
+		/*
+		 * If the thing I'm looking at is less than search key, search in
+		 * the right.  See bsearch.h
+		 */
+		return 1;
+	else
+		return -1;
+}
+
+/**
+ * landlock_domain_find - search for a key in a domain.  Don't use this
+ * function directly, but use one of the dom_find_index_*() macros
+ * instead.
+ *
+ * @dom: The domain to search in.
+ * @indices_arr: The indices array to search in.
+ * @num_indices: The number of elements in @indices_arr.
+ * @layers_arr: The layers array.
+ * @num_layers: The number of elements in @layers_arr.
+ * @key: The key to search for.
+ */
+struct landlock_found_rule
+landlock_domain_find(const struct landlock_domain *const dom,
+		     const struct landlock_domain_index *const indices_arr,
+		     const u32 num_indices,
+		     const struct landlock_layer *const layers_arr,
+		     const u32 num_layers, const union landlock_key key)
+{
+	struct landlock_found_rule out_found_rule = {};
+	struct landlock_domain_index *found = NULL;
+
+	found = __inline_bsearch((void *)&key, (void *)indices_arr, num_indices,
+				 sizeof(struct landlock_domain_index),
+				 domain_find_cmp_func);
+
+	if (found) {
+		out_found_rule.layers_start = &layers_arr[found->layer_index];
+		out_found_rule.layers_end = &layers_arr[num_layers];
+		if (found + 1 < indices_arr + num_indices)
+			out_found_rule.layers_end =
+				&layers_arr[(found + 1)->layer_index];
+		if (WARN_ON_ONCE(out_found_rule.layers_end - layers_arr >
+				 num_layers)) {
+			out_found_rule.layers_start =
+				out_found_rule.layers_end = NULL;
+		}
+	}
+
+	return out_found_rule;
 }
 
 #ifdef CONFIG_AUDIT
