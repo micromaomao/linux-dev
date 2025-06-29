@@ -95,6 +95,175 @@ landlock_domain_find(const struct landlock_domain *const dom,
 	return out_found_rule;
 }
 
+/**
+ * landlock_merge_walk_step - do a "merging" walk with an existing domain
+ * and a rbtree containing rules to be added (or extended).  Populates
+ * @out_index and @out_layers appropriately (or sum up the number of
+ * layers).
+ *
+ * @dom_ind_array: The indices subarray in the parent domain for the rule
+ * type we're walking.  Can be NULL if there is no parent domain.
+ * @dom_num_indices: The length of @dom_ind_array, or 0 if no parent
+ * domain.
+ * @dom_layer_array: The layers subarray in the parent domain for the rule
+ * type we're walking, or NULL if there is no parent domain.
+ * @dom_num_layers: The length of @dom_layer_array, or 0 if no parent
+ * domain.
+ * @new_level: The level number of any new layers that will be added to
+ * @out_layers.
+ * @next_index: Iterator in the domain.  Initialize to 0.
+ * @next_rule: Iterator in the rules tree.  Initialize to rb_first.
+ * @out_indices: If not NULL, this is a struct landlock_domain_index
+ * array, where new indices are written to.  Reference counts for any
+ * copied objects are NOT incremented by this function, if applicable the
+ * caller should do so.  This argument should be constant throughout the
+ * iteration.
+ * @indices_written: Counts the number of iterations.  Initialize to 0 at
+ * the beginning.
+ * @out_layers: If not NULL, this is a struct landlock_layer array, where
+ * existing layers will be copied over from the parent domain, and new
+ * layers will also be added.  This argument should be constant throughout
+ * the iteration.
+ * @layers_written: Counts the number of layers written (or would be
+ * written) to @out_layers.  Initialize to 0 at the beginning of the
+ * iteration.
+ *
+ * Returns: true if iteration should continue, in which case
+ * *next_{index,rule} and *layers_written are updated and
+ * *out_{key,layers} are written to, if necessary.  False if all domain
+ * and ruleset rules visisted.
+ *
+ * The expected way to use this function is to do two loops - first to
+ * calculate the number of indices and layers needed to allocate, and then
+ * to actually writes the indices and copy over the layers.
+ */
+bool landlock_merge_walk_step(
+	const struct landlock_domain_index *dom_ind_array,
+	const u32 dom_num_indices,
+	const struct landlock_layer *const dom_layer_array,
+	const u32 dom_num_layers, const u32 new_level, u32 *const next_index,
+	const struct landlock_rule **const next_rule,
+	struct landlock_domain_index *const out_indices,
+	u32 *const indices_written, struct landlock_layer *const out_layers,
+	u32 *const layers_written)
+{
+	const struct landlock_domain_index *index = NULL;
+	const struct landlock_rule *rule = NULL;
+	const struct landlock_layer *l;
+	struct landlock_layer *outl;
+	struct landlock_domain_index *out_index = NULL;
+
+	if (*next_index >= dom_num_indices && !*next_rule)
+		return false;
+
+	if (WARN_ON_ONCE(!layers_written))
+		return false;
+
+	/* Check that dom_* is not mistakenly NULL */
+	if (WARN_ON_ONCE((*next_index != 0 || dom_num_indices > 0 ||
+			  dom_num_layers > 0) &&
+			 (!dom_ind_array || !dom_layer_array)))
+		return false;
+
+	if (*next_index >= dom_num_indices) {
+		/* Walk all remaining rules */
+		rule = *next_rule;
+	} else if (!*next_rule) {
+		/* Walk all remaining indices */
+		index = &dom_ind_array[*next_index];
+	} else {
+		/*
+		 * Pick the smallest one to iterate next, but if they have the same
+		 * key, merge them.
+		 */
+
+		union landlock_key domain_key = dom_ind_array[*next_index].key;
+		union landlock_key rule_key = (*next_rule)->key;
+
+		if (domain_key.data == rule_key.data) {
+			rule = *next_rule;
+			index = &dom_ind_array[*next_index];
+		} else if (domain_key.data < rule_key.data) {
+			index = &dom_ind_array[*next_index];
+		} else {
+			rule = *next_rule;
+		}
+	}
+
+	if (rule && index)
+		WARN_ON_ONCE(rule->key.data != index->key.data);
+
+	if (out_indices)
+		out_index = &out_indices[*indices_written];
+	if (WARN_ON_ONCE(*indices_written >= U32_MAX))
+		return false;
+	*indices_written += 1;
+
+	if (index) {
+		u32 layer_i, layer_end, inc;
+
+		if (out_index) {
+			out_index->key = index->key;
+			out_index->layer_index = *layers_written;
+		}
+
+		layer_i = index->layer_index;
+		if ((*next_index) + 1 < dom_num_indices)
+			layer_end =
+				dom_ind_array[(*next_index) + 1].layer_index;
+		else
+			layer_end = dom_num_layers;
+
+		if (out_layers) {
+			while (layer_i < layer_end) {
+				l = &dom_layer_array[layer_i++];
+				WARN_ON_ONCE(l->level >= new_level);
+				if (WARN_ON_ONCE(*layers_written >= U32_MAX))
+					return false;
+				out_layers[(*layers_written)++] = *l;
+			}
+		} else {
+			inc = layer_end - layer_i;
+			if (WARN_ON_ONCE(*layers_written > U32_MAX - inc))
+				return false;
+			*layers_written += inc;
+		}
+
+		(*next_index)++;
+	}
+
+	if (rule) {
+		const struct rb_node *next_node;
+
+		if (out_index && !index) {
+			out_index->key = rule->key;
+			out_index->layer_index = *layers_written;
+		}
+
+		WARN_ON_ONCE(rule->num_layers != 1);
+
+		if (WARN_ON_ONCE(*layers_written >= U32_MAX))
+			return false;
+
+		if (out_layers) {
+			l = &rule->layers[0];
+			outl = &out_layers[(*layers_written)++];
+			outl->access = l->access;
+			outl->level = new_level;
+		} else
+			*layers_written += 1;
+
+		next_node = rb_next(&rule->node);
+		if (next_node)
+			*next_rule = container_of(next_node,
+						  struct landlock_rule, node);
+		else
+			*next_rule = NULL;
+	}
+
+	return true;
+}
+
 #ifdef CONFIG_AUDIT
 
 /**
