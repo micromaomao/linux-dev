@@ -38,8 +38,8 @@
  * Checks if the @parent domain is less or equal to (i.e. an ancestor, which
  * means a subset of) the @child domain.
  */
-static bool domain_scope_le(const struct landlock_ruleset *const parent,
-			    const struct landlock_ruleset *const child)
+static bool domain_scope_le(const struct landlock_domain *const parent,
+			    const struct landlock_domain *const child)
 {
 	const struct landlock_hierarchy *walker;
 
@@ -60,8 +60,8 @@ static bool domain_scope_le(const struct landlock_ruleset *const parent,
 	return false;
 }
 
-static int domain_ptrace(const struct landlock_ruleset *const parent,
-			 const struct landlock_ruleset *const child)
+static int domain_ptrace(const struct landlock_domain *const parent,
+			 const struct landlock_domain *const child)
 {
 	if (domain_scope_le(parent, child))
 		return 0;
@@ -86,7 +86,7 @@ static int hook_ptrace_access_check(struct task_struct *const child,
 				    const unsigned int mode)
 {
 	const struct landlock_cred_security *parent_subject;
-	const struct landlock_ruleset *child_dom;
+	const struct landlock_domain *child_dom;
 	int err;
 
 	/* Quick return for non-landlocked tasks. */
