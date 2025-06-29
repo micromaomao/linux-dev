@@ -341,4 +341,63 @@ landlock_get_hierarchy(struct landlock_hierarchy *const hierarchy)
 
 void landlock_put_hierarchy(struct landlock_hierarchy *hierarchy);
 
+bool landlock_unmask_layers(const struct landlock_found_rule rule,
+			    const access_mask_t access_request,
+			    layer_mask_t (*const layer_masks)[],
+			    const size_t masks_array_size);
+
+access_mask_t
+landlock_init_layer_masks(const struct landlock_domain *const domain,
+			  const access_mask_t access_request,
+			  layer_mask_t (*const layer_masks)[],
+			  const enum landlock_key_type key_type);
+
+static inline access_mask_t
+landlock_dom_get_fs_access_mask(const struct landlock_domain *const domain,
+				const u16 layer_level)
+{
+	/* Handles all initially denied by default access rights. */
+	return dom_access_masks(domain)[layer_level].fs |
+	       _LANDLOCK_ACCESS_FS_INITIALLY_DENIED;
+}
+
+static inline access_mask_t
+landlock_dom_get_net_access_mask(const struct landlock_domain *const domain,
+				 const u16 layer_level)
+{
+	return dom_access_masks(domain)[layer_level].net;
+}
+
+static inline access_mask_t
+landlock_dom_get_scope_mask(const struct landlock_domain *const domain,
+			    const u16 layer_level)
+{
+	return dom_access_masks(domain)[layer_level].scope;
+}
+
+/**
+ * landlock_dom_union_access_masks - Return all access rights handled in
+ * the domain
+ *
+ * @domain: Landlock domain
+ *
+ * Returns: an access_masks result of the OR of all the domain's access masks.
+ */
+static inline struct access_masks
+landlock_dom_union_access_masks(const struct landlock_domain *const domain)
+{
+	union access_masks_all matches = {};
+	size_t layer_level;
+
+	for (layer_level = 0; layer_level < domain->num_layers; layer_level++) {
+		union access_masks_all layer = {
+			.masks = dom_access_masks(domain)[layer_level],
+		};
+
+		matches.all |= layer.all;
+	}
+
+	return matches.masks;
+}
+
 #endif /* _SECURITY_LANDLOCK_DOMAIN_H */
