@@ -9,46 +9,47 @@
  */
 
 #include <kunit/test.h>
+#include <linux/atomic.h>
 #include <linux/bitops.h>
 #include <linux/bits.h>
 #include <linux/bsearch.h>
+#include <linux/bug.h>
+#include <linux/compiler_types.h>
 #include <linux/cred.h>
+#include <linux/err.h>
+#include <linux/errno.h>
 #include <linux/file.h>
+#include <linux/kernel.h>
+#include <linux/limits.h>
+#include <linux/list.h>
 #include <linux/mm.h>
 #include <linux/path.h>
 #include <linux/pid.h>
+#include <linux/rbtree.h>
+#include <linux/refcount.h>
 #include <linux/sched.h>
 #include <linux/signal.h>
+#include <linux/slab.h>
+#include <linux/spinlock.h>
 #include <linux/uidgid.h>
 
 #include "access.h"
 #include "audit.h"
 #include "common.h"
 #include "domain.h"
-#include "id.h"
+
+/* Forward declarations for functions from ruleset.c */
+static void get_hierarchy(struct landlock_hierarchy *const hierarchy)
+{
+	if (hierarchy)
+		refcount_inc(&hierarchy->usage);
+}
 
 static void build_check_domain(void)
 {
-	BUILD_BUG_ON(LANDLOCK_MAX_NUM_RULES >= U32_MAX);
+	BUILD_BUG_ON(LANDLOCK_MAX_NUM_RULES > U32_MAX);
 	BUILD_BUG_ON(LANDLOCK_MAX_NUM_RULES * LANDLOCK_MAX_NUM_LAYERS >=
 		     U32_MAX);
-}
-
-static int domain_find_cmp_func(const void *_key, const void *_index)
-{
-	const union landlock_key *key = _key;
-	const struct landlock_domain_index *index = _index;
-
-	if (index->key.data == key->data)
-		return 0;
-	else if (index->key.data < key->data)
-		/*
-		 * If the thing I'm looking at is less than search key, search in
-		 * the right.  See bsearch.h
-		 */
-		return 1;
-	else
-		return -1;
 }
 
 /**
@@ -83,30 +84,43 @@ landlock_alloc_domain(const struct landlock_domain *sizes)
 	refcount_set(&new_dom->usage, 1);
 	new_dom->len_rules = len_rules;
 
+	/* Set up hashtable sizes based on number of indices */
+	if (new_dom->num_fs_indices > 0) {
+		/* Use power-of-2 sizing for fast hashing */
+		u32 target_size = (new_dom->num_fs_indices * 4) / 3; /* Load factor ~0.75 */
+		new_dom->fs_hash_size = 1U << fls(target_size - 1); /* Next power of 2 */
+	} else {
+		new_dom->fs_hash_size = 0;
+	}
+
+	if (new_dom->num_net_indices > 0) {
+		/* Use power-of-2 sizing for fast hashing */
+		u32 target_size = (new_dom->num_net_indices * 4) / 3; /* Load factor ~0.75 */
+		new_dom->net_hash_size = 1U << fls(target_size - 1); /* Next power of 2 */
+	} else {
+		new_dom->net_hash_size = 0;
+	}
+
 	return new_dom;
 }
 
 static void free_domain(struct landlock_domain *const domain)
 {
-	struct landlock_domain_index *fs_indices, ind;
-	u32 i, num_fs_indices;
+	struct landlock_domain_index *fs_indices;
+	u32 i;
 
 	might_sleep();
 	if (WARN_ON_ONCE(!domain))
 		return;
-	fs_indices = dom_fs_indices(domain);
-	num_fs_indices = domain->num_fs_indices;
-	if (WARN_ON_ONCE((uintptr_t *)(fs_indices + num_fs_indices) -
-				 domain->rules >
-			 domain->len_rules))
-		return;
 
-	for (i = 0; i < num_fs_indices; i++) {
-		ind = fs_indices[i];
-		if (WARN_ON_ONCE(!ind.key.object))
-			continue;
-		landlock_put_object(ind.key.object);
+	/* Free filesystem object references */
+	fs_indices = dom_fs_indices(domain);
+	for (i = 0; i < domain->fs_hash_size; i++) {
+		if (fs_indices[i].key.object)
+			landlock_put_object(fs_indices[i].key.object);
 	}
+
+	/* Network indices don't hold object references, just port numbers */
 
 	landlock_put_hierarchy(domain->hierarchy);
 	domain->hierarchy = NULL;
@@ -150,219 +164,98 @@ void landlock_put_domain_deferred(struct landlock_domain *const domain)
 }
 
 /**
- * landlock_domain_find - search for a key in a domain.  Don't use this
- * function directly, but use one of the dom_find_index_*() macros
- * instead.
+ * build_hashtable - construct a hashtable using collision chaining within the array
  *
- * @dom: The domain to search in.
- * @indices_arr: The indices array to search in.
- * @num_indices: The number of elements in @indices_arr.
- * @layers_arr: The layers array.
- * @num_layers: The number of elements in @layers_arr.
- * @key: The key to search for.
+ * @indices: The hashtable array to populate
+ * @hash_size: Size of the hashtable
+ * @rules: Array of sorted rules to insert
+ * @num_rules: Number of rules
+ * @layers: The layers array (for writing layer indices)
+ * @layer_offset: Offset to add to layer indices when writing
+ * @layers_written: Pointer to track how many layers have been written
+ *
+ * This function builds a hashtable using collision chaining within the array.
+ * When a collision occurs, the new entry is placed in any available slot and
+ * linked via the next_collision field. This ensures fast lookups for missing
+ * keys (immediate termination if ideal slot is empty) while handling collisions
+ * correctly through explicit chaining.
  */
-struct landlock_found_rule
-landlock_domain_find(const struct landlock_domain *const dom,
-		     const struct landlock_domain_index *const indices_arr,
-		     const u32 num_indices,
-		     const struct landlock_layer *const layers_arr,
-		     const u32 num_layers, const union landlock_key key)
+int build_hashtable(struct landlock_domain_index *indices,
+			   u32 hash_size,
+			   const struct landlock_rule **rules,
+			   u32 num_rules,
+			   struct landlock_layer *layers,
+			   u32 layer_offset,
+			   u32 *layers_written)
 {
-	struct landlock_found_rule out_found_rule = {};
-	struct landlock_domain_index *found = NULL;
+	u32 i, hash_index, slot_index;
+	const struct landlock_rule *rule;
+	struct landlock_domain_index *entry, *head_entry;
 
-	found = __inline_bsearch((void *)&key, (void *)indices_arr, num_indices,
-				 sizeof(struct landlock_domain_index),
-				 domain_find_cmp_func);
+	if (!hash_size || !num_rules)
+		return 0;
 
-	if (found) {
-		out_found_rule.layers_start = &layers_arr[found->layer_index];
-		out_found_rule.layers_end = &layers_arr[num_layers];
-		if (found + 1 < indices_arr + num_indices)
-			out_found_rule.layers_end =
-				&layers_arr[(found + 1)->layer_index];
-		if (WARN_ON_ONCE(out_found_rule.layers_end - layers_arr >
-				 num_layers)) {
-			out_found_rule.layers_start =
-				out_found_rule.layers_end = NULL;
-		}
+	/* Initialize hashtable - zero key.data means empty slot */
+	for (i = 0; i < hash_size; i++) {
+		indices[i].key.data = 0;
+		indices[i].next_collision = UINT32_MAX;
 	}
 
-	return out_found_rule;
-}
+	/* Process each rule */
+	for (i = 0; i < num_rules; i++) {
+		rule = rules[i];
+		hash_index = domain_hash_key(rule->key, hash_size);
+		head_entry = &indices[hash_index];
 
-/**
- * landlock_merge_walk_step - do a "merging" walk with an existing domain
- * and a rbtree containing rules to be added (or extended).  Populates
- * @out_index and @out_layers appropriately (or sum up the number of
- * layers).
- *
- * @dom_ind_array: The indices subarray in the parent domain for the rule
- * type we're walking.  Can be NULL if there is no parent domain.
- * @dom_num_indices: The length of @dom_ind_array, or 0 if no parent
- * domain.
- * @dom_layer_array: The layers subarray in the parent domain for the rule
- * type we're walking, or NULL if there is no parent domain.
- * @dom_num_layers: The length of @dom_layer_array, or 0 if no parent
- * domain.
- * @new_level: The level number of any new layers that will be added to
- * @out_layers.
- * @next_index: Iterator in the domain.  Initialize to 0.
- * @next_rule: Iterator in the rules tree.  Initialize to rb_first.
- * @out_indices: If not NULL, this is a struct landlock_domain_index
- * array, where new indices are written to.  Reference counts for any
- * copied objects are NOT incremented by this function, if applicable the
- * caller should do so.  This argument should be constant throughout the
- * iteration.
- * @indices_written: Counts the number of iterations.  Initialize to 0 at
- * the beginning.
- * @out_layers: If not NULL, this is a struct landlock_layer array, where
- * existing layers will be copied over from the parent domain, and new
- * layers will also be added.  This argument should be constant throughout
- * the iteration.
- * @layers_written: Counts the number of layers written (or would be
- * written) to @out_layers.  Initialize to 0 at the beginning of the
- * iteration.
- *
- * Returns: true if iteration should continue, in which case
- * *next_{index,rule} and *layers_written are updated and
- * *out_{key,layers} are written to, if necessary.  False if all domain
- * and ruleset rules visisted.
- *
- * The expected way to use this function is to do two loops - first to
- * calculate the number of indices and layers needed to allocate, and then
- * to actually writes the indices and copy over the layers.
- */
-bool landlock_merge_walk_step(
-	const struct landlock_domain_index *dom_ind_array,
-	const u32 dom_num_indices,
-	const struct landlock_layer *const dom_layer_array,
-	const u32 dom_num_layers, const u32 new_level, u32 *const next_index,
-	const struct landlock_rule **const next_rule,
-	struct landlock_domain_index *const out_indices,
-	u32 *const indices_written, struct landlock_layer *const out_layers,
-	u32 *const layers_written)
-{
-	const struct landlock_domain_index *index = NULL;
-	const struct landlock_rule *rule = NULL;
-	const struct landlock_layer *l;
-	struct landlock_layer *outl;
-	struct landlock_domain_index *out_index = NULL;
-
-	if (*next_index >= dom_num_indices && !*next_rule)
-		return false;
-
-	if (WARN_ON_ONCE(!layers_written))
-		return false;
-
-	/* Check that dom_* is not mistakenly NULL */
-	if (WARN_ON_ONCE((*next_index != 0 || dom_num_indices > 0 ||
-			  dom_num_layers > 0) &&
-			 (!dom_ind_array || !dom_layer_array)))
-		return false;
-
-	if (*next_index >= dom_num_indices) {
-		/* Walk all remaining rules */
-		rule = *next_rule;
-	} else if (!*next_rule) {
-		/* Walk all remaining indices */
-		index = &dom_ind_array[*next_index];
-	} else {
-		/*
-		 * Pick the smallest one to iterate next, but if they have the same
-		 * key, merge them.
-		 */
-
-		union landlock_key domain_key = dom_ind_array[*next_index].key;
-		union landlock_key rule_key = (*next_rule)->key;
-
-		if (domain_key.data == rule_key.data) {
-			rule = *next_rule;
-			index = &dom_ind_array[*next_index];
-		} else if (domain_key.data < rule_key.data) {
-			index = &dom_ind_array[*next_index];
+		if (head_entry->key.data == 0) {
+			/* Ideal slot is empty - place entry there */
+			slot_index = hash_index;
 		} else {
-			rule = *next_rule;
-		}
-	}
-
-	if (rule && index)
-		WARN_ON_ONCE(rule->key.data != index->key.data);
-
-	if (out_indices)
-		out_index = &out_indices[*indices_written];
-	if (WARN_ON_ONCE(*indices_written >= U32_MAX))
-		return false;
-	*indices_written += 1;
-
-	if (index) {
-		u32 layer_i, layer_end, inc;
-
-		if (out_index) {
-			out_index->key = index->key;
-			out_index->layer_index = *layers_written;
-		}
-
-		layer_i = index->layer_index;
-		if ((*next_index) + 1 < dom_num_indices)
-			layer_end =
-				dom_ind_array[(*next_index) + 1].layer_index;
-		else
-			layer_end = dom_num_layers;
-
-		if (out_layers) {
-			while (layer_i < layer_end) {
-				l = &dom_layer_array[layer_i++];
-				WARN_ON_ONCE(l->level >= new_level);
-				if (WARN_ON_ONCE(*layers_written >= U32_MAX))
-					return false;
-				out_layers[(*layers_written)++] = *l;
+			/* Collision - find any empty slot */
+			slot_index = 0;
+			while (slot_index < hash_size && indices[slot_index].key.data != 0) {
+				slot_index++;
 			}
-		} else {
-			inc = layer_end - layer_i;
-			if (WARN_ON_ONCE(*layers_written > U32_MAX - inc))
-				return false;
-			*layers_written += inc;
+
+			if (slot_index >= hash_size) {
+				return -ENOSPC;
+			}
+
+			/* Link new entry to the collision chain */
+			/* Find the tail of the existing chain */
+			struct landlock_domain_index *tail = head_entry;
+			while (tail->next_collision != UINT32_MAX) {
+				if (WARN_ON_ONCE(tail->next_collision >= hash_size))
+					return -EINVAL;
+				tail = &indices[tail->next_collision];
+			}
+			tail->next_collision = slot_index;
 		}
 
-		(*next_index)++;
-	}
+		/* Place the rule in the found slot */
+		entry = &indices[slot_index];
+		entry->key = rule->key;
+		entry->layer_start = layer_offset + *layers_written;
+		entry->next_collision = UINT32_MAX;
 
-	if (rule) {
-		const struct rb_node *next_node;
-
-		if (out_index && !index) {
-			out_index->key = rule->key;
-			out_index->layer_index = *layers_written;
+		/* Copy layers for this rule */
+		if (WARN_ON_ONCE(rule->num_layers != 1)) {
+			return -EINVAL;
 		}
 
-		WARN_ON_ONCE(rule->num_layers != 1);
-
-		if (WARN_ON_ONCE(*layers_written >= U32_MAX))
-			return false;
-
-		if (out_layers) {
-			l = &rule->layers[0];
-			outl = &out_layers[(*layers_written)++];
-			outl->access = l->access;
-			outl->level = new_level;
-		} else
-			*layers_written += 1;
-
-		next_node = rb_next(&rule->node);
-		if (next_node)
-			*next_rule = container_of(next_node,
-						  struct landlock_rule, node);
-		else
-			*next_rule = NULL;
+		if (layers) {
+			layers[*layers_written] = rule->layers[0];
+		}
+		(*layers_written)++;
+		entry->layer_end = layer_offset + *layers_written;
 	}
 
-	return true;
+	return 0;
 }
 
 /**
- * merge_rules_pass - Do one full merge walk for both fs and net, and
- * optionally copy over indices and layers.
+ * merge_rules_pass_hash - Do one full merge walk for both fs and net, and
+ * optionally copy over indices and layers using hashtable construction.
  *
  * @parent: Parent domain, or NULL if there is no parent.
  * @child: Child domain.  num_layers must be set to the new level.
@@ -370,97 +263,156 @@ bool landlock_merge_walk_step(
  * calls to this function.
  * @only_calc_sizes: Whether this is a size-calculation pass, or the final
  * merge pass.
+ * @use_power_of_2: Whether to use power-of-2 sizing for hash tables.
  *
- * If @only_calc_sizes is true, child->num_{fs,net}_{indices,layers} will
- * be updated.  Otherwise, the function writes to child->rules and checks
- * that the number of indices and layers written matches with previously
- * stored numbers in @child.
+ * If @only_calc_sizes is true, child->num_{fs,net}_{indices,layers} and
+ * child->{fs,net}_hash_size will be updated.  Otherwise, the function
+ * writes to child->rules and checks that the number of indices and layers
+ * written matches with previously stored numbers in @child.
  */
-static int merge_rules_pass(const struct landlock_domain *parent,
+static int merge_rules_pass_hash(const struct landlock_domain *parent,
 			    struct landlock_domain *child,
 			    struct landlock_ruleset *ruleset,
-			    bool only_calc_sizes) __must_hold(&ruleset->lock)
+			    bool only_calc_sizes,
+			    bool use_power_of_2) __must_hold(&ruleset->lock)
 {
-	u32 next_index, new_level, indices_written, layers_written;
-	const struct landlock_rule *next_rule;
+	struct landlock_rule *walker_rule, *next_rule;
+	const struct landlock_rule **fs_rules = NULL, **net_rules = NULL;
+	u32 fs_rule_count = 0, net_rule_count = 0;
+	u32 fs_layers_written = 0, net_layers_written = 0;
+	int err = 0;
 
 	if (WARN_ON_ONCE(!ruleset || !child))
 		return -EINVAL;
 
-	new_level = child->num_layers;
-	/* We should have checked new_level <= LANDLOCK_MAX_NUM_LAYERS already */
-	if (WARN_ON_ONCE(new_level == 0 || new_level > LANDLOCK_MAX_NUM_LAYERS))
+	if (WARN_ON_ONCE(child->num_layers == 0 ||
+			  child->num_layers > LANDLOCK_MAX_NUM_LAYERS))
 		return -EINVAL;
-
-	next_index = 0;
-	next_rule = container_of(rb_first(&ruleset->root_inode),
-				 struct landlock_rule, node);
-	indices_written = 0;
-	layers_written = 0;
 
 	build_check_domain();
 
-	while (landlock_merge_walk_step(
-		parent ? dom_fs_indices(parent) : NULL,
-		parent ? parent->num_fs_indices : 0,
-		parent ? dom_fs_layers(parent) : NULL,
-		parent ? parent->num_fs_layers : 0, new_level, &next_index,
-		&next_rule, only_calc_sizes ? NULL : dom_fs_indices(child),
-		&indices_written, only_calc_sizes ? NULL : dom_fs_layers(child),
-		&layers_written)) {
-		if (indices_written >= U32_MAX || layers_written >= U32_MAX)
-			return -E2BIG;
-		/*
-		 * Best effort safety check - if we fail, we've already corrupted
-		 * stuff.
-		 */
-		BUG_ON(!only_calc_sizes &&
-		       (indices_written > child->num_fs_indices ||
-			layers_written > child->num_fs_layers));
+	/* Count filesystem rules */
+	rbtree_postorder_for_each_entry_safe(walker_rule, next_rule,
+					      &ruleset->root_inode, node) {
+		fs_rule_count++;
 	}
-
-	if (only_calc_sizes) {
-		child->num_fs_indices = indices_written;
-		child->num_fs_layers = layers_written;
-	} else if (WARN_ON_ONCE(indices_written != child->num_fs_indices ||
-				layers_written != child->num_fs_layers))
-		return -EINVAL;
 
 #if IS_ENABLED(CONFIG_INET)
-	next_index = 0;
-	next_rule = container_of(rb_first(&ruleset->root_net_port),
-				 struct landlock_rule, node);
-	indices_written = 0;
-	layers_written = 0;
-
-	while (landlock_merge_walk_step(
-		parent ? dom_net_indices(parent) : NULL,
-		parent ? parent->num_net_indices : 0,
-		parent ? dom_net_layers(parent) : NULL,
-		parent ? parent->num_net_layers : 0, new_level, &next_index,
-		&next_rule, only_calc_sizes ? NULL : dom_net_indices(child),
-		&indices_written,
-		only_calc_sizes ? NULL : dom_net_layers(child),
-		&layers_written)) {
-		/*
-		 * Best effort safety check - if we fail, we've already corrupted
-		 * stuff.
-		 */
-		BUG_ON(!only_calc_sizes &&
-		       (indices_written > child->num_net_indices ||
-			layers_written > child->num_net_layers));
+	/* Count network rules */
+	rbtree_postorder_for_each_entry_safe(walker_rule, next_rule,
+					      &ruleset->root_net_port, node) {
+		net_rule_count++;
 	}
+#endif
 
 	if (only_calc_sizes) {
-		child->num_net_indices = indices_written;
-		child->num_net_layers = layers_written;
-	} else if (WARN_ON_ONCE(indices_written != child->num_net_indices ||
-				layers_written != child->num_net_layers)) {
-		return -EINVAL;
-	}
-#endif /* IS_ENABLED(CONFIG_INET) */
+		/* Calculate sizes */
+		child->num_fs_indices = (parent ? parent->num_fs_indices : 0) + fs_rule_count;
+		child->num_net_indices = (parent ? parent->num_net_indices : 0) + net_rule_count;
 
-	return 0;
+		/* Set hash table sizes */
+		if (use_power_of_2) {
+			child->fs_hash_size = child->num_fs_indices ?
+				next_power_of_2_u32(child->num_fs_indices) : 0;
+			child->net_hash_size = child->num_net_indices ?
+				next_power_of_2_u32(child->num_net_indices) : 0;
+		} else {
+			child->fs_hash_size = child->num_fs_indices;
+			child->net_hash_size = child->num_net_indices;
+		}
+
+		/* Calculate layer counts */
+		child->num_fs_layers = (parent ? parent->num_fs_layers : 0) + fs_rule_count;
+		child->num_net_layers = (parent ? parent->num_net_layers : 0) + net_rule_count;
+
+		return 0;
+	}
+
+	/* Actual merge pass - allocate arrays for rules */
+	if (fs_rule_count > 0) {
+		fs_rules = kmalloc_array(fs_rule_count, sizeof(*fs_rules), GFP_KERNEL);
+		if (!fs_rules) {
+			err = -ENOMEM;
+			goto out_free;
+		}
+
+		fs_rule_count = 0;
+		rbtree_postorder_for_each_entry_safe(walker_rule, next_rule,
+						      &ruleset->root_inode, node) {
+			fs_rules[fs_rule_count++] = walker_rule;
+		}
+	}
+
+#if IS_ENABLED(CONFIG_INET)
+	if (net_rule_count > 0) {
+		net_rules = kmalloc_array(net_rule_count, sizeof(*net_rules), GFP_KERNEL);
+		if (!net_rules) {
+			err = -ENOMEM;
+			goto out_free;
+		}
+
+		net_rule_count = 0;
+		rbtree_postorder_for_each_entry_safe(walker_rule, next_rule,
+						      &ruleset->root_net_port, node) {
+			net_rules[net_rule_count++] = walker_rule;
+		}
+	}
+#endif
+
+	/* Build filesystem hashtable */
+	if (child->fs_hash_size > 0) {
+		/* First copy parent entries if any */
+		if (parent && parent->num_fs_indices > 0) {
+			memcpy(dom_fs_indices(child), dom_fs_indices(parent),
+			       parent->num_fs_indices * sizeof(struct landlock_domain_index));
+			memcpy(dom_fs_layers(child), dom_fs_layers(parent),
+			       parent->num_fs_layers * sizeof(struct landlock_layer));
+			fs_layers_written = parent->num_fs_layers;
+		}
+
+		/* Add new rules using hashtable construction */
+		if (fs_rule_count > 0) {
+			err = build_hashtable(dom_fs_indices(child), child->fs_hash_size,
+					       fs_rules, fs_rule_count,
+					       dom_fs_layers(child), 0, &fs_layers_written);
+			if (err)
+				goto out_free;
+		}
+	}
+
+#if IS_ENABLED(CONFIG_INET)
+	/* Build network hashtable */
+	if (child->net_hash_size > 0) {
+		/* First copy parent entries if any */
+		if (parent && parent->num_net_indices > 0) {
+			memcpy(dom_net_indices(child), dom_net_indices(parent),
+			       parent->num_net_indices * sizeof(struct landlock_domain_index));
+			memcpy(dom_net_layers(child), dom_net_layers(parent),
+			       parent->num_net_layers * sizeof(struct landlock_layer));
+			net_layers_written = parent->num_net_layers;
+		}
+
+		/* Add new rules using hashtable construction */
+		if (net_rule_count > 0) {
+			err = build_hashtable(dom_net_indices(child), child->net_hash_size,
+					       net_rules, net_rule_count,
+					       dom_net_layers(child), 0, &net_layers_written);
+			if (err)
+				goto out_free;
+		}
+	}
+#endif
+
+	/* Verify counts match expectations */
+	if (WARN_ON_ONCE(fs_layers_written != child->num_fs_layers ||
+			  net_layers_written != child->num_net_layers)) {
+		err = -EINVAL;
+	}
+
+out_free:
+	kfree(fs_rules);
+	kfree(net_rules);
+	return err;
 }
 
 /**
@@ -471,12 +423,12 @@ static int merge_rules_pass(const struct landlock_domain *parent,
  * @ruleset: Ruleset to be merged.  Must hold the ruleset lock.
  */
 static int inherit_domain(const struct landlock_domain *parent,
-			  struct landlock_domain *child,
-			  struct landlock_ruleset *ruleset)
+		  struct landlock_domain *child,
+		  struct landlock_ruleset *ruleset)
 	__must_hold(&ruleset->lock)
 {
 	if (WARN_ON_ONCE(!child || !ruleset || !child->hierarchy ||
-			 child->num_layers < 1 || ruleset->num_layers != 1)) {
+		 child->num_layers < 1 || ruleset->num_layers != 1)) {
 		return -EINVAL;
 	}
 
@@ -487,12 +439,12 @@ static int inherit_domain(const struct landlock_domain *parent,
 		/* Copies the parent layer stack. */
 		memcpy(dom_access_masks(child), dom_access_masks(parent),
 		       array_size(parent->num_layers,
-				  sizeof(*dom_access_masks(child))));
+			  sizeof(*dom_access_masks(child))));
 
 		if (WARN_ON_ONCE(!parent->hierarchy))
 			return -EINVAL;
 
-		landlock_get_hierarchy(parent->hierarchy);
+		get_hierarchy(parent->hierarchy);
 		child->hierarchy->parent = parent->hierarchy;
 	}
 
@@ -505,7 +457,7 @@ static int inherit_domain(const struct landlock_domain *parent,
 
 /**
  * landlock_domain_merge_ruleset - Merge a ruleset and a parent domain
- * into a new domain.
+ * into a new domain using hashtable-based arrays.
  *
  * @parent: Parent domain.
  * @ruleset: Ruleset to be merged.  This function will take the mutex on
@@ -519,13 +471,14 @@ static int inherit_domain(const struct landlock_domain *parent,
  */
 struct landlock_domain *
 landlock_domain_merge_ruleset(const struct landlock_domain *parent,
-			      struct landlock_ruleset *ruleset)
+		      struct landlock_ruleset *ruleset)
 {
 	struct landlock_domain *new_dom __free(landlock_put_domain) = NULL;
 	struct landlock_hierarchy *new_hierarchy __free(kfree) = NULL;
 	struct landlock_domain new_dom_sizes = {};
 	u32 new_level;
 	int err;
+	bool use_power_of_2 = true; /* Use power-of-2 sizing for faster hashing */
 
 	might_sleep();
 	if (WARN_ON_ONCE(!ruleset))
@@ -551,7 +504,7 @@ landlock_domain_merge_ruleset(const struct landlock_domain *parent,
 	 * until we actually merge in the ruleset, ruleset must not change.
 	 */
 	mutex_lock(&ruleset->lock);
-	err = merge_rules_pass(parent, &new_dom_sizes, ruleset, true);
+	err = merge_rules_pass_hash(parent, &new_dom_sizes, ruleset, true, use_power_of_2);
 	if (err)
 		goto out_unlock;
 
@@ -568,7 +521,7 @@ landlock_domain_merge_ruleset(const struct landlock_domain *parent,
 	new_hierarchy = NULL;
 	refcount_set(&new_dom->hierarchy->usage, 1);
 
-	err = merge_rules_pass(parent, new_dom, ruleset, false);
+	err = merge_rules_pass_hash(parent, new_dom, ruleset, false, use_power_of_2);
 	if (err) {
 		/* new_dom can contain invalid landlock_object references. */
 		kfree(new_dom);
@@ -576,8 +529,14 @@ landlock_domain_merge_ruleset(const struct landlock_domain *parent,
 		goto out_unlock;
 	}
 
-	for (size_t i = 0; i < new_dom->num_fs_indices; i++)
-		landlock_get_object(dom_fs_indices(new_dom)[i].key.object);
+	/* Increment object references for filesystem rules */
+	if (new_dom->fs_hash_size > 0) {
+		struct landlock_domain_index *fs_indices = dom_fs_indices(new_dom);
+		for (size_t i = 0; i < new_dom->fs_hash_size; i++) {
+			if (fs_indices[i].key.object)
+				landlock_get_object(fs_indices[i].key.object);
+		}
+	}
 
 	err = inherit_domain(parent, new_dom, ruleset);
 	if (err)
@@ -594,194 +553,6 @@ landlock_domain_merge_ruleset(const struct landlock_domain *parent,
 out_unlock:
 	mutex_unlock(&ruleset->lock);
 	return ERR_PTR(err);
-}
-
-#ifdef CONFIG_AUDIT
-
-/**
- * get_current_exe - Get the current's executable path, if any
- *
- * @exe_str: Returned pointer to a path string with a lifetime tied to the
- *           returned buffer, if any.
- * @exe_size: Returned size of @exe_str (including the trailing null
- *            character), if any.
- *
- * Returns: A pointer to an allocated buffer where @exe_str point to, %NULL if
- * there is no executable path, or an error otherwise.
- */
-static const void *get_current_exe(const char **const exe_str,
-				   size_t *const exe_size)
-{
-	const size_t buffer_size = LANDLOCK_PATH_MAX_SIZE;
-	struct mm_struct *mm = current->mm;
-	struct file *file __free(fput) = NULL;
-	char *buffer __free(kfree) = NULL;
-	const char *exe;
-	ssize_t size;
-
-	if (!mm)
-		return NULL;
-
-	file = get_mm_exe_file(mm);
-	if (!file)
-		return NULL;
-
-	buffer = kmalloc(buffer_size, GFP_KERNEL);
-	if (!buffer)
-		return ERR_PTR(-ENOMEM);
-
-	exe = d_path(&file->f_path, buffer, buffer_size);
-	if (WARN_ON_ONCE(IS_ERR(exe)))
-		/* Should never happen according to LANDLOCK_PATH_MAX_SIZE. */
-		return ERR_CAST(exe);
-
-	size = buffer + buffer_size - exe;
-	if (WARN_ON_ONCE(size <= 0))
-		return ERR_PTR(-ENAMETOOLONG);
-
-	*exe_size = size;
-	*exe_str = exe;
-	return no_free_ptr(buffer);
-}
-
-/*
- * Returns: A newly allocated object describing a domain, or an error
- * otherwise.
- */
-static struct landlock_details *get_current_details(void)
-{
-	/* Cf. audit_log_d_path_exe() */
-	static const char null_path[] = "(null)";
-	const char *path_str = null_path;
-	size_t path_size = sizeof(null_path);
-	const void *buffer __free(kfree) = NULL;
-	struct landlock_details *details;
-
-	buffer = get_current_exe(&path_str, &path_size);
-	if (IS_ERR(buffer))
-		return ERR_CAST(buffer);
-
-	/*
-	 * Create the new details according to the path's length.  Do not
-	 * allocate with GFP_KERNEL_ACCOUNT because it is independent from the
-	 * caller.
-	 */
-	details =
-		kzalloc(struct_size(details, exe_path, path_size), GFP_KERNEL);
-	if (!details)
-		return ERR_PTR(-ENOMEM);
-
-	memcpy(details->exe_path, path_str, path_size);
-	details->pid = get_pid(task_tgid(current));
-	details->uid = from_kuid(&init_user_ns, current_uid());
-	get_task_comm(details->comm, current);
-	return details;
-}
-
-/**
- * landlock_init_hierarchy_log - Partially initialize landlock_hierarchy
- *
- * @hierarchy: The hierarchy to initialize.
- *
- * The current task is referenced as the domain that is enforcing the
- * restriction.  The subjective credentials must not be in an overridden state.
- *
- * @hierarchy->parent and @hierarchy->usage should already be set.
- */
-int landlock_init_hierarchy_log(struct landlock_hierarchy *const hierarchy)
-{
-	struct landlock_details *details;
-
-	details = get_current_details();
-	if (IS_ERR(details))
-		return PTR_ERR(details);
-
-	hierarchy->details = details;
-	hierarchy->id = landlock_get_id_range(1);
-	hierarchy->log_status = LANDLOCK_LOG_PENDING;
-	hierarchy->log_same_exec = true;
-	hierarchy->log_new_exec = false;
-	atomic64_set(&hierarchy->num_denials, 0);
-	return 0;
-}
-
-static deny_masks_t
-get_layer_deny_mask(const access_mask_t all_existing_optional_access,
-		    const unsigned long access_bit, const size_t layer)
-{
-	unsigned long access_weight;
-
-	/* This may require change with new object types. */
-	WARN_ON_ONCE(all_existing_optional_access !=
-		     _LANDLOCK_ACCESS_FS_OPTIONAL);
-
-	if (WARN_ON_ONCE(layer >= LANDLOCK_MAX_NUM_LAYERS))
-		return 0;
-
-	access_weight = hweight_long(all_existing_optional_access &
-				     GENMASK(access_bit, 0));
-	if (WARN_ON_ONCE(access_weight < 1))
-		return 0;
-
-	return layer
-	       << ((access_weight - 1) * HWEIGHT(LANDLOCK_MAX_NUM_LAYERS - 1));
-}
-
-#ifdef CONFIG_SECURITY_LANDLOCK_KUNIT_TEST
-
-static void test_get_layer_deny_mask(struct kunit *const test)
-{
-	const unsigned long truncate = BIT_INDEX(LANDLOCK_ACCESS_FS_TRUNCATE);
-	const unsigned long ioctl_dev = BIT_INDEX(LANDLOCK_ACCESS_FS_IOCTL_DEV);
-
-	KUNIT_EXPECT_EQ(test, 0,
-			get_layer_deny_mask(_LANDLOCK_ACCESS_FS_OPTIONAL,
-					    truncate, 0));
-	KUNIT_EXPECT_EQ(test, 0x3,
-			get_layer_deny_mask(_LANDLOCK_ACCESS_FS_OPTIONAL,
-					    truncate, 3));
-
-	KUNIT_EXPECT_EQ(test, 0,
-			get_layer_deny_mask(_LANDLOCK_ACCESS_FS_OPTIONAL,
-					    ioctl_dev, 0));
-	KUNIT_EXPECT_EQ(test, 0xf0,
-			get_layer_deny_mask(_LANDLOCK_ACCESS_FS_OPTIONAL,
-					    ioctl_dev, 15));
-}
-
-#endif /* CONFIG_SECURITY_LANDLOCK_KUNIT_TEST */
-
-deny_masks_t
-landlock_get_deny_masks(const access_mask_t all_existing_optional_access,
-			const access_mask_t optional_access,
-			const layer_mask_t (*const layer_masks)[],
-			const size_t layer_masks_size)
-{
-	const unsigned long access_opt = optional_access;
-	unsigned long access_bit;
-	deny_masks_t deny_masks = 0;
-
-	/* This may require change with new object types. */
-	WARN_ON_ONCE(access_opt !=
-		     (optional_access & all_existing_optional_access));
-
-	if (WARN_ON_ONCE(!layer_masks))
-		return 0;
-
-	if (WARN_ON_ONCE(!access_opt))
-		return 0;
-
-	for_each_set_bit(access_bit, &access_opt, layer_masks_size) {
-		const layer_mask_t mask = (*layer_masks)[access_bit];
-
-		if (!mask)
-			continue;
-
-		/* __fls(1) == 0 */
-		deny_masks |= get_layer_deny_mask(all_existing_optional_access,
-						  access_bit, __fls(mask));
-	}
-	return deny_masks;
 }
 
 void landlock_put_hierarchy(struct landlock_hierarchy *hierarchy)
@@ -804,10 +575,10 @@ void landlock_put_hierarchy(struct landlock_hierarchy *hierarchy)
  * Returns true if the request is allowed (i.e. relevant layer masks for the
  * request are empty).
  */
-bool landlock_unmask_layers(const struct landlock_found_rule rule,
-			    const access_mask_t access_request,
-			    layer_mask_t (*const layer_masks)[],
-			    const size_t masks_array_size)
+bool landlock_domain_unmask_layers(const struct landlock_found_rule rule,
+		    const access_mask_t access_request,
+		    layer_mask_t (*const layer_masks)[],
+		    const size_t masks_array_size)
 {
 	const struct landlock_layer *layer;
 
@@ -856,53 +627,67 @@ bool landlock_unmask_layers(const struct landlock_found_rule rule,
 	return false;
 }
 
-#ifdef CONFIG_SECURITY_LANDLOCK_KUNIT_TEST
+typedef access_mask_t
+get_dom_access_mask_t(const struct landlock_domain *const domain,
+	      const u16 layer_level);
 
-static void test_landlock_get_deny_masks(struct kunit *const test)
+/**
+ * landlock_domain_init_layer_masks - Initialize layer masks from an access request
+ *
+ * Populates @layer_masks such that for each access right in @access_request,
+ * the bits for all the layers are set where that access right is handled.
+ * For each layer, the layer bit is set in @layer_masks for a given access
+ * right, if and only if the current layer handles this access right and the
+ * access right is requested.
+ *
+ * Returns: An access mask where each access right bit is set if it is
+ * handled in any of the active layers in @domain.
+ */
+access_mask_t
+landlock_domain_init_layer_masks(const struct landlock_domain *const domain,
+		  const access_mask_t access_request,
+		  layer_mask_t (*const layer_masks)[],
+		  const enum landlock_key_type key_type)
 {
-	const layer_mask_t layers1[BITS_PER_TYPE(access_mask_t)] = {
-		[BIT_INDEX(LANDLOCK_ACCESS_FS_EXECUTE)] = BIT_ULL(0) |
-							  BIT_ULL(9),
-		[BIT_INDEX(LANDLOCK_ACCESS_FS_TRUNCATE)] = BIT_ULL(1),
-		[BIT_INDEX(LANDLOCK_ACCESS_FS_IOCTL_DEV)] = BIT_ULL(2) |
-							    BIT_ULL(0),
-	};
+	access_mask_t handled_accesses = 0;
+	size_t layer_level, num_access;
+	get_dom_access_mask_t *get_access_mask;
 
-	KUNIT_EXPECT_EQ(test, 0x1,
-			landlock_get_deny_masks(_LANDLOCK_ACCESS_FS_OPTIONAL,
-						LANDLOCK_ACCESS_FS_TRUNCATE,
-						&layers1, ARRAY_SIZE(layers1)));
-	KUNIT_EXPECT_EQ(test, 0x20,
-			landlock_get_deny_masks(_LANDLOCK_ACCESS_FS_OPTIONAL,
-						LANDLOCK_ACCESS_FS_IOCTL_DEV,
-						&layers1, ARRAY_SIZE(layers1)));
-	KUNIT_EXPECT_EQ(
-		test, 0x21,
-		landlock_get_deny_masks(_LANDLOCK_ACCESS_FS_OPTIONAL,
-					LANDLOCK_ACCESS_FS_TRUNCATE |
-						LANDLOCK_ACCESS_FS_IOCTL_DEV,
-					&layers1, ARRAY_SIZE(layers1)));
+	switch (key_type) {
+	case LANDLOCK_KEY_INODE:
+		get_access_mask = landlock_dom_get_fs_access_mask;
+		num_access = LANDLOCK_NUM_ACCESS_FS;
+		break;
+
+#if IS_ENABLED(CONFIG_INET)
+	case LANDLOCK_KEY_NET_PORT:
+		get_access_mask = landlock_dom_get_net_access_mask;
+		num_access = LANDLOCK_NUM_ACCESS_NET;
+		break;
+#endif /* IS_ENABLED(CONFIG_INET) */
+
+	default:
+		WARN_ON_ONCE(1);
+		return 0;
+	}
+
+	memset(layer_masks, 0,
+	       array_size(num_access, sizeof((*layer_masks)[0])));
+
+	/* An access request not handled by the domain is allowed. */
+	for (layer_level = 0; layer_level < domain->num_layers; layer_level++) {
+		const unsigned long access_req = access_request;
+		unsigned long access_bit;
+		const access_mask_t layer_access_mask =
+			get_access_mask(domain, layer_level);
+
+		for_each_set_bit(access_bit, &access_req, num_access) {
+			if (layer_access_mask & BIT_ULL(access_bit)) {
+				(*layer_masks)[access_bit] |=
+					BIT_ULL(layer_level);
+				handled_accesses |= BIT_ULL(access_bit);
+			}
+		}
+	}
+	return handled_accesses & access_request;
 }
-
-#endif /* CONFIG_SECURITY_LANDLOCK_KUNIT_TEST */
-
-#ifdef CONFIG_SECURITY_LANDLOCK_KUNIT_TEST
-
-static struct kunit_case test_cases[] = {
-	/* clang-format off */
-	KUNIT_CASE(test_get_layer_deny_mask),
-	KUNIT_CASE(test_landlock_get_deny_masks),
-	{}
-	/* clang-format on */
-};
-
-static struct kunit_suite test_suite = {
-	.name = "landlock_domain",
-	.test_cases = test_cases,
-};
-
-kunit_test_suite(test_suite);
-
-#endif /* CONFIG_SECURITY_LANDLOCK_KUNIT_TEST */
-
-#endif /* CONFIG_AUDIT */
