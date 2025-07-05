@@ -5,6 +5,7 @@
  * Copyright © 2016-2020 Mickaël Salaün <mic@digikod.net>
  * Copyright © 2018-2020 ANSSI
  * Copyright © 2024-2025 Microsoft Corporation
+ * Copyright © 2025      Tingmao Wang <m@maowtm.org>
  */
 
 #include <kunit/test.h>
@@ -24,7 +25,7 @@
 #include "domain.h"
 #include "id.h"
 
-static void __maybe_unused build_check_domain(void)
+static void build_check_domain(void)
 {
 	BUILD_BUG_ON(LANDLOCK_MAX_NUM_RULES >= U32_MAX - 1);
 	/* Non-inclusive end indices are involved, so needs to be U32_MAX - 1. */
@@ -47,6 +48,221 @@ static void __maybe_unused build_check_domain(void)
 		     sizeof(u32));
 	BUILD_BUG_ON(sizeof((struct landlock_domain_index *)0)->layer_index <
 		     sizeof(u32));
+}
+
+/**
+ * dom_calculate_merged_sizes - Calculate the eventual size of the part of
+ * a new domain for a given rule size (i.e. either fs or net).  Correct
+ * usage requires the caller to hold the ruleset lock throughout the
+ * merge.  Returns -E2BIG if limits would be exceeded.
+ *
+ * @dom_ind_array: The index table in the parent domain for the relevant
+ * rule type.  Can be NULL if there is no parent domain.
+ * @dom_num_indices: The length of @dom_ind_array, or 0 if no parent
+ * domain.
+ * @dom_num_layers: The total number of distinct layer objects in the
+ * parent domain for the relevant rule type.
+ * @child_rules: The root of the rules tree to be merged.
+ * @out_num_indices: Outputs the number of indices that would be needed in
+ * the new domain.
+ * @out_num_layers: Outputs the number of layer objects that would be
+ * needed in the new domain.
+ */
+static int __maybe_unused dom_calculate_merged_sizes(
+	const struct landlock_domain_index *const dom_ind_array,
+	const u32 dom_num_indices, const u32 dom_num_layers,
+	const struct rb_root *const child_rules, u32 *const out_num_indices,
+	u32 *const out_num_layers)
+{
+	u32 num_indices = dom_num_indices;
+	u32 num_layers = dom_num_layers;
+	const struct landlock_rule *walker_rule, *next_rule;
+	struct landlock_domain_index find_key;
+	const struct landlock_domain_index *found;
+
+	build_check_domain();
+
+	rbtree_postorder_for_each_entry_safe(walker_rule, next_rule,
+					     child_rules, node) {
+		found = NULL;
+		if (dom_ind_array) {
+			find_key.key = walker_rule->key;
+			found = dom_hash_find(dom_ind_array, dom_num_indices,
+					      &find_key);
+		}
+		/* A new index is only needed if this is a non-overlapping new rule */
+		if (!found) {
+			if (num_indices >= LANDLOCK_MAX_NUM_RULES)
+				return -E2BIG;
+			num_indices++;
+		}
+
+		/* Regardless, we have a new layer. */
+		if (WARN_ON_ONCE(num_layers >= U32_MAX - 1))
+			/*
+			 * This situation should not be possible with the proper rule
+			 * number limit.
+			 */
+			return -E2BIG;
+		num_layers++;
+	}
+
+	*out_num_indices = num_indices;
+	*out_num_layers = num_layers;
+	return 0;
+}
+
+/**
+ * dom_populate_indices - Populate the index table of a new domain.
+ *
+ * @dom_ind_array: The index table in the parent domain for the relevant
+ * rule type.  Can be NULL if there is no parent domain.
+ * @dom_num_indices: The length of @dom_ind_array, or 0 if no parent
+ * domain.
+ * @child_rules: The root of the rules tree to be merged.
+ * @out_indices: The output indices array to be populated.
+ * @out_size: The size of @out_indices, in number of elements.
+ */
+static int __maybe_unused dom_populate_indices(
+	const struct landlock_domain_index *const dom_ind_array,
+	const u32 dom_num_indices, const struct rb_root *const child_rules,
+	struct landlock_domain_index *const out_indices, const u32 out_size)
+{
+	u32 indices_written = 0;
+	const struct landlock_domain_index *walker_index;
+	struct landlock_domain_index target = {};
+	const struct landlock_rule *walker_rule, *next_rule;
+	const struct landlock_domain_index *found;
+	struct h_insert_scratch scratch;
+	int ret;
+	size_t i;
+
+	dom_hash_initialize(out_indices, out_size);
+	for (i = 0; i < out_size; i++) {
+		out_indices[i].key.data = 0;
+		out_indices[i].layer_index = U32_MAX;
+	}
+
+	ret = h_init_insert_scratch(&scratch, out_indices, out_size,
+				    sizeof(*out_indices));
+	if (ret)
+		return ret;
+
+	/* Copy over all parent indices directly */
+	for (size_t i = 0; i < dom_num_indices; i++) {
+		walker_index = &dom_ind_array[i];
+		if (WARN_ON_ONCE(indices_written >= out_size)) {
+			ret = -E2BIG;
+			goto out_free;
+		}
+		/* Don't copy over layer_index */
+		target.key = walker_index->key;
+		dom_hash_insert(&scratch, &target);
+		indices_written++;
+	}
+
+	/* Copy over new child rules */
+	rbtree_postorder_for_each_entry_safe(walker_rule, next_rule,
+					     child_rules, node) {
+		target.key = walker_rule->key;
+		found = NULL;
+		if (dom_ind_array)
+			found = dom_hash_find(dom_ind_array, dom_num_indices,
+					      &target);
+		if (!found) {
+			if (WARN_ON_ONCE(indices_written >= out_size)) {
+				ret = -E2BIG;
+				goto out_free;
+			}
+			dom_hash_insert(&scratch, &target);
+			indices_written++;
+		}
+	}
+
+out_free:
+	h_free_insert_scratch(&scratch);
+
+	if (ret)
+		return ret;
+
+	for (i = 0; i < out_size; i++) {
+		walker_index = &out_indices[i];
+		/* We are not supposed to leave empty slots behind. */
+		WARN_ON_ONCE(dom_index_is_empty(walker_index));
+	}
+
+	return 0;
+}
+
+/**
+ * dom_populate_layers - Populate the layer array of a new domain.
+ *
+ * @dom_ind_array: The index table in the parent domain for the relevant
+ * rule type.  Can be NULL if there is no parent domain.
+ * @dom_num_indices: The length of @dom_ind_array, or 0 if no parent
+ * domain.
+ * @dom_layer_array: The layer array in the parent domain for the relevant
+ * rule type.  Can be NULL if there is no parent domain.
+ * @dom_num_layers: The length of @dom_layer_array, or 0 if no parent
+ * domain.
+ * @child_rules: The root of the rules tree to be merged.
+ * @child_indices: The already populated index table in the child ruleset
+ * to be merged.  This function will set the layer_index field on each
+ * indices.
+ * @child_indices_size: The size of @child_indices, in number of elements.
+ * @new_level: The level number of any new layers that will be added to
+ * @out_layers.
+ * @out_layers: The output layers array to be populated.
+ * @out_size: The size of @out_layers, in number of elements.
+ */
+static int
+dom_populate_layers(const struct landlock_domain_index *const dom_ind_array,
+		    const u32 dom_num_indices,
+		    const struct landlock_layer *const dom_layer_array,
+		    const u32 dom_num_layers,
+		    const struct rb_root *const child_rules,
+		    struct landlock_domain_index *const child_indices,
+		    const u32 child_indices_size, const u32 new_level,
+		    struct landlock_layer *const out_layers, const u32 out_size)
+{
+	u32 layers_written = 0;
+	struct landlock_domain_index *merged_index;
+	struct landlock_found_rule found_in_parent;
+	const struct landlock_rule *found_in_child;
+	const struct landlock_layer *layer;
+	struct landlock_layer child_layer;
+
+	for (size_t i = 0; i < child_indices_size; i++) {
+		merged_index = &child_indices[i];
+		merged_index->layer_index = layers_written;
+
+		found_in_parent.layers_start = NULL;
+		found_in_parent.layers_end = NULL;
+		if (dom_ind_array)
+			found_in_parent = landlock_domain_find(
+				dom_ind_array, dom_num_indices, dom_layer_array,
+				dom_num_layers, merged_index->key);
+		dom_rule_for_each_layer(found_in_parent, layer)
+		{
+			if (WARN_ON_ONCE(layers_written >= out_size))
+				return -E2BIG;
+			out_layers[layers_written++] = *layer;
+		}
+
+		found_in_child =
+			landlock_find_in_tree(child_rules, merged_index->key);
+		if (found_in_child) {
+			if (WARN_ON_ONCE(layers_written >= out_size))
+				return -E2BIG;
+			if (WARN_ON_ONCE(found_in_child->num_layers != 1))
+				return -EINVAL;
+			child_layer.access = found_in_child->layers[0].access;
+			child_layer.level = new_level;
+			out_layers[layers_written++] = child_layer;
+		}
+	}
+
+	return 0;
 }
 
 #ifdef CONFIG_AUDIT

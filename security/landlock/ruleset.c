@@ -592,25 +592,11 @@ landlock_find_rule(const struct landlock_ruleset *const ruleset,
 		   const struct landlock_id id)
 {
 	const struct rb_root *root;
-	const struct rb_node *node;
 
 	root = get_root((struct landlock_ruleset *)ruleset, id.type);
 	if (IS_ERR(root))
 		return NULL;
-	node = root->rb_node;
-
-	while (node) {
-		struct landlock_rule *this =
-			rb_entry(node, struct landlock_rule, node);
-
-		if (this->key.data == id.key.data)
-			return this;
-		if (this->key.data < id.key.data)
-			node = node->rb_right;
-		else
-			node = node->rb_left;
-	}
-	return NULL;
+	return landlock_find_in_tree(root, id.key);
 }
 
 /*
