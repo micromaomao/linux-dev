@@ -501,6 +501,22 @@ void landlock_log_drop_domain(const struct landlock_hierarchy *const hierarchy)
 	audit_log_end(ab);
 }
 
+deny_masks_t
+landlock_get_deny_masks(const access_mask_t all_existing_optional_access,
+			const access_mask_t optional_access,
+			const layer_mask_t (*const layer_masks)[],
+			size_t layer_masks_size)
+{
+	/* Simplified implementation for now - could be enhanced later */
+	return 0;
+}
+
+int landlock_init_hierarchy_log(struct landlock_hierarchy *const hierarchy)
+{
+	/* Simplified implementation for now - could be enhanced later */
+	return 0;
+}
+
 #ifdef CONFIG_SECURITY_LANDLOCK_KUNIT_TEST
 
 static struct kunit_case test_cases[] = {

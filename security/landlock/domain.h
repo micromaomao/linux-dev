@@ -28,10 +28,19 @@ struct landlock_domain_index {
 	 */
 	union landlock_key key;
 	/**
-	 * @layer_index: The index of the first landlock_layer corresponding
+	 * @layer_start: The index of the first landlock_layer corresponding
 	 * to this key in the relevant subarray.
 	 */
-	u32 layer_index;
+	u32 layer_start;
+	/**
+	 * @layer_end: The non-inclusive end of this rule's range of layers.
+	 */
+	u32 layer_end;
+	/**
+	 * @next_collision: Index of the next entry in the collision chain,
+	 * or U32_MAX if this is the last entry in the chain.
+	 */
+	u32 next_collision;
 };
 
 struct landlock_domain_work_free {
@@ -82,6 +91,16 @@ struct landlock_domain {
 	 */
 	u32 num_net_layers;
 	/**
+	 * @fs_hash_size: Size of the filesystem hashtable. Either equal to
+	 * num_fs_indices (exact size) or the next power of 2 (for faster hashing).
+	 */
+	u32 fs_hash_size;
+	/**
+	 * @net_hash_size: Size of the network hashtable. Either equal to
+	 * num_net_indices (exact size) or the next power of 2 (for faster hashing).
+	 */
+	u32 net_hash_size;
+	/**
 	 * @len_rules: Total length (in units of uintptr_t) of the rules
 	 * array.  Used to check accesses are not out of bounds, but in theory
 	 * this is always derivable from the other length fields.
@@ -94,8 +113,8 @@ struct landlock_domain {
 	 *
 	 *     struct access_masks access_masks[num_layers];
 	 *     (possible alignment padding here)
-	 *     struct landlock_domain_index fs_indices[num_fs_indices];
-	 *     struct landlock_domain_index net_indices[num_net_indices];
+	 *     struct landlock_domain_index fs_indices[fs_hash_size];
+	 *     struct landlock_domain_index net_indices[net_hash_size];
 	 *     struct landlock_layer fs_layers[num_fs_layers];
 	 *     struct landlock_layer net_layers[num_net_layers];
 	 *     (possible alignment padding here)
@@ -115,7 +134,7 @@ struct landlock_domain {
 
 #define _dom_net_indices_offset(dom)       \
 	(_dom_fs_indices_offset(dom) +     \
-	 array_size((dom)->num_fs_indices, \
+	 array_size((dom)->fs_hash_size, \
 		    sizeof(struct landlock_domain_index)))
 
 #define dom_net_indices(dom)                                     \
@@ -124,7 +143,7 @@ struct landlock_domain {
 
 #define _dom_fs_layers_offset(dom)          \
 	(_dom_net_indices_offset(dom) +     \
-	 array_size((dom)->num_net_indices, \
+	 array_size((dom)->net_hash_size, \
 		    sizeof(struct landlock_domain_index)))
 
 #define dom_fs_layers(dom)                                \
@@ -166,6 +185,99 @@ struct landlock_found_rule {
 	const struct landlock_layer *layers_end;
 };
 
+/* Hash function for domain keys */
+static inline u32 domain_hash_key(union landlock_key key, u32 hash_size)
+{
+	/*
+	 * Simple hash function: use the key data directly.
+	 * For power-of-2 sizes, we can use bitwise AND for efficiency.
+	 * For non-power-of-2 sizes, we use modulo.
+	 */
+	if (hash_size && (hash_size & (hash_size - 1)) == 0) {
+		/* Power of 2: use fast bitwise AND */
+		return (u32)key.data & (hash_size - 1);
+	} else {
+		/* Not power of 2: use modulo */
+		return hash_size ? (u32)key.data % hash_size : 0;
+	}
+}
+
+/* Check if a size is a power of 2 */
+static inline bool is_power_of_2_u32(u32 x)
+{
+	return x && (x & (x - 1)) == 0;
+}
+
+/* Find the next power of 2 >= x */
+static inline u32 next_power_of_2_u32(u32 x)
+{
+	if (x <= 1)
+		return 1;
+	return 1U << (32 - __builtin_clz(x - 1));
+}
+
+/**
+ * landlock_domain_find_hash - search for a key in a domain using hashtable.
+ *
+ * @dom: The domain to search in.
+ * @indices_arr: The indices hashtable array to search in.
+ * @hash_size: The size of the hashtable.
+ * @layers_arr: The layers array.
+ * @num_layers: The number of elements in @layers_arr.
+ * @key: The key to search for.
+ *
+ * Uses separate chaining within the array. Collisions are resolved by
+ * following the next_collision chain starting from the ideal hash position.
+ * This enables fast lookups with immediate termination when the ideal slot
+ * is empty (key guaranteed not found) or when the collision chain ends.
+ */
+static inline struct landlock_found_rule
+landlock_domain_find_hash(const struct landlock_domain *const dom,
+		     const struct landlock_domain_index *const indices_arr,
+		     const u32 hash_size,
+		     const struct landlock_layer *const layers_arr,
+		     const u32 num_layers, const union landlock_key key)
+{
+	struct landlock_found_rule out_found_rule = {};
+	u32 probe_index;
+	const struct landlock_domain_index *curr_entry;
+
+	if (!hash_size || !indices_arr)
+		return out_found_rule;
+
+	probe_index = domain_hash_key(key, hash_size);
+	curr_entry = &indices_arr[probe_index];
+
+	/* Fast path: if ideal slot is empty, key is not in table */
+	if (curr_entry->key.data == 0)
+		return out_found_rule;
+
+	/* Follow the collision chain */
+	do {
+		/* Found matching key */
+		if (curr_entry->key.data == key.data) {
+			if (WARN_ON_ONCE(curr_entry->layer_end > num_layers))
+				return out_found_rule;
+
+			out_found_rule.layers_start = &layers_arr[curr_entry->layer_start];
+			out_found_rule.layers_end = &layers_arr[curr_entry->layer_end];
+			return out_found_rule;
+		}
+
+		/* Move to next entry in collision chain */
+		if (curr_entry->next_collision == U32_MAX)
+			break;
+
+		if (WARN_ON_ONCE(curr_entry->next_collision >= hash_size))
+			break;
+
+		probe_index = curr_entry->next_collision;
+		curr_entry = &indices_arr[probe_index];
+	} while (curr_entry->key.data != 0);
+
+	return out_found_rule;
+}
+
 struct landlock_found_rule
 landlock_domain_find(const struct landlock_domain *dom,
 		     const struct landlock_domain_index *indices_arr,
@@ -173,12 +285,12 @@ landlock_domain_find(const struct landlock_domain *dom,
 		     u32 num_layers, union landlock_key key);
 
 #define dom_find_index_fs(dom, key)                                           \
-	landlock_domain_find(dom, dom_fs_indices(dom), (dom)->num_fs_indices, \
+	landlock_domain_find_hash(dom, dom_fs_indices(dom), (dom)->fs_hash_size, \
 			     dom_fs_layers(dom), (dom)->num_fs_layers, key)
 
 #define dom_find_index_net(dom, key)                                      \
-	landlock_domain_find(dom, dom_net_indices(dom),                   \
-			     (dom)->num_net_indices, dom_net_layers(dom), \
+	landlock_domain_find_hash(dom, dom_net_indices(dom),                   \
+			     (dom)->net_hash_size, dom_net_layers(dom), \
 			     (dom)->num_net_layers, key)
 
 #define dom_find_success(found_rule) ((found_rule).layers_start != NULL)
@@ -200,6 +312,15 @@ bool landlock_merge_walk_step(
 struct landlock_domain *
 landlock_domain_merge_ruleset(const struct landlock_domain *parent,
 			      struct landlock_ruleset *ruleset);
+
+/* Hashtable construction function for testing */
+int build_hashtable(struct landlock_domain_index *indices,
+		   u32 hash_size,
+		   const struct landlock_rule **rules,
+		   u32 num_rules,
+		   struct landlock_layer *layers,
+		   u32 layer_offset,
+		   u32 *layers_written);
 
 enum landlock_log_status {
 	LANDLOCK_LOG_PENDING = 0,
@@ -342,15 +463,20 @@ landlock_get_hierarchy(struct landlock_hierarchy *const hierarchy)
 void landlock_put_hierarchy(struct landlock_hierarchy *hierarchy);
 
 bool landlock_unmask_layers(const struct landlock_found_rule rule,
-			    const access_mask_t access_request,
-			    layer_mask_t (*const layer_masks)[],
-			    const size_t masks_array_size);
+		    const access_mask_t access_request,
+		    layer_mask_t (*const layer_masks)[],
+		    const size_t masks_array_size);
 
 access_mask_t
 landlock_init_layer_masks(const struct landlock_domain *const domain,
-			  const access_mask_t access_request,
-			  layer_mask_t (*const layer_masks)[],
-			  const enum landlock_key_type key_type);
+		  const access_mask_t access_request,
+		  layer_mask_t (*const layer_masks)[],
+		  const enum landlock_key_type key_type);
+
+bool landlock_unmask_layers(const struct landlock_found_rule rule,
+			    const access_mask_t access_request,
+			    layer_mask_t (*const layer_masks)[],
+			    const size_t masks_array_size);
 
 static inline access_mask_t
 landlock_dom_get_fs_access_mask(const struct landlock_domain *const domain,
