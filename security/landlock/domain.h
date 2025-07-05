@@ -11,16 +11,13 @@
 #ifndef _SECURITY_LANDLOCK_DOMAIN_H
 #define _SECURITY_LANDLOCK_DOMAIN_H
 
-#include <linux/bsearch.h>
 #include <linux/limits.h>
 #include <linux/mm.h>
 #include <linux/path.h>
 #include <linux/pid.h>
-#include <linux/rbtree.h>
 #include <linux/refcount.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
-#include <linux/workqueue.h>
 
 #include "access.h"
 #include "ruleset.h"
@@ -41,7 +38,7 @@ struct landlock_domain_index {
 	u32 layer_end;
 	/**
 	 * @next_collision: Index of the next entry in the collision chain,
-	 * or UINT32_MAX if this is the last entry in the chain.
+	 * or U32_MAX if this is the last entry in the chain.
 	 */
 	u32 next_collision;
 };
@@ -133,7 +130,7 @@ struct landlock_domain {
 
 #define dom_fs_indices(dom)                                      \
 	((struct landlock_domain_index *)((char *)(dom)->rules + \
-			  _dom_fs_indices_offset(dom)))
+					  _dom_fs_indices_offset(dom)))
 
 #define _dom_net_indices_offset(dom)       \
 	(_dom_fs_indices_offset(dom) +     \
@@ -142,7 +139,7 @@ struct landlock_domain {
 
 #define dom_net_indices(dom)                                     \
 	((struct landlock_domain_index *)((char *)(dom)->rules + \
-			  _dom_net_indices_offset(dom)))
+					  _dom_net_indices_offset(dom)))
 
 #define _dom_fs_layers_offset(dom)          \
 	(_dom_net_indices_offset(dom) +     \
@@ -151,7 +148,7 @@ struct landlock_domain {
 
 #define dom_fs_layers(dom)                                \
 	((struct landlock_layer *)((char *)(dom)->rules + \
-		   _dom_fs_layers_offset(dom)))
+				   _dom_fs_layers_offset(dom)))
 
 #define _dom_net_layers_offset(dom)   \
 	(_dom_fs_layers_offset(dom) + \
@@ -159,15 +156,35 @@ struct landlock_domain {
 
 #define dom_net_layers(dom)                               \
 	((struct landlock_layer *)((char *)(dom)->rules + \
-		   _dom_net_layers_offset(dom)))
+				   _dom_net_layers_offset(dom)))
 
 #define dom_rules_len(dom)                                        \
 	(ALIGN(_dom_net_layers_offset(dom) +                      \
 		       array_size((dom)->num_net_layers,          \
-<<<<<<< HEAD
 				  sizeof(struct landlock_layer)), \
 	       sizeof(uintptr_t)) /                               \
 	 sizeof(uintptr_t))
+
+struct landlock_domain *
+landlock_alloc_domain(const struct landlock_domain *sizes);
+
+static inline void landlock_get_domain(struct landlock_domain *const domain)
+{
+	if (domain)
+		refcount_inc(&domain->usage);
+}
+
+void landlock_put_domain(struct landlock_domain *const domain);
+void landlock_put_domain_deferred(struct landlock_domain *const domain);
+
+DEFINE_FREE(landlock_put_domain, struct landlock_domain *,
+	    if (!IS_ERR_OR_NULL(_T)) landlock_put_domain(_T))
+
+struct landlock_found_rule {
+	const struct landlock_layer *layers_start;
+	const struct landlock_layer *layers_end;
+};
+
 /* Hash function for domain keys */
 static inline u32 domain_hash_key(union landlock_key key, u32 hash_size)
 {
@@ -198,26 +215,6 @@ static inline u32 next_power_of_2_u32(u32 x)
 		return 1;
 	return 1U << (32 - __builtin_clz(x - 1));
 }
-
->>>>>>> 63f61f45bc7a (squash copilot changes)
-struct landlock_domain *
-landlock_alloc_domain(const struct landlock_domain *sizes);
-
-{
-	if (domain)
-		refcount_inc(&domain->usage);
-}
-
-void landlock_put_domain(struct landlock_domain *const domain);
-void landlock_put_domain_deferred(struct landlock_domain *const domain);
-
-DEFINE_FREE(landlock_put_domain, struct landlock_domain *,
-	    if (!IS_ERR_OR_NULL(_T)) landlock_put_domain(_T))
-
-struct landlock_found_rule {
-	const struct landlock_layer *layers_start;
-	const struct landlock_layer *layers_end;
-};
 
 /**
  * landlock_domain_find_hash - search for a key in a domain using hashtable.
@@ -268,7 +265,7 @@ landlock_domain_find_hash(const struct landlock_domain *const dom,
 		}
 
 		/* Move to next entry in collision chain */
-		if (curr_entry->next_collision == UINT32_MAX)
+		if (curr_entry->next_collision == U32_MAX)
 			break;
 
 		if (WARN_ON_ONCE(curr_entry->next_collision >= hash_size))
@@ -281,14 +278,20 @@ landlock_domain_find_hash(const struct landlock_domain *const dom,
 	return out_found_rule;
 }
 
+struct landlock_found_rule
+landlock_domain_find(const struct landlock_domain *dom,
+		     const struct landlock_domain_index *indices_arr,
+		     u32 num_indices, const struct landlock_layer *layers_arr,
+		     u32 num_layers, union landlock_key key);
+
 #define dom_find_index_fs(dom, key)                                           \
 	landlock_domain_find_hash(dom, dom_fs_indices(dom), (dom)->fs_hash_size, \
-		     dom_fs_layers(dom), (dom)->num_fs_layers, key)
+			     dom_fs_layers(dom), (dom)->num_fs_layers, key)
 
 #define dom_find_index_net(dom, key)                                      \
 	landlock_domain_find_hash(dom, dom_net_indices(dom),                   \
-		     (dom)->net_hash_size, dom_net_layers(dom), \
-		     (dom)->num_net_layers, key)
+			     (dom)->net_hash_size, dom_net_layers(dom), \
+			     (dom)->num_net_layers, key)
 
 #define dom_find_success(found_rule) ((found_rule).layers_start != NULL)
 
@@ -308,10 +311,7 @@ bool landlock_merge_walk_step(
 
 struct landlock_domain *
 landlock_domain_merge_ruleset(const struct landlock_domain *parent,
-		      struct landlock_ruleset *ruleset);
-
-/* Additional domain functions - these will be implemented in domain.c */
-void landlock_put_hierarchy(struct landlock_hierarchy *hierarchy);
+			      struct landlock_ruleset *ruleset);
 
 /* Hashtable construction function for testing */
 int build_hashtable(struct landlock_domain_index *indices,
@@ -322,20 +322,165 @@ int build_hashtable(struct landlock_domain_index *indices,
 		   u32 layer_offset,
 		   u32 *layers_written);
 
-bool landlock_domain_unmask_layers(const struct landlock_found_rule rule,
+enum landlock_log_status {
+	LANDLOCK_LOG_PENDING = 0,
+	LANDLOCK_LOG_RECORDED,
+	LANDLOCK_LOG_DISABLED,
+};
+
+/**
+ * struct landlock_details - Domain's creation information
+ *
+ * Rarely accessed, mainly when logging the first domain's denial.
+ *
+ * The contained pointers are initialized at the domain creation time and never
+ * changed again.  Contrary to most other Landlock object types, this one is
+ * not allocated with GFP_KERNEL_ACCOUNT because its size may not be under the
+ * caller's control (e.g. unknown exe_path) and the data is not explicitly
+ * requested nor used by tasks.
+ */
+struct landlock_details {
+	/**
+	 * @pid: PID of the task that initially restricted itself.  It still
+	 * identifies the same task.  Keeping a reference to this PID ensures that
+	 * it will not be recycled.
+	 */
+	struct pid *pid;
+	/**
+	 * @uid: UID of the task that initially restricted itself, at creation time.
+	 */
+	uid_t uid;
+	/**
+	 * @comm: Command line of the task that initially restricted itself, at
+	 * creation time.  Always NULL terminated.
+	 */
+	char comm[TASK_COMM_LEN];
+	/**
+	 * @exe_path: Executable path of the task that initially restricted
+	 * itself, at creation time.  Always NULL terminated, and never greater
+	 * than LANDLOCK_PATH_MAX_SIZE.
+	 */
+	char exe_path[];
+};
+
+/* Adds 11 extra characters for the potential " (deleted)" suffix. */
+#define LANDLOCK_PATH_MAX_SIZE (PATH_MAX + 11)
+
+/* Makes sure the greatest landlock_details can be allocated. */
+static_assert(struct_size_t(struct landlock_details, exe_path,
+			    LANDLOCK_PATH_MAX_SIZE) <= KMALLOC_MAX_SIZE);
+
+/**
+ * struct landlock_hierarchy - Node in a domain hierarchy
+ */
+struct landlock_hierarchy {
+	/**
+	 * @parent: Pointer to the parent node, or NULL if it is a root
+	 * Landlock domain.
+	 */
+	struct landlock_hierarchy *parent;
+	/**
+	 * @usage: Number of potential children domains plus their parent
+	 * domain.
+	 */
+	refcount_t usage;
+
+#ifdef CONFIG_AUDIT
+	/**
+	 * @log_status: Whether this domain should be logged or not.  Because
+	 * concurrent log entries may be created at the same time, it is still
+	 * possible to have several domain records of the same domain.
+	 */
+	enum landlock_log_status log_status;
+	/**
+	 * @num_denials: Number of access requests denied by this domain.
+	 * Masked (i.e. never logged) denials are still counted.
+	 */
+	atomic64_t num_denials;
+	/**
+	 * @id: Landlock domain ID, sets once at domain creation time.
+	 */
+	u64 id;
+	/**
+	 * @details: Information about the related domain.
+	 */
+	const struct landlock_details *details;
+	/**
+	 * @log_same_exec: Set if the domain is *not* configured with
+	 * %LANDLOCK_RESTRICT_SELF_LOG_SAME_EXEC_OFF.  Set to true by default.
+	 */
+	u32 log_same_exec : 1,
+		/**
+		 * @log_new_exec: Set if the domain is configured with
+		 * %LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON.  Set to false by default.
+		 */
+		log_new_exec : 1;
+#endif /* CONFIG_AUDIT */
+};
+
+#ifdef CONFIG_AUDIT
+
+deny_masks_t
+landlock_get_deny_masks(const access_mask_t all_existing_optional_access,
+			const access_mask_t optional_access,
+			const layer_mask_t (*const layer_masks)[],
+			size_t layer_masks_size);
+
+int landlock_init_hierarchy_log(struct landlock_hierarchy *const hierarchy);
+
+static inline void
+landlock_free_hierarchy_details(struct landlock_hierarchy *const hierarchy)
+{
+	if (!hierarchy || !hierarchy->details)
+		return;
+
+	put_pid(hierarchy->details->pid);
+	kfree(hierarchy->details);
+}
+
+#else /* CONFIG_AUDIT */
+
+static inline int
+landlock_init_hierarchy_log(struct landlock_hierarchy *const hierarchy)
+{
+	return 0;
+}
+
+static inline void
+landlock_free_hierarchy_details(struct landlock_hierarchy *const hierarchy)
+{
+}
+
+#endif /* CONFIG_AUDIT */
+
+static inline void
+landlock_get_hierarchy(struct landlock_hierarchy *const hierarchy)
+{
+	if (hierarchy)
+		refcount_inc(&hierarchy->usage);
+}
+
+void landlock_put_hierarchy(struct landlock_hierarchy *hierarchy);
+
+bool landlock_unmask_layers(const struct landlock_found_rule rule,
 		    const access_mask_t access_request,
 		    layer_mask_t (*const layer_masks)[],
 		    const size_t masks_array_size);
 
 access_mask_t
-landlock_domain_init_layer_masks(const struct landlock_domain *const domain,
+landlock_init_layer_masks(const struct landlock_domain *const domain,
 		  const access_mask_t access_request,
 		  layer_mask_t (*const layer_masks)[],
 		  const enum landlock_key_type key_type);
 
+bool landlock_unmask_layers(const struct landlock_found_rule rule,
+			    const access_mask_t access_request,
+			    layer_mask_t (*const layer_masks)[],
+			    const size_t masks_array_size);
+
 static inline access_mask_t
 landlock_dom_get_fs_access_mask(const struct landlock_domain *const domain,
-			const u16 layer_level)
+				const u16 layer_level)
 {
 	/* Handles all initially denied by default access rights. */
 	return dom_access_masks(domain)[layer_level].fs |
@@ -344,14 +489,14 @@ landlock_dom_get_fs_access_mask(const struct landlock_domain *const domain,
 
 static inline access_mask_t
 landlock_dom_get_net_access_mask(const struct landlock_domain *const domain,
-			 const u16 layer_level)
+				 const u16 layer_level)
 {
 	return dom_access_masks(domain)[layer_level].net;
 }
 
 static inline access_mask_t
 landlock_dom_get_scope_mask(const struct landlock_domain *const domain,
-		    const u16 layer_level)
+			    const u16 layer_level)
 {
 	return dom_access_masks(domain)[layer_level].scope;
 }

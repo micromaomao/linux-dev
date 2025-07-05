@@ -198,7 +198,7 @@ int build_hashtable(struct landlock_domain_index *indices,
 	/* Initialize hashtable - zero key.data means empty slot */
 	for (i = 0; i < hash_size; i++) {
 		indices[i].key.data = 0;
-		indices[i].next_collision = UINT32_MAX;
+		indices[i].next_collision = U32_MAX;
 	}
 
 	/* Process each rule */
@@ -224,7 +224,7 @@ int build_hashtable(struct landlock_domain_index *indices,
 			/* Link new entry to the collision chain */
 			/* Find the tail of the existing chain */
 			struct landlock_domain_index *tail = head_entry;
-			while (tail->next_collision != UINT32_MAX) {
+			while (tail->next_collision != U32_MAX) {
 				if (WARN_ON_ONCE(tail->next_collision >= hash_size))
 					return -EINVAL;
 				tail = &indices[tail->next_collision];
@@ -236,7 +236,7 @@ int build_hashtable(struct landlock_domain_index *indices,
 		entry = &indices[slot_index];
 		entry->key = rule->key;
 		entry->layer_start = layer_offset + *layers_written;
-		entry->next_collision = UINT32_MAX;
+		entry->next_collision = U32_MAX;
 
 		/* Copy layers for this rule */
 		if (WARN_ON_ONCE(rule->num_layers != 1)) {
@@ -575,7 +575,7 @@ void landlock_put_hierarchy(struct landlock_hierarchy *hierarchy)
  * Returns true if the request is allowed (i.e. relevant layer masks for the
  * request are empty).
  */
-bool landlock_domain_unmask_layers(const struct landlock_found_rule rule,
+bool landlock_unmask_layers(const struct landlock_found_rule rule,
 		    const access_mask_t access_request,
 		    layer_mask_t (*const layer_masks)[],
 		    const size_t masks_array_size)
@@ -631,63 +631,4 @@ typedef access_mask_t
 get_dom_access_mask_t(const struct landlock_domain *const domain,
 	      const u16 layer_level);
 
-/**
- * landlock_domain_init_layer_masks - Initialize layer masks from an access request
- *
- * Populates @layer_masks such that for each access right in @access_request,
- * the bits for all the layers are set where that access right is handled.
- * For each layer, the layer bit is set in @layer_masks for a given access
- * right, if and only if the current layer handles this access right and the
- * access right is requested.
- *
- * Returns: An access mask where each access right bit is set if it is
- * handled in any of the active layers in @domain.
- */
-access_mask_t
-landlock_domain_init_layer_masks(const struct landlock_domain *const domain,
-		  const access_mask_t access_request,
-		  layer_mask_t (*const layer_masks)[],
-		  const enum landlock_key_type key_type)
-{
-	access_mask_t handled_accesses = 0;
-	size_t layer_level, num_access;
-	get_dom_access_mask_t *get_access_mask;
 
-	switch (key_type) {
-	case LANDLOCK_KEY_INODE:
-		get_access_mask = landlock_dom_get_fs_access_mask;
-		num_access = LANDLOCK_NUM_ACCESS_FS;
-		break;
-
-#if IS_ENABLED(CONFIG_INET)
-	case LANDLOCK_KEY_NET_PORT:
-		get_access_mask = landlock_dom_get_net_access_mask;
-		num_access = LANDLOCK_NUM_ACCESS_NET;
-		break;
-#endif /* IS_ENABLED(CONFIG_INET) */
-
-	default:
-		WARN_ON_ONCE(1);
-		return 0;
-	}
-
-	memset(layer_masks, 0,
-	       array_size(num_access, sizeof((*layer_masks)[0])));
-
-	/* An access request not handled by the domain is allowed. */
-	for (layer_level = 0; layer_level < domain->num_layers; layer_level++) {
-		const unsigned long access_req = access_request;
-		unsigned long access_bit;
-		const access_mask_t layer_access_mask =
-			get_access_mask(domain, layer_level);
-
-		for_each_set_bit(access_bit, &access_req, num_access) {
-			if (layer_access_mask & BIT_ULL(access_bit)) {
-				(*layer_masks)[access_bit] |=
-					BIT_ULL(layer_level);
-				handled_accesses |= BIT_ULL(access_bit);
-			}
-		}
-	}
-	return handled_accesses & access_request;
-}

@@ -84,7 +84,7 @@ static void test_hashtable_lookup(struct kunit *test)
 	
 	/* Initialize collision chains */
 	for (int i = 0; i < 8; i++) {
-		indices[i].next_collision = UINT32_MAX;
+		indices[i].next_collision = U32_MAX;
 	}
 	
 	/* Insert first entry at its hash position */
@@ -93,7 +93,7 @@ static void test_hashtable_lookup(struct kunit *test)
 	indices[hash1].key = key1;
 	indices[hash1].layer_start = 0;
 	indices[hash1].layer_end = 1;
-	indices[hash1].next_collision = UINT32_MAX;
+	indices[hash1].next_collision = U32_MAX;
 	
 	/* Insert second entry with collision - place in any empty slot and chain */
 	u32 hash2 = domain_hash_key(key2, 8);
@@ -101,7 +101,7 @@ static void test_hashtable_lookup(struct kunit *test)
 	indices[2].key = key2; /* Place in empty slot 2 */
 	indices[2].layer_start = 1;
 	indices[2].layer_end = 2;
-	indices[2].next_collision = UINT32_MAX;
+	indices[2].next_collision = U32_MAX;
 	indices[1].next_collision = 2; /* Chain from key1 to key2 */
 	
 	/* Insert third entry with collision - place in any empty slot and chain */
@@ -110,7 +110,7 @@ static void test_hashtable_lookup(struct kunit *test)
 	indices[3].key = key3; /* Place in empty slot 3 */
 	indices[3].layer_start = 2;
 	indices[3].layer_end = 3;
-	indices[3].next_collision = UINT32_MAX;
+	indices[3].next_collision = U32_MAX;
 	indices[2].next_collision = 3; /* Chain from key2 to key3 */
 	
 	/* Test lookups */
@@ -239,14 +239,14 @@ static void test_hashtable_collision_chaining(struct kunit *test)
 	
 	/* Verify that collision chain from position 7 includes both colliding keys */
 	/* Follow the chain from position 7 */
-	u32 current = 7;
+	u32 curr_index = 7;
 	bool chain_has_17 = false, chain_has_27 = false;
 	int chain_length = 0;
 	
-	while (current != UINT32_MAX && chain_length < 10 /* prevent infinite loop */) {
-		if (indices[current].key.data == 17) chain_has_17 = true;
-		if (indices[current].key.data == 27) chain_has_27 = true;
-		current = indices[current].next_collision;
+	while (curr_index != U32_MAX && chain_length < 10 /* prevent infinite loop */) {
+		if (indices[curr_index].key.data == 17) chain_has_17 = true;
+		if (indices[curr_index].key.data == 27) chain_has_27 = true;
+		curr_index = indices[curr_index].next_collision;
 		chain_length++;
 	}
 	
@@ -293,7 +293,7 @@ static void test_chaining_early_termination(struct kunit *test)
 	
 	/* Initialize collision chains */
 	for (int i = 0; i < 8; i++) {
-		indices[i].next_collision = UINT32_MAX;
+		indices[i].next_collision = U32_MAX;
 	}
 	
 	/* Set up collision chain starting from position 1 (all hash to 1) */
@@ -310,7 +310,7 @@ static void test_chaining_early_termination(struct kunit *test)
 	indices[3].key = key3;
 	indices[3].layer_start = 2;
 	indices[3].layer_end = 3;
-	indices[3].next_collision = UINT32_MAX; /* End of chain */
+	indices[3].next_collision = U32_MAX; /* End of chain */
 	
 	/* 
 	 * Add an unrelated entry at position 5 to show that we don't scan
@@ -320,7 +320,7 @@ static void test_chaining_early_termination(struct kunit *test)
 	indices[5].key = key5;
 	indices[5].layer_start = 3;
 	indices[5].layer_end = 4;
-	indices[5].next_collision = UINT32_MAX;
+	indices[5].next_collision = U32_MAX;
 	
 	/* 
 	 * Test missing key lookup (same hash as existing chain): should follow 
