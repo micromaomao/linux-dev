@@ -24,6 +24,31 @@
 #include "domain.h"
 #include "id.h"
 
+static void __maybe_unused build_check_domain(void)
+{
+	BUILD_BUG_ON(LANDLOCK_MAX_NUM_RULES >= U32_MAX - 1);
+	/* Non-inclusive end indices are involved, so needs to be U32_MAX - 1. */
+	BUILD_BUG_ON(LANDLOCK_MAX_NUM_RULES * LANDLOCK_MAX_NUM_LAYERS >=
+		     U32_MAX - 1);
+	BUILD_BUG_ON(LANDLOCK_MAX_NUM_LAYERS >= U16_MAX - 1);
+	/*
+	 * Make sure this function is changed when the type of the domain
+	 * struct fields are changed
+	 */
+	BUILD_BUG_ON(sizeof((struct landlock_domain *)0)->num_layers <
+		     sizeof(u16));
+	BUILD_BUG_ON(sizeof((struct landlock_domain *)0)->num_fs_indices <
+		     sizeof(u32));
+	BUILD_BUG_ON(sizeof((struct landlock_domain *)0)->num_net_indices <
+		     sizeof(u32));
+	BUILD_BUG_ON(sizeof((struct landlock_domain *)0)->num_fs_layers <
+		     sizeof(u32));
+	BUILD_BUG_ON(sizeof((struct landlock_domain *)0)->num_net_layers <
+		     sizeof(u32));
+	BUILD_BUG_ON(sizeof((struct landlock_domain_index *)0)->layer_index <
+		     sizeof(u32));
+}
+
 #ifdef CONFIG_AUDIT
 
 /**
