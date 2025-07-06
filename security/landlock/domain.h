@@ -22,6 +22,7 @@
 #include "access.h"
 #include "audit.h"
 #include "ruleset.h"
+#include "coalesced_hash.h"
 
 struct landlock_domain_index {
 	/**
@@ -145,6 +146,72 @@ struct landlock_domain {
 				  sizeof(struct landlock_layer)), \
 	       sizeof(uintptr_t)) /                               \
 	 sizeof(uintptr_t))
+
+/*
+ * We have to use an invalid layer_index to signal empty value as the key
+ * can be 0 for net rules.
+ */
+#define dom_index_is_empty(elem) ((elem)->layer_index == U32_MAX)
+
+DEFINE_COALESCED_HASH_TABLE(struct landlock_domain_index, dom_hash, key,
+			    next_collision,
+			    hash_long(elem->key.data, 32) % table_size,
+			    dom_index_is_empty(elem))
+
+struct landlock_found_rule {
+	const struct landlock_layer *layers_start;
+	const struct landlock_layer *layers_end;
+};
+
+/**
+ * landlock_domain_find - search for a key in a domain.  Don't use this
+ * function directly, but use one of the dom_find_index_*() macros
+ * instead.
+ *
+ * @indices_arr: The indices array to search in.
+ * @num_indices: The number of elements in @indices_arr.
+ * @layers_arr: The layers array.
+ * @num_layers: The number of elements in @layers_arr.
+ * @key: The key to search for.
+ */
+static inline struct landlock_found_rule
+landlock_domain_find(const struct landlock_domain_index *const indices_arr,
+		     const u32 num_indices,
+		     const struct landlock_layer *const layers_arr,
+		     const u32 num_layers, const union landlock_key key)
+{
+	struct landlock_domain_index key_elem = {
+		.key = key,
+	};
+	struct landlock_found_rule out_found_rule = {};
+	const struct landlock_domain_index *found;
+
+	found = dom_hash_find(indices_arr, num_indices, &key_elem);
+
+	if (found) {
+		if (WARN_ON_ONCE(found->layer_index >= num_layers))
+			return out_found_rule;
+		out_found_rule.layers_start = &layers_arr[found->layer_index];
+		out_found_rule.layers_end =
+			&layers_arr[(found + 1)->layer_index];
+	}
+
+	return out_found_rule;
+}
+
+#define dom_find_index_fs(dom, key)                                      \
+	landlock_domain_find(dom_fs_indices(dom), (dom)->num_fs_indices, \
+			     dom_fs_layers(dom), (dom)->num_fs_layers, key)
+
+#define dom_find_index_net(dom, key)                                       \
+	landlock_domain_find(dom_net_indices(dom), (dom)->num_net_indices, \
+			     dom_net_layers(dom), (dom)->num_net_layers, key)
+
+#define dom_find_success(found_rule) ((found_rule).layers_start != NULL)
+
+#define dom_rule_for_each_layer(found_rule, layer) \
+	for (layer = (found_rule).layers_start;    \
+	     layer < (found_rule).layers_end; layer++)
 
 enum landlock_log_status {
 	LANDLOCK_LOG_PENDING = 0,
