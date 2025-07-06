@@ -176,6 +176,7 @@ static int dom_calculate_merged_sizes(
 	const struct landlock_rule *walker_rule, *next_rule;
 	struct landlock_domain_index find_key;
 	const struct landlock_domain_index *found;
+	int dom_hash_bits = get_hash_bits(dom_num_indices);
 
 	build_check_domain();
 
@@ -185,7 +186,7 @@ static int dom_calculate_merged_sizes(
 		if (dom_ind_array) {
 			find_key.key = walker_rule->key;
 			found = dom_hash_find(dom_ind_array, dom_num_indices,
-					      &find_key);
+					      dom_hash_bits, &find_key);
 		}
 		/* A new index is only needed if this is a non-overlapping new rule */
 		if (!found) {
@@ -231,6 +232,7 @@ static int dom_populate_indices(
 	const struct landlock_rule *walker_rule, *next_rule;
 	const struct landlock_domain_index *found;
 	struct h_insert_scratch scratch;
+	int dom_hash_bits = get_hash_bits(dom_num_indices);
 	int ret;
 	size_t i;
 
@@ -241,7 +243,8 @@ static int dom_populate_indices(
 	}
 
 	ret = h_init_insert_scratch(&scratch, out_indices, out_size,
-				    sizeof(*out_indices));
+				    sizeof(*out_indices),
+				    get_hash_bits(out_size));
 	if (ret)
 		return ret;
 
@@ -265,7 +268,7 @@ static int dom_populate_indices(
 		found = NULL;
 		if (dom_ind_array)
 			found = dom_hash_find(dom_ind_array, dom_num_indices,
-					      &target);
+					      dom_hash_bits, &target);
 		if (!found) {
 			if (WARN_ON_ONCE(indices_written >= out_size)) {
 				ret = -E2BIG;
@@ -328,6 +331,7 @@ dom_populate_layers(const struct landlock_domain_index *const dom_ind_array,
 	const struct landlock_rule *found_in_child;
 	const struct landlock_layer *layer;
 	struct landlock_layer child_layer;
+	int dom_hash_bits = get_hash_bits(dom_num_indices);
 
 	for (size_t i = 0; i < child_indices_size; i++) {
 		merged_index = &child_indices[i];
@@ -337,8 +341,9 @@ dom_populate_layers(const struct landlock_domain_index *const dom_ind_array,
 		found_in_parent.layers_end = NULL;
 		if (dom_ind_array)
 			found_in_parent = landlock_domain_find(
-				dom_ind_array, dom_num_indices, dom_layer_array,
-				dom_num_layers, merged_index->key);
+				dom_ind_array, dom_num_indices, dom_hash_bits,
+				dom_layer_array, dom_num_layers,
+				merged_index->key);
 		dom_rule_for_each_layer(found_in_parent, layer)
 		{
 			if (WARN_ON_ONCE(layers_written >= out_size))
@@ -404,6 +409,9 @@ static int merge_domain(const struct landlock_domain *parent,
 		if (err)
 			return err;
 
+		child->fs_index_hash_bits =
+			get_hash_bits(child->num_fs_indices);
+
 #ifdef CONFIG_INET
 		err = dom_calculate_merged_sizes(
 			parent ? dom_net_indices(parent) : NULL,
@@ -413,9 +421,13 @@ static int merge_domain(const struct landlock_domain *parent,
 			&child->num_net_layers);
 		if (err)
 			return err;
+
+		child->net_index_hash_bits =
+			get_hash_bits(child->num_net_indices);
 #else
 		child->num_net_indices = 0;
 		child->num_net_layers = 0;
+		child->net_index_hash_bits = 0;
 #endif /* CONFIG_INET */
 	} else {
 		err = dom_populate_indices(
@@ -865,6 +877,42 @@ bool landlock_unmask_layers(const struct landlock_found_rule rule,
 }
 
 #ifdef CONFIG_SECURITY_LANDLOCK_KUNIT_TEST
+
+static void test_domain_hash_func(struct kunit *const test)
+{
+	u32 table_size, got_hash_bits, got_hash;
+	uintptr_t hash_input;
+	int i;
+	struct landlock_domain_index elem;
+
+	KUNIT_ASSERT_EQ(test, get_hash_bits(0), 0);
+
+	for (table_size = 1; table_size <= 65; table_size++) {
+		got_hash_bits = get_hash_bits(table_size);
+		KUNIT_ASSERT_GE_MSG(
+			test, 1 << got_hash_bits, table_size,
+			"get_hash_bits(%u) returned %d which is too small for table size %u",
+			table_size, got_hash_bits, table_size);
+		KUNIT_ASSERT_LE_MSG(
+			test, 1 << got_hash_bits, table_size * 2,
+			"get_hash_bits(%u) returned %d which is too large for table size %u",
+			table_size, got_hash_bits, table_size);
+
+		for (i = 0; i < 1000; i++) {
+			hash_input = get_random_long();
+			elem.key.data = hash_input;
+			got_hash = dom_index_hash_func(&elem, table_size,
+						       got_hash_bits);
+			KUNIT_ASSERT_LT_MSG(
+				test, got_hash, table_size,
+				"dom_index_hash_func(key=%lx, table_size=%u, hash_bits=%d) "
+				"returned %u which exceeded table size %u",
+				hash_input, table_size, got_hash_bits, got_hash,
+				table_size);
+		}
+	}
+}
+
 #ifdef CONFIG_AUDIT
 
 static void test_landlock_get_deny_masks(struct kunit *const test)
@@ -897,12 +945,14 @@ static void test_landlock_get_deny_masks(struct kunit *const test)
 #endif /* CONFIG_SECURITY_LANDLOCK_KUNIT_TEST */
 
 #ifdef CONFIG_SECURITY_LANDLOCK_KUNIT_TEST
-#ifdef CONFIG_AUDIT
 
 static struct kunit_case test_cases[] = {
 	/* clang-format off */
+#ifdef CONFIG_AUDIT
 	KUNIT_CASE(test_get_layer_deny_mask),
 	KUNIT_CASE(test_landlock_get_deny_masks),
+#endif /* CONFIG_AUDIT */
+	KUNIT_CASE(test_domain_hash_func),
 	{}
 	/* clang-format on */
 };
@@ -914,5 +964,4 @@ static struct kunit_suite test_suite = {
 
 kunit_test_suite(test_suite);
 
-#endif /* CONFIG_AUDIT */
 #endif /* CONFIG_SECURITY_LANDLOCK_KUNIT_TEST */

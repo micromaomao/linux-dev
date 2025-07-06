@@ -22,15 +22,16 @@
 
 typedef u32 h_index_t;
 
-typedef h_index_t (*hash_element_t)(const void *elem, h_index_t table_size);
+typedef h_index_t (*hash_element_t)(const void *elem, h_index_t table_size,
+				    int hash_bits);
 typedef h_index_t (*get_next_collision_t)(const void *elem);
 typedef void (*set_next_collision_t)(void *elem, h_index_t next_collision);
 typedef bool (*compare_element_t)(const void *key_elem, const void *found_elem);
 typedef bool (*element_is_empty_t)(const void *elem);
 
 static inline void *h_find(const void *table, h_index_t table_size,
-			   size_t elem_size, const void *elem_to_find,
-			   hash_element_t hash_elem,
+			   int hash_bits, size_t elem_size,
+			   const void *elem_to_find, hash_element_t hash_elem,
 			   get_next_collision_t get_next_collision,
 			   compare_element_t compare_elem,
 			   element_is_empty_t element_is_empty)
@@ -41,7 +42,7 @@ static inline void *h_find(const void *table, h_index_t table_size,
 	if (unlikely(table_size == 0))
 		return NULL;
 
-	curr_index = hash_elem(elem_to_find, table_size);
+	curr_index = hash_elem(elem_to_find, table_size, hash_bits);
 	if (WARN_ON_ONCE(curr_index >= table_size))
 		return NULL;
 	curr_elem = table + curr_index * elem_size;
@@ -96,13 +97,14 @@ struct h_insert_scratch {
 	 * around all the time.
 	 */
 	h_index_t table_size;
+	int hash_bits;
 	void *table;
 	size_t elem_size;
 };
 
 static inline int h_init_insert_scratch(struct h_insert_scratch *scratch,
 					void *table, h_index_t table_size,
-					size_t elem_size)
+					size_t elem_size, int hash_bits)
 {
 	h_index_t i;
 
@@ -125,6 +127,7 @@ static inline int h_init_insert_scratch(struct h_insert_scratch *scratch,
 		scratch->prev_index[i] = i;
 
 	scratch->table_size = table_size;
+	scratch->hash_bits = hash_bits;
 	scratch->next_free_index = table_size - 1;
 	scratch->table = table;
 	scratch->elem_size = elem_size;
@@ -280,7 +283,7 @@ static inline void h_insert(struct h_insert_scratch *scratch, const void *elem,
 	 *    point to the existing element.
 	 */
 
-	target_idx = hash_elem(elem, scratch->table_size);
+	target_idx = hash_elem(elem, scratch->table_size, scratch->hash_bits);
 	if (WARN_ON_ONCE(target_idx >= scratch->table_size))
 		return;
 	target_elem = scratch->table + target_idx * scratch->elem_size;
@@ -293,7 +296,8 @@ static inline void h_insert(struct h_insert_scratch *scratch, const void *elem,
 		memcpy(target_elem, elem, scratch->elem_size);
 		set_next_collision(target_elem, target_idx);
 	} else {
-		target_hash = hash_elem(target_elem, scratch->table_size);
+		target_hash = hash_elem(target_elem, scratch->table_size,
+					scratch->hash_bits);
 		moved_to = __h_relocate_entry(scratch, target_idx,
 					      get_next_collision,
 					      set_next_collision,
@@ -322,67 +326,67 @@ static inline void h_insert(struct h_insert_scratch *scratch, const void *elem,
  * @next_collision_member: The name of a member in @elem_type that is used
  * to store the index of the next collision in a collision chain.
  * @hash_expr: An expression that computes the hash of an element, given
- * const @elem_type *elem and h_index_t table_size.  If this function is
- * evaluated, table_size is always positive.
+ * const @elem_type *elem, h_index_t table_size and int hash_bits.  If
+ * this function is evaluated, table_size is always positive.
  * @is_empty_expr: An expression that evaluates to true if the element is
  * empty (i.e. not used).  Empty elements are not returned by find.  If
  * the zero value of @elem_type is not "empty", the caller must set all
  * the slots to empty before using the table.
  */
-#define DEFINE_COALESCED_HASH_TABLE(elem_type, table_func_prefix, key_member, \
-				    next_collision_member, hash_expr,         \
-				    is_empty_expr)                            \
-	static inline h_index_t table_func_prefix##_hash_elem(                \
-		const void *_elem, h_index_t table_size)                      \
-	{                                                                     \
-		const elem_type *elem = _elem;                                \
-		return hash_expr;                                             \
-	}                                                                     \
-	static inline h_index_t table_func_prefix##_get_next_collision(       \
-		const void *elem)                                             \
-	{                                                                     \
-		return ((const elem_type *)elem)->next_collision_member;      \
-	}                                                                     \
-	static inline void table_func_prefix##_set_next_collision(            \
-		void *elem, h_index_t next_collision)                         \
-	{                                                                     \
-		((elem_type *)elem)->next_collision_member = next_collision;  \
-	}                                                                     \
-	static inline bool table_func_prefix##_compare_elem(                  \
-		const void *key_elem, const void *found_elem)                 \
-	{                                                                     \
-		const elem_type *key = key_elem;                              \
-		const elem_type *found = found_elem;                          \
-		return key->key_member.data == found->key_member.data;        \
-	}                                                                     \
-	static inline bool table_func_prefix##_element_is_empty(              \
-		const void *_elem)                                            \
-	{                                                                     \
-		const elem_type *elem = _elem;                                \
-		return is_empty_expr;                                         \
-	}                                                                     \
-	static inline const elem_type *table_func_prefix##_find(              \
-		const elem_type *table, h_index_t table_size,                 \
-		const elem_type *elem_to_find)                                \
-	{                                                                     \
-		return h_find(table, table_size, sizeof(elem_type),           \
-			      elem_to_find, table_func_prefix##_hash_elem,    \
-			      table_func_prefix##_get_next_collision,         \
-			      table_func_prefix##_compare_elem,               \
-			      table_func_prefix##_element_is_empty);          \
-	}                                                                     \
-	static inline void table_func_prefix##_initialize(                    \
-		elem_type *table, h_index_t table_size)                       \
-	{                                                                     \
-		h_initialize(table, table_size, sizeof(elem_type),            \
-			     table_func_prefix##_set_next_collision,          \
-			     table_func_prefix##_element_is_empty);           \
-	}                                                                     \
-	static inline void table_func_prefix##_insert(                        \
-		struct h_insert_scratch *scratch, const elem_type *elem)      \
-	{                                                                     \
-		h_insert(scratch, elem, table_func_prefix##_hash_elem,        \
-			 table_func_prefix##_get_next_collision,              \
-			 table_func_prefix##_set_next_collision,              \
-			 table_func_prefix##_element_is_empty);               \
+#define DEFINE_COALESCED_HASH_TABLE(elem_type, table_func_prefix, key_member,  \
+				    next_collision_member, hash_expr,          \
+				    is_empty_expr)                             \
+	static inline h_index_t table_func_prefix##_hash_elem(                 \
+		const void *_elem, h_index_t table_size, int hash_bits)        \
+	{                                                                      \
+		const elem_type *elem = _elem;                                 \
+		return hash_expr;                                              \
+	}                                                                      \
+	static inline h_index_t table_func_prefix##_get_next_collision(        \
+		const void *elem)                                              \
+	{                                                                      \
+		return ((const elem_type *)elem)->next_collision_member;       \
+	}                                                                      \
+	static inline void table_func_prefix##_set_next_collision(             \
+		void *elem, h_index_t next_collision)                          \
+	{                                                                      \
+		((elem_type *)elem)->next_collision_member = next_collision;   \
+	}                                                                      \
+	static inline bool table_func_prefix##_compare_elem(                   \
+		const void *key_elem, const void *found_elem)                  \
+	{                                                                      \
+		const elem_type *key = key_elem;                               \
+		const elem_type *found = found_elem;                           \
+		return key->key_member.data == found->key_member.data;         \
+	}                                                                      \
+	static inline bool table_func_prefix##_element_is_empty(               \
+		const void *_elem)                                             \
+	{                                                                      \
+		const elem_type *elem = _elem;                                 \
+		return is_empty_expr;                                          \
+	}                                                                      \
+	static inline const elem_type *table_func_prefix##_find(               \
+		const elem_type *table, h_index_t table_size, int hash_bits,   \
+		const elem_type *elem_to_find)                                 \
+	{                                                                      \
+		return h_find(table, table_size, hash_bits, sizeof(elem_type), \
+			      elem_to_find, table_func_prefix##_hash_elem,     \
+			      table_func_prefix##_get_next_collision,          \
+			      table_func_prefix##_compare_elem,                \
+			      table_func_prefix##_element_is_empty);           \
+	}                                                                      \
+	static inline void table_func_prefix##_initialize(                     \
+		elem_type *table, h_index_t table_size)                        \
+	{                                                                      \
+		h_initialize(table, table_size, sizeof(elem_type),             \
+			     table_func_prefix##_set_next_collision,           \
+			     table_func_prefix##_element_is_empty);            \
+	}                                                                      \
+	static inline void table_func_prefix##_insert(                         \
+		struct h_insert_scratch *scratch, const elem_type *elem)       \
+	{                                                                      \
+		h_insert(scratch, elem, table_func_prefix##_hash_elem,         \
+			 table_func_prefix##_get_next_collision,               \
+			 table_func_prefix##_set_next_collision,               \
+			 table_func_prefix##_element_is_empty);                \
 	}

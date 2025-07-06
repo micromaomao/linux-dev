@@ -71,7 +71,17 @@ struct landlock_domain {
 	 * @num_layers: Number of layers in this domain.  This enables to
 	 * check that all the layers allow an access request.
 	 */
-	u32 num_layers;
+	u16 num_layers;
+	/**
+	 * @fs_index_hash_bits: Precomputed hash bits for the fs table to
+	 * avoid recomputing this power of 2 every hash.
+	 */
+	u8 fs_index_hash_bits;
+	/**
+	 * @net_index_hash_bits: Precomputed hash bits for the net table to
+	 * avoid recomputing this power of 2 every hash.
+	 */
+	u8 net_index_hash_bits;
 	/**
 	 * @num_fs_indices: Number of non-overlapping (i.e. not for the same
 	 * object) inode rules.  Does not include the terminating index.
@@ -175,9 +185,40 @@ struct landlock_domain {
  */
 #define dom_index_is_empty(elem) ((elem)->layer_index == U32_MAX)
 
+/**
+ * dom_index_hash_func - Hash function for the domain index tables.
+ */
+static inline h_index_t
+dom_index_hash_func(const struct landlock_domain_index *elem,
+		    const h_index_t table_size, const int hash_bits)
+{
+	if (hash_bits <= 0)
+		/* hash_long requires hash_bits > 0 */
+		return 0;
+	h_index_t h = hash_long(elem->key.data, hash_bits);
+	/* hash_bits is at most 2x table_size */
+	if (h >= table_size)
+		h -= table_size;
+	return h;
+}
+
+static inline int get_hash_bits(const u32 table_size)
+{
+	if (table_size <= 1)
+		return 0;
+	/**
+	 * Example:
+	 * For table_size = 2, we need 1 bits.  ilog2(2-1)+1 = 0+1 = 1.
+	 * For table_size = 3, we need 2 bits.  ilog2(3-1)+1 = 1+1 = 2.
+	 * For table_size = 4, we need 2 bits.  ilog2(4-1)+1 = 1+1 = 2.
+	 * For table_size = 5, we need 3 bits.  ilog2(5-1)+1 = 2+1 = 3.
+	 */
+	return ilog2(table_size - 1) + 1;
+}
+
 DEFINE_COALESCED_HASH_TABLE(struct landlock_domain_index, dom_hash, key,
 			    next_collision,
-			    hash_long(elem->key.data, 32) % table_size,
+			    dom_index_hash_func(elem, table_size, hash_bits),
 			    dom_index_is_empty(elem))
 
 struct landlock_domain *
@@ -207,13 +248,14 @@ struct landlock_found_rule {
  *
  * @indices_arr: The indices array to search in.
  * @num_indices: The number of elements in @indices_arr.
+ * @hash_bits: The corresponding hash_bits for the indices array.
  * @layers_arr: The layers array.
  * @num_layers: The number of elements in @layers_arr.
  * @key: The key to search for.
  */
 static inline struct landlock_found_rule
 landlock_domain_find(const struct landlock_domain_index *const indices_arr,
-		     const u32 num_indices,
+		     const u32 num_indices, const int hash_bits,
 		     const struct landlock_layer *const layers_arr,
 		     const u32 num_layers, const union landlock_key key)
 {
@@ -223,7 +265,7 @@ landlock_domain_find(const struct landlock_domain_index *const indices_arr,
 	struct landlock_found_rule out_found_rule = {};
 	const struct landlock_domain_index *found;
 
-	found = dom_hash_find(indices_arr, num_indices, &key_elem);
+	found = dom_hash_find(indices_arr, num_indices, hash_bits, &key_elem);
 
 	if (found) {
 		if (WARN_ON_ONCE(found->layer_index >= num_layers))
@@ -236,13 +278,15 @@ landlock_domain_find(const struct landlock_domain_index *const indices_arr,
 	return out_found_rule;
 }
 
-#define dom_find_index_fs(dom, key)                                      \
-	landlock_domain_find(dom_fs_indices(dom), (dom)->num_fs_indices, \
-			     dom_fs_layers(dom), (dom)->num_fs_layers, key)
+#define dom_find_index_fs(dom, key)                                         \
+	landlock_domain_find(dom_fs_indices(dom), (dom)->num_fs_indices,    \
+			     (dom)->fs_index_hash_bits, dom_fs_layers(dom), \
+			     (dom)->num_fs_layers, key)
 
-#define dom_find_index_net(dom, key)                                       \
-	landlock_domain_find(dom_net_indices(dom), (dom)->num_net_indices, \
-			     dom_net_layers(dom), (dom)->num_net_layers, key)
+#define dom_find_index_net(dom, key)                                          \
+	landlock_domain_find(dom_net_indices(dom), (dom)->num_net_indices,    \
+			     (dom)->net_index_hash_bits, dom_net_layers(dom), \
+			     (dom)->num_net_layers, key)
 
 #define dom_find_success(found_rule) ((found_rule).layers_start != NULL)
 
