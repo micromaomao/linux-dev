@@ -190,10 +190,11 @@ static bool domain_is_scoped(const struct landlock_domain *const client,
 	client_layer = client->num_layers - 1;
 	client_walker = client->hierarchy;
 	/*
-	 * client_layer must be a signed integer with greater capacity
-	 * than client->num_layers to ensure the following loop stops.
+	 * The following 2 loops involving client_layer and server_layer is
+	 * only safe if those integers are signed.
 	 */
-	BUILD_BUG_ON(sizeof(client_layer) > sizeof(client->num_layers));
+	BUILD_BUG_ON((typeof(client_layer))(-1) >= 0);
+	BUILD_BUG_ON((typeof(server_layer))(-1) >= 0);
 
 	server_layer = server ? (server->num_layers - 1) : -1;
 	server_walker = server ? server->hierarchy : NULL;
