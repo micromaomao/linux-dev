@@ -36,11 +36,15 @@ struct landlock_domain_index {
 	u32 next_collision;
 	/**
 	 * @layer_index: The index of the first landlock_layer corresponding
-	 * to this key in the relevant subarray.  A rule may have multiple
-	 * layers.  The end of the layers region for this rule is the index of
-	 * the next struct landlock_domain_index in the array.
+	 * to this key in the relevant subarray.  A rule may have multiple (at
+	 * least one) layers.
 	 */
-	u32 layer_index;
+	u32 layer_start;
+	/**
+	 * @layer_end: The non-inclusive index to the end of the layers for
+	 * this rule.
+	 */
+	u32 layer_end;
 };
 
 struct landlock_domain_work_free {
@@ -84,12 +88,12 @@ struct landlock_domain {
 	u8 net_index_hash_bits;
 	/**
 	 * @num_fs_indices: Number of non-overlapping (i.e. not for the same
-	 * object) inode rules.  Does not include the terminating index.
+	 * object) inode rules.
 	 */
 	u32 num_fs_indices;
 	/**
 	 * @num_net_indices: Number of non-overlapping (i.e. not for the same
-	 * port) network rules.  Does not include the terminating index.
+	 * port) network rules.
 	 */
 	u32 num_net_indices;
 	/**
@@ -108,24 +112,16 @@ struct landlock_domain {
 	u32 len_rules;
 	/**
 	 * @rules: The rest of this struct consists of 5 dynamically-sized,
-	 * arrays as well as 2 terminating indices, placed one after another,
-	 * the contents of which are to be accessed with dom_ helper macros
-	 * defined in this header.  They are:
+	 * arrays placed one after another, the contents of which are to be
+	 * accessed with dom_ helper macros defined in this header.  They are:
 	 *
 	 *     struct access_masks access_masks[num_layers];
 	 *     (possible alignment padding here)
 	 *     struct landlock_domain_index fs_indices[num_fs_indices];
-	 *     struct landlock_domain_index terminating_fs_index;
 	 *     struct landlock_domain_index net_indices[num_net_indices];
-	 *     struct landlock_domain_index terminating_net_index;
 	 *     struct landlock_layer fs_layers[num_fs_layers];
 	 *     struct landlock_layer net_layers[num_net_layers];
 	 *     (possible alignment padding here)
-	 *
-	 * The purpose of the terminating indices is to allow getting the
-	 * non-inclusive end index of the layers for a rule without branching.
-	 * They do not represent any rules themselves, and the only valid
-	 * field for those two indices is layer_index.
 	 */
 	uintptr_t rules[] __counted_by(len_rules);
 };
@@ -140,24 +136,18 @@ struct landlock_domain {
 	((struct landlock_domain_index *)((char *)(dom)->rules + \
 					  _dom_fs_indices_offset(dom)))
 
-#define dom_fs_terminating_index(dom) \
-	(&dom_fs_indices(dom)[(dom)->num_fs_indices])
-
-#define _dom_net_indices_offset(dom)                       \
-	(_dom_fs_indices_offset(dom) +                     \
-	 array_size(((size_t)(dom)->num_fs_indices) + 1ul, \
+#define _dom_net_indices_offset(dom)                 \
+	(_dom_fs_indices_offset(dom) +               \
+	 array_size((size_t)((dom)->num_fs_indices), \
 		    sizeof(struct landlock_domain_index)))
 
 #define dom_net_indices(dom)                                     \
 	((struct landlock_domain_index *)((char *)(dom)->rules + \
 					  _dom_net_indices_offset(dom)))
 
-#define dom_net_terminating_index(dom) \
-	(&dom_net_indices(dom)[(dom)->num_net_indices])
-
-#define _dom_fs_layers_offset(dom)                          \
-	(_dom_net_indices_offset(dom) +                     \
-	 array_size((size_t)((dom)->num_net_indices) + 1ul, \
+#define _dom_fs_layers_offset(dom)                    \
+	(_dom_net_indices_offset(dom) +               \
+	 array_size((size_t)((dom)->num_net_indices), \
 		    sizeof(struct landlock_domain_index)))
 
 #define dom_fs_layers(dom)                                \
@@ -180,10 +170,10 @@ struct landlock_domain {
 	 sizeof(uintptr_t))
 
 /*
- * We have to use an invalid layer_index to signal empty value as the key
- * can be 0 for net rules.
+ * We have to use layer_end for this as the key can be 0 for net rules.  A
+ * valid index must have at least 1 layers, so layer_end will not be 0.
  */
-#define dom_index_is_empty(elem) ((elem)->layer_index == U32_MAX)
+#define dom_index_is_empty(elem) ((elem)->layer_end == 0)
 
 /**
  * dom_index_hash_func - Hash function for the domain index tables.
@@ -195,25 +185,14 @@ dom_index_hash_func(const struct landlock_domain_index *elem,
 	if (hash_bits <= 0)
 		/* hash_long requires hash_bits > 0 */
 		return 0;
-	h_index_t h = hash_long(elem->key.data, hash_bits);
-	/* hash_bits is at most 2x table_size */
-	if (h >= table_size)
-		h -= table_size;
-	return h;
+	return hash_long(elem->key.data, hash_bits);
 }
 
 static inline int get_hash_bits(const u32 table_size)
 {
 	if (table_size <= 1)
 		return 0;
-	/**
-	 * Example:
-	 * For table_size = 2, we need 1 bits.  ilog2(2-1)+1 = 0+1 = 1.
-	 * For table_size = 3, we need 2 bits.  ilog2(3-1)+1 = 1+1 = 2.
-	 * For table_size = 4, we need 2 bits.  ilog2(4-1)+1 = 1+1 = 2.
-	 * For table_size = 5, we need 3 bits.  ilog2(5-1)+1 = 2+1 = 3.
-	 */
-	return ilog2(table_size - 1) + 1;
+	return ilog2(roundup_pow_of_two(table_size));
 }
 
 DEFINE_COALESCED_HASH_TABLE(struct landlock_domain_index, dom_hash, key,
@@ -237,7 +216,9 @@ DEFINE_FREE(landlock_put_domain, struct landlock_domain *,
 	    if (!IS_ERR_OR_NULL(_T)) landlock_put_domain(_T))
 
 struct landlock_found_rule {
+	/* start of layer range for the found rule */
 	const struct landlock_layer *layers_start;
+	/* non-inclusive end of layer range */
 	const struct landlock_layer *layers_end;
 };
 
@@ -268,11 +249,10 @@ landlock_domain_find(const struct landlock_domain_index *const indices_arr,
 	found = dom_hash_find(indices_arr, num_indices, hash_bits, &key_elem);
 
 	if (found) {
-		if (WARN_ON_ONCE(found->layer_index >= num_layers))
+		if (WARN_ON_ONCE(found->layer_end > num_layers))
 			return out_found_rule;
-		out_found_rule.layers_start = &layers_arr[found->layer_index];
-		out_found_rule.layers_end =
-			&layers_arr[(found + 1)->layer_index];
+		out_found_rule.layers_start = &layers_arr[found->layer_start];
+		out_found_rule.layers_end = &layers_arr[found->layer_end];
 	}
 
 	return out_found_rule;

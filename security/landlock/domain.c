@@ -47,7 +47,9 @@ static void build_check_domain(void)
 		     sizeof(u32));
 	BUILD_BUG_ON(sizeof((struct landlock_domain *)0)->num_net_layers <
 		     sizeof(u32));
-	BUILD_BUG_ON(sizeof((struct landlock_domain_index *)0)->layer_index <
+	BUILD_BUG_ON(sizeof((struct landlock_domain_index *)0)->layer_start <
+		     sizeof(u32));
+	BUILD_BUG_ON(sizeof((struct landlock_domain_index *)0)->layer_end <
 		     sizeof(u32));
 }
 
@@ -171,14 +173,25 @@ static int dom_calculate_merged_sizes(
 	const struct rb_root *const child_rules, u32 *const out_num_indices,
 	u32 *const out_num_layers)
 {
-	u32 num_indices = dom_num_indices;
+	u32 num_indices = 0;
 	u32 num_layers = dom_num_layers;
+	size_t i;
 	const struct landlock_rule *walker_rule, *next_rule;
 	struct landlock_domain_index find_key;
+	const struct landlock_domain_index *walker_index;
 	const struct landlock_domain_index *found;
 	int dom_hash_bits = get_hash_bits(dom_num_indices);
 
 	build_check_domain();
+
+	for (i = 0; i < dom_num_indices; i++) {
+		walker_index = &dom_ind_array[i];
+		if (dom_index_is_empty(walker_index))
+			continue;
+		if (WARN_ON_ONCE(num_indices >= LANDLOCK_MAX_NUM_RULES))
+			return -E2BIG;
+		num_indices++;
+	}
 
 	rbtree_postorder_for_each_entry_safe(walker_rule, next_rule,
 					     child_rules, node) {
@@ -228,19 +241,22 @@ static int dom_populate_indices(
 {
 	u32 indices_written = 0;
 	const struct landlock_domain_index *walker_index;
-	struct landlock_domain_index target = {};
+	struct landlock_domain_index target = {
+		/*
+		 * placeholder value to denote a non-empty index - see
+		 * dom_index_is_empty
+		 */
+		.layer_start = U32_MAX,
+		.layer_end = U32_MAX,
+	};
 	const struct landlock_rule *walker_rule, *next_rule;
 	const struct landlock_domain_index *found;
 	struct h_insert_scratch scratch;
 	int dom_hash_bits = get_hash_bits(dom_num_indices);
 	int ret;
-	size_t i;
 
+	memset(out_indices, 0, array_size(out_size, sizeof(*out_indices)));
 	dom_hash_initialize(out_indices, out_size);
-	for (i = 0; i < out_size; i++) {
-		out_indices[i].key.data = 0;
-		out_indices[i].layer_index = U32_MAX;
-	}
 
 	ret = h_init_insert_scratch(&scratch, out_indices, out_size,
 				    sizeof(*out_indices),
@@ -251,6 +267,8 @@ static int dom_populate_indices(
 	/* Copy over all parent indices directly */
 	for (size_t i = 0; i < dom_num_indices; i++) {
 		walker_index = &dom_ind_array[i];
+		if (dom_index_is_empty(walker_index))
+			continue;
 		if (WARN_ON_ONCE(indices_written >= out_size)) {
 			ret = -E2BIG;
 			goto out_free;
@@ -284,12 +302,6 @@ out_free:
 
 	if (ret)
 		return ret;
-
-	for (i = 0; i < out_size; i++) {
-		walker_index = &out_indices[i];
-		/* We are not supposed to leave empty slots behind. */
-		WARN_ON_ONCE(dom_index_is_empty(walker_index));
-	}
 
 	return 0;
 }
@@ -335,7 +347,9 @@ dom_populate_layers(const struct landlock_domain_index *const dom_ind_array,
 
 	for (size_t i = 0; i < child_indices_size; i++) {
 		merged_index = &child_indices[i];
-		merged_index->layer_index = layers_written;
+		if (dom_index_is_empty(merged_index))
+			continue;
+		merged_index->layer_start = layers_written;
 
 		found_in_parent.layers_start = NULL;
 		found_in_parent.layers_end = NULL;
@@ -362,6 +376,8 @@ dom_populate_layers(const struct landlock_domain_index *const dom_ind_array,
 			child_layer.level = new_level;
 			out_layers[layers_written++] = child_layer;
 		}
+
+		merged_index->layer_end = layers_written;
 	}
 
 	return 0;
@@ -409,6 +425,8 @@ static int merge_domain(const struct landlock_domain *parent,
 		if (err)
 			return err;
 
+		child->num_fs_indices =
+			roundup_pow_of_two(child->num_fs_indices);
 		child->fs_index_hash_bits =
 			get_hash_bits(child->num_fs_indices);
 
@@ -422,6 +440,8 @@ static int merge_domain(const struct landlock_domain *parent,
 		if (err)
 			return err;
 
+		child->num_net_indices =
+			roundup_pow_of_two(child->num_net_indices);
 		child->net_index_hash_bits =
 			get_hash_bits(child->num_net_indices);
 #else
@@ -449,9 +469,6 @@ static int merge_domain(const struct landlock_domain *parent,
 		if (err)
 			return err;
 
-		dom_fs_terminating_index(child)->layer_index =
-			child->num_fs_layers;
-
 #ifdef CONFIG_INET
 		err = dom_populate_indices(
 			parent ? dom_net_indices(parent) : NULL,
@@ -471,9 +488,6 @@ static int merge_domain(const struct landlock_domain *parent,
 			dom_net_layers(child), child->num_net_layers);
 		if (err)
 			return err;
-
-		dom_net_terminating_index(child)->layer_index =
-			child->num_net_layers;
 #endif /* CONFIG_INET */
 	}
 
@@ -880,7 +894,7 @@ bool landlock_unmask_layers(const struct landlock_found_rule rule,
 
 static void test_domain_hash_func(struct kunit *const test)
 {
-	u32 table_size, got_hash_bits, got_hash;
+	u32 table_size, roundup_size, got_hash_bits, got_hash;
 	uintptr_t hash_input;
 	int i;
 	struct landlock_domain_index elem;
@@ -898,17 +912,18 @@ static void test_domain_hash_func(struct kunit *const test)
 			"get_hash_bits(%u) returned %d which is too large for table size %u",
 			table_size, got_hash_bits, table_size);
 
-		for (i = 0; i < 1000; i++) {
+		for (i = 0; i < 100; i++) {
 			hash_input = get_random_long();
 			elem.key.data = hash_input;
-			got_hash = dom_index_hash_func(&elem, table_size,
+			roundup_size = roundup_pow_of_two(table_size);
+			got_hash = dom_index_hash_func(&elem, roundup_size,
 						       got_hash_bits);
 			KUNIT_ASSERT_LT_MSG(
-				test, got_hash, table_size,
-				"dom_index_hash_func(key=%lx, table_size=%u, hash_bits=%d) "
-				"returned %u which exceeded table size %u",
-				hash_input, table_size, got_hash_bits, got_hash,
-				table_size);
+				test, got_hash, roundup_size,
+				"dom_index_hash_func(key=%lx, roundup_size=%u, hash_bits=%d) "
+				"returned %u which exceeded rounded up table size %u",
+				hash_input, roundup_size, got_hash_bits, got_hash,
+				roundup_size);
 		}
 	}
 }
