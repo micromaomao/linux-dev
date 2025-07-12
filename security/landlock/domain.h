@@ -18,6 +18,7 @@
 #include <linux/refcount.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
+#include <trace/events/landlock.h>
 
 #include "access.h"
 #include "ruleset.h"
@@ -198,7 +199,8 @@ static inline int get_hash_bits(const u32 table_size)
 DEFINE_COALESCED_HASH_TABLE(struct landlock_domain_index, dom_hash, key,
 			    next_collision,
 			    dom_index_hash_func(elem, table_size, hash_bits),
-			    dom_index_is_empty(elem))
+			    dom_index_is_empty(elem),
+			    trace_landlock_domain_hash_find)
 
 struct landlock_domain *
 landlock_alloc_domain(const struct landlock_domain *sizes);
