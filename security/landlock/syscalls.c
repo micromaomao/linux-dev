@@ -483,6 +483,7 @@ SYSCALL_DEFINE2(landlock_restrict_self, const int, ruleset_fd, const __u32,
 		*ruleset __free(landlock_put_ruleset) = NULL;
 	struct cred *new_cred;
 	struct landlock_cred_security *new_llcred;
+	struct landlock_domain *new_domain2;
 	bool __maybe_unused log_same_exec, log_new_exec, log_subdomains,
 		prev_log_subdomains;
 
@@ -551,6 +552,12 @@ SYSCALL_DEFINE2(landlock_restrict_self, const int, ruleset_fd, const __u32,
 		abort_creds(new_cred);
 		return PTR_ERR(new_dom);
 	}
+	new_domain2 = landlock_merge_ruleset2(new_llcred->domain2, ruleset);
+	if (IS_ERR(new_domain2)) {
+		landlock_put_ruleset(new_dom);
+		abort_creds(new_cred);
+		return PTR_ERR(new_domain2);
+	}
 
 #ifdef CONFIG_AUDIT
 	new_dom->hierarchy->log_same_exec = log_same_exec;
@@ -559,9 +566,37 @@ SYSCALL_DEFINE2(landlock_restrict_self, const int, ruleset_fd, const __u32,
 		new_dom->hierarchy->log_status = LANDLOCK_LOG_DISABLED;
 #endif /* CONFIG_AUDIT */
 
+#ifdef DEBUG
+	pr_debug("%s[%d] restricting self with landlock\n", current->comm,
+		 current->pid);
+	struct rb_node *node;
+	pr_debug("inode tree:\n");
+	for (node = rb_first(&new_dom->root_inode); node;
+	     node = rb_next(node)) {
+		const struct landlock_rule *rule =
+			rb_entry(node, struct landlock_rule, node);
+		spinlock_t *lock = &rule->key.object->lock;
+		rcu_read_lock();
+		spin_lock(lock);
+		struct inode *inode = rule->key.object->underobj;
+		if (inode)
+			pr_debug("  rule: ino %lu (%p)\n", inode->i_ino, inode);
+		else
+			pr_debug("  rule: inode released\n");
+		for (size_t i = 0; i < rule->num_layers; i++) {
+			pr_debug("    layer %u: access %x\n",
+				 rule->layers[i].level, rule->layers[i].access);
+		}
+		spin_unlock(lock);
+		rcu_read_unlock();
+	}
+#endif /* DEBUG */
+
 	/* Replaces the old (prepared) domain. */
 	landlock_put_ruleset(new_llcred->domain);
 	new_llcred->domain = new_dom;
+	landlock_put_domain(new_llcred->domain2);
+	new_llcred->domain2 = new_domain2;
 
 #ifdef CONFIG_AUDIT
 	new_llcred->domain_exec |= BIT(new_dom->num_layers - 1);

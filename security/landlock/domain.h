@@ -5,6 +5,7 @@
  * Copyright © 2016-2020 Mickaël Salaün <mic@digikod.net>
  * Copyright © 2018-2020 ANSSI
  * Copyright © 2024-2025 Microsoft Corporation
+ * Copyright © 2025      Tingmao Wang <m@maowtm.org>
  */
 
 #ifndef _SECURITY_LANDLOCK_DOMAIN_H
@@ -17,9 +18,53 @@
 #include <linux/refcount.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
+#include <linux/workqueue.h>
 
 #include "access.h"
 #include "audit.h"
+#include "hash.h"
+
+struct landlock_domain {
+	struct landlock_hashtable inode_table;
+
+	union {
+		/**
+		 * @work_free: Enables to free a ruleset within a lockless
+		 * section.  This is only used by
+		 * landlock_put_domain_deferred() when @usage reaches zero.
+		 */
+		struct work_struct work_free;
+
+		struct {
+			/**
+			* @usage: Reference count for this struct.
+			*/
+			refcount_t usage;
+
+			/**
+			* @num_layers: Number of layers in this domain.
+			*/
+			u16 num_layers;
+		};
+	};
+};
+
+struct landlock_domain *landlock_alloc_domain(size_t num_inode_entries,
+					      u16 num_layers);
+
+static inline void landlock_get_domain(struct landlock_domain *const domain)
+{
+	if (domain)
+		refcount_inc(&domain->usage);
+}
+
+void landlock_put_domain(struct landlock_domain *const domain);
+
+void landlock_put_domain_deferred(struct landlock_domain *const domain);
+
+struct landlock_domain *
+landlock_merge_ruleset2(const struct landlock_domain *curr_domain,
+			const struct landlock_ruleset *new_ruleset);
 
 enum landlock_log_status {
 	LANDLOCK_LOG_PENDING = 0,

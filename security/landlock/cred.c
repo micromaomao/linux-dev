@@ -13,6 +13,7 @@
 
 #include "common.h"
 #include "cred.h"
+#include "domain.h"
 #include "ruleset.h"
 #include "setup.h"
 
@@ -24,6 +25,7 @@ static void hook_cred_transfer(struct cred *const new,
 
 	if (old_llcred->domain) {
 		landlock_get_ruleset(old_llcred->domain);
+		landlock_get_domain(old_llcred->domain2);
 		*landlock_cred(new) = *old_llcred;
 	}
 }
@@ -37,10 +39,8 @@ static int hook_cred_prepare(struct cred *const new,
 
 static void hook_cred_free(struct cred *const cred)
 {
-	struct landlock_ruleset *const dom = landlock_cred(cred)->domain;
-
-	if (dom)
-		landlock_put_ruleset_deferred(dom);
+	landlock_put_ruleset_deferred(landlock_cred(cred)->domain);
+	landlock_put_domain_deferred(landlock_cred(cred)->domain2);
 }
 
 #ifdef CONFIG_AUDIT

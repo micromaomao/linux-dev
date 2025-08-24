@@ -15,6 +15,7 @@
 #include <linux/init.h>
 #include <linux/rcupdate.h>
 
+#include "common.h"
 #include "access.h"
 #include "cred.h"
 #include "ruleset.h"
