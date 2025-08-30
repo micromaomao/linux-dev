@@ -285,6 +285,22 @@ static const struct mnt_opt mnt_tmp = {
 	.data = MNT_TMP_DATA,
 };
 
+static struct mnt_opt get_tmp_mnt_opt(void)
+{
+	const char *const tmp_bind_to = getenv("TMP_BIND_TO");
+
+	if (tmp_bind_to) {
+		struct mnt_opt mnt = {
+			.flags = MS_BIND,
+			.source = tmp_bind_to
+		};
+
+		return mnt;
+	}
+
+	return mnt_tmp;
+}
+
 static int mount_opt(const struct mnt_opt *const mnt, const char *const target)
 {
 	return mount(mnt->source ?: mnt->type, target, mnt->type, mnt->flags,
@@ -322,7 +338,9 @@ static void prepare_layout_opt(struct __test_metadata *const _metadata,
 
 static void prepare_layout(struct __test_metadata *const _metadata)
 {
-	prepare_layout_opt(_metadata, &mnt_tmp);
+	struct mnt_opt mnt = get_tmp_mnt_opt();
+
+	prepare_layout_opt(_metadata, &mnt);
 }
 
 static void cleanup_layout(struct __test_metadata *const _metadata)
