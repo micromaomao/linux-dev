@@ -243,6 +243,7 @@ struct inode *v9fs_alloc_inode(struct super_block *sb)
 
 void v9fs_free_inode(struct inode *inode)
 {
+	put_ino_path(V9FS_I(inode)->path);
 	kmem_cache_free(v9fs_inode_cache, V9FS_I(inode));
 }
 
@@ -607,15 +608,17 @@ v9fs_create(struct v9fs_session_info *v9ses, struct inode *dir,
 			goto error;
 		}
 		/*
-		 * instantiate inode and assign the unopened fid to the dentry
+		 * Instantiate inode.  On .L fs, pass in dentry for inodeident=path.
 		 */
-		inode = v9fs_get_new_inode_from_fid(v9ses, fid, dir->i_sb);
+		inode = v9fs_get_new_inode_from_fid(v9ses, fid, dir->i_sb,
+			v9fs_proto_dotl(v9ses) ? dentry : NULL);
 		if (IS_ERR(inode)) {
 			err = PTR_ERR(inode);
 			p9_debug(P9_DEBUG_VFS,
 				   "inode creation failed %d\n", err);
 			goto error;
 		}
+		/* Assign the unopened fid to the dentry */
 		v9fs_fid_add(dentry, &fid);
 		d_instantiate(dentry, inode);
 	}
@@ -732,14 +735,16 @@ struct dentry *v9fs_vfs_lookup(struct inode *dir, struct dentry *dentry,
 	name = dentry->d_name.name;
 	fid = p9_client_walk(dfid, 1, &name, 1);
 	p9_fid_put(dfid);
+
 	if (fid == ERR_PTR(-ENOENT))
 		inode = NULL;
 	else if (IS_ERR(fid))
 		inode = ERR_CAST(fid);
-	else if (v9ses->cache & (CACHE_META|CACHE_LOOSE))
-		inode = v9fs_get_inode_from_fid(v9ses, fid, dir->i_sb);
+	else if (v9ses->cache & (CACHE_META | CACHE_LOOSE))
+		/* Cached fs will not use inode path identification */
+		inode = v9fs_get_inode_from_fid(v9ses, fid, dir->i_sb, NULL);
 	else
-		inode = v9fs_get_new_inode_from_fid(v9ses, fid, dir->i_sb);
+		inode = v9fs_get_inode_from_fid(v9ses, fid, dir->i_sb, dentry);
 	/*
 	 * If we had a rename on the server and a parallel lookup
 	 * for the new name, then make sure we instantiate with
@@ -869,18 +874,21 @@ v9fs_vfs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
 {
 	int retval;
 	struct inode *old_inode;
+	struct v9fs_inode *old_v9inode;
 	struct inode *new_inode;
 	struct v9fs_session_info *v9ses;
 	struct p9_fid *oldfid = NULL, *dfid = NULL;
 	struct p9_fid *olddirfid = NULL;
 	struct p9_fid *newdirfid = NULL;
 	struct p9_wstat wstat;
+	struct v9fs_ino_path *new_ino_path = NULL;
 
 	if (flags)
 		return -EINVAL;
 
 	p9_debug(P9_DEBUG_VFS, "\n");
 	old_inode = d_inode(old_dentry);
+	old_v9inode = V9FS_I(old_inode);
 	new_inode = d_inode(new_dentry);
 	v9ses = v9fs_inode2v9ses(old_inode);
 	oldfid = v9fs_fid_lookup(old_dentry);
@@ -908,6 +916,17 @@ v9fs_vfs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
 	}
 
 	down_write(&v9ses->rename_sem);
+	if (v9fs_inode_ident_path(v9ses)) {
+		/*
+		 * Try to allocate this first, and don't actually do rename if
+		 * allocation fails.
+		 */
+		new_ino_path = make_ino_path(new_dentry);
+		if (!new_ino_path) {
+			retval = -ENOMEM;
+			goto error_locked;
+		}
+	}
 	if (v9fs_proto_dotl(v9ses)) {
 		retval = p9_client_renameat(olddirfid, old_dentry->d_name.name,
 					    newdirfid, new_dentry->d_name.name);
@@ -947,6 +966,15 @@ error_locked:
 		v9fs_invalidate_inode_attr(old_inode);
 		v9fs_invalidate_inode_attr(old_dir);
 		v9fs_invalidate_inode_attr(new_dir);
+		if (v9fs_inode_ident_path(v9ses)) {
+			/*
+			 * We currently have rename_sem write lock, which protects all
+			 * v9inode->path in this fs.
+			 */
+			put_ino_path(old_v9inode->path);
+			old_v9inode->path = new_ino_path;
+			new_ino_path = NULL;
+		}
 
 		/* successful rename */
 		d_move(old_dentry, new_dentry);
@@ -954,6 +982,7 @@ error_locked:
 	up_write(&v9ses->rename_sem);
 
 error:
+	put_ino_path(new_ino_path);
 	p9_fid_put(newdirfid);
 	p9_fid_put(olddirfid);
 	p9_fid_put(oldfid);
@@ -1409,4 +1438,3 @@ static const struct inode_operations v9fs_symlink_inode_operations = {
 	.getattr = v9fs_vfs_getattr,
 	.setattr = v9fs_vfs_setattr,
 };
-

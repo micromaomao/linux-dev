@@ -635,7 +635,7 @@ static void v9fs_inode_init_once(void *foo)
 static int v9fs_init_inode_cache(void)
 {
 	v9fs_inode_cache = kmem_cache_create("v9fs_inode_cache",
-					  sizeof(struct v9fs_inode),
+					  sizeof(struct v9fs_ino_path),
 					  0, (SLAB_RECLAIM_ACCOUNT|
 					      SLAB_ACCOUNT),
 					  v9fs_inode_init_once);
@@ -675,6 +675,12 @@ static int __init init_v9fs(void)
 	if (err < 0) {
 		pr_err("Failed to register v9fs for caching\n");
 		return err;
+	}
+
+	err = v9fs_init_ino_path_cache();
+	if (err < 0) {
+		pr_err("Failed to register v9fs inode name cache\n");
+		goto out_cache;
 	}
 
 	err = v9fs_sysfs_init();

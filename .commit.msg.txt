@@ -1,0 +1,46 @@
+fs/9p: Add ability to identify inode by path for .L in uncached mode
+
+The intention of this patch is to allow features like Landlock and
+fanotify (inode mark mode) to work on uncached 9pfs.  These features rely
+on holding a specific inode and handling further access to the same file
+(as identified by that inode), however, currently in uncached mode, we
+always get a new inode on each access, due to concerns regarding server
+side inode number collision.
+
+On cached mode (either CACHE_LOOSE or CACHE_META), inode is already reused
+only by looking at the qid (server-side inode number).  Since introducing
+this additional check would regress hard links (as they will have
+different path, and thus the two ends of a hard link won't be the same
+inode anymore under this approach), this won't be done for cached mode.
+
+Creating a new file for shared code between vfs_inode.c and
+vfs_inode_dotl.c.  Same change for non-.L will be added in a following
+commit.
+
+Changes since v1:
+- Fix various issues (rcu usage etc) in ino_path.c with feedback from Al
+  Viro and Mickaël Salaün
+
+- Use d_same_name instead of strncmp
+
+- Don't allocate v9fs_ino_path within v9fs_set_inode_dotl, as iget5_locked
+  specifies that it can't sleep.
+
+- Assume inodeident=path will not be set in cached mode.
+
+- Instead of changing v9fs_test_new_inode_dotl to add the path check (thus
+  hijacking the meaning of "new" to actually mean "uncached"), we add the
+  path check (conditional on the right flags in v9ses) to the cached test
+  function (v9fs_test_inode_dotl) and use that function for both cached
+  and uncached mode, by adding additional conditionals within in for the
+  version/generation check.  The v9fs_test_new_inode_dotl function is thus
+  used only for mknod, mkdir and atomic_open in the "need to create" case.
+
+- Instead of never reusing inode if path-based ident is not enabled, we
+  always reuse in uncached mode, but if path-based ident is not enabled,
+  we don't check the path.  This makes the code easier to reason about,
+  and gets rid of the complexity of having to support two quite different
+  mode of operation (re-using and not re-using inodes).
+
+Signed-off-by: Tingmao Wang <m@maowtm.org>
+
