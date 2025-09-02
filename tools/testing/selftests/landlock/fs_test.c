@@ -323,7 +323,6 @@ static void prepare_layout_opt(struct __test_metadata *const _metadata,
 	 * for tests relying on pivot_root(2) and move_mount(2).
 	 */
 	set_cap(_metadata, CAP_SYS_ADMIN);
-	ASSERT_EQ(0, unshare(CLONE_NEWNS | CLONE_NEWCGROUP));
 	ASSERT_EQ(0, mount_opt(mnt, TMP_DIR))
 	{
 		TH_LOG("Failed to mount the %s filesystem: %s", mnt->type,
@@ -337,6 +336,7 @@ static void prepare_layout_opt(struct __test_metadata *const _metadata,
 		remove_path(TMP_DIR);
 	}
 	ASSERT_EQ(0, mount(NULL, TMP_DIR, NULL, MS_PRIVATE | MS_REC, NULL));
+	ASSERT_EQ(0, unshare(CLONE_NEWNS | CLONE_NEWCGROUP));
 	clear_cap(_metadata, CAP_SYS_ADMIN);
 }
 
