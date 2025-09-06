@@ -5505,7 +5505,7 @@ FIXTURE_TEARDOWN_PARENT(layout3_fs)
 	cleanup_layout(_metadata);
 }
 
-static void layer3_fs_tag_inode(struct __test_metadata *const _metadata,
+static void layout3_fs_tag_inode(struct __test_metadata *const _metadata,
 				FIXTURE_DATA(layout3_fs) * self,
 				const FIXTURE_VARIANT(layout3_fs) * variant,
 				const char *const rule_path)
@@ -5557,25 +5557,25 @@ static void layer3_fs_tag_inode(struct __test_metadata *const _metadata,
 TEST_F_FORK(layout3_fs, tag_inode_dir_parent)
 {
 	/* The current directory must not be the root for this test. */
-	layer3_fs_tag_inode(_metadata, self, variant, ".");
+	layout3_fs_tag_inode(_metadata, self, variant, ".");
 }
 
 TEST_F_FORK(layout3_fs, tag_inode_dir_mnt)
 {
-	layer3_fs_tag_inode(_metadata, self, variant, TMP_DIR);
+	layout3_fs_tag_inode(_metadata, self, variant, TMP_DIR);
 }
 
 TEST_F_FORK(layout3_fs, tag_inode_dir_child)
 {
 	char *dir_path = dirname_alloc(variant->file_path);
 
-	layer3_fs_tag_inode(_metadata, self, variant, dir_path);
+	layout3_fs_tag_inode(_metadata, self, variant, dir_path);
 	free(dir_path);
 }
 
 TEST_F_FORK(layout3_fs, tag_inode_file)
 {
-	layer3_fs_tag_inode(_metadata, self, variant, variant->file_path);
+	layout3_fs_tag_inode(_metadata, self, variant, variant->file_path);
 }
 
 /* Light version of layout1.release_inodes */
