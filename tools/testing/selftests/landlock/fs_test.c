@@ -5339,6 +5339,7 @@ FIXTURE_VARIANT(layout3_fs)
 	const struct mnt_opt mnt;
 	const char *const file_path;
 	unsigned int fs_magic;
+	bool test_renames;
 };
 
 /* clang-format off */
@@ -5349,6 +5350,7 @@ FIXTURE_VARIANT_ADD(layout3_fs, tmpfs) {
 		.data = MNT_TMP_DATA,
 	},
 	.file_path = file1_s1d1,
+	.test_renames = true,
 };
 
 FIXTURE_VARIANT_ADD(layout3_fs, ramfs) {
@@ -5356,7 +5358,8 @@ FIXTURE_VARIANT_ADD(layout3_fs, ramfs) {
 		.type = "ramfs",
 		.data = "mode=700",
 	},
-	.file_path = TMP_DIR "/dir/file",
+	.file_path = file1_s1d1,
+	.test_renames = true,
 };
 
 FIXTURE_VARIANT_ADD(layout3_fs, cgroup2) {
@@ -5385,8 +5388,9 @@ FIXTURE_VARIANT_ADD(layout3_fs, hostfs) {
 		.source = TMP_DIR,
 		.flags = MS_BIND,
 	},
-	.file_path = TMP_DIR "/dir/file",
+	.file_path = file1_s1d1,
 	.fs_magic = HOSTFS_SUPER_MAGIC,
+	.test_renames = true,
 };
 
 /*
@@ -5399,8 +5403,9 @@ FIXTURE_VARIANT_ADD(layout3_fs, v9fs) {
 		.source = "/mnt/test-v9fs",
 		.flags = MS_BIND,
 	},
-	.file_path = TMP_DIR "/dir/file",
+	.file_path = file1_s1d1,
 	.fs_magic = V9FS_MAGIC,
+	.test_renames = true,
 };
 
 /*
@@ -5412,8 +5417,9 @@ FIXTURE_VARIANT_ADD(layout3_fs, fuse) {
 		.source = "/mnt/test-fuse",
 		.flags = MS_BIND,
 	},
-	.file_path = TMP_DIR "/dir/file",
+	.file_path = file1_s1d1,
 	.fs_magic = FUSE_SUPER_MAGIC,
+	.test_renames = true,
 };
 
 static char *dirname_alloc(const char *path)
@@ -5500,6 +5506,11 @@ FIXTURE_TEARDOWN_PARENT(layout3_fs)
 		rmdir(dir_path);
 		clear_cap(_metadata, CAP_DAC_OVERRIDE);
 		free(dir_path);
+	}
+
+	if (variant->test_renames) {
+		remove_path(file2_s1d1);
+		remove_path(file1_s2d1);
 	}
 
 	cleanup_layout(_metadata);
@@ -5625,6 +5636,100 @@ TEST_F_FORK(layout3_fs, release_inodes)
 	/* Checks that access to the new mount point is denied. */
 	ASSERT_EQ(EACCES, test_open(TMP_DIR, O_RDONLY));
 }
+
+static void layout3_fs_rename(struct __test_metadata *const _metadata,
+			     FIXTURE_DATA(layout3_fs) * self,
+			     const FIXTURE_VARIANT(layout3_fs) * variant,
+			     const char *const rule_path,
+			     const char *const rename_from,
+			     const char *const rename_to,
+				 const char *const new_name)
+{
+	const struct rule layer1_allow_read_file[] = {
+		{
+			.path = rule_path,
+			.access = LANDLOCK_ACCESS_FS_READ_FILE,
+		},
+		{},
+	};
+	const struct landlock_ruleset_attr layer2_deny_everything_attr = {
+		.handled_access_fs = LANDLOCK_ACCESS_FS_READ_FILE,
+	};
+	const char *const dev_null_path = "/dev/null";
+	int ruleset_fd;
+
+	if (self->skip_test)
+		SKIP(return, "this filesystem is not supported (test)");
+	if (!variant->file_path || !variant->test_renames)
+		SKIP(return, "renames not tested for this fs");
+
+	/* Checks without Landlock. */
+	EXPECT_EQ(0, test_open(dev_null_path, O_RDONLY | O_CLOEXEC));
+	EXPECT_EQ(0, test_open(variant->file_path, O_RDONLY | O_CLOEXEC));
+
+	ruleset_fd = create_ruleset(_metadata, LANDLOCK_ACCESS_FS_READ_FILE,
+				    layer1_allow_read_file);
+	EXPECT_LE(0, ruleset_fd);
+
+	/* Rename the file before we restrict ourselves */
+	EXPECT_EQ(0, rename(rename_from, rename_to)) {
+		TH_LOG("Failed to rename \"%s\" to \"%s\": %s", rename_from,
+		       rename_to, strerror(errno));
+	}
+
+	EXPECT_EQ(0, test_open(new_name, O_RDONLY | O_CLOEXEC)) {
+		TH_LOG("Failed to open \"%s\" after rename, before landlock restriction: %s",
+		       new_name, strerror(errno));
+	}
+
+	enforce_ruleset(_metadata, ruleset_fd);
+	EXPECT_EQ(0, close(ruleset_fd));
+
+	EXPECT_EQ(EACCES, test_open(dev_null_path, O_RDONLY | O_CLOEXEC));
+	EXPECT_EQ(0, test_open(new_name, O_RDONLY | O_CLOEXEC));
+
+	/* Forbids directory reading. */
+	ruleset_fd =
+		landlock_create_ruleset(&layer2_deny_everything_attr,
+					sizeof(layer2_deny_everything_attr), 0);
+	EXPECT_LE(0, ruleset_fd);
+	enforce_ruleset(_metadata, ruleset_fd);
+	EXPECT_EQ(0, close(ruleset_fd));
+
+	/* Checks with Landlock and forbidden access. */
+	EXPECT_EQ(EACCES, test_open(dev_null_path, O_RDONLY | O_CLOEXEC));
+	EXPECT_EQ(EACCES, test_open(new_name, O_RDONLY | O_CLOEXEC));
+}
+
+#define DEFINE_LAYOUT3_FS_RENAME_TEST(name, rule_on, src, dst, target,         \
+				      skip_if)                                 \
+	TEST_F_FORK(layout3_fs, name)                                          \
+	{                                                                      \
+		if (self->skip_test)                                           \
+			SKIP(return,                                           \
+				   "this filesystem is not supported (test)"); \
+		if (!variant->test_renames)                                    \
+			SKIP(return, "renames not tested for this fs");        \
+		if (skip_if)                                                   \
+			SKIP(return, "unsupported by filesystem");             \
+                                                                               \
+		layout3_fs_rename(_metadata, self, variant, (rule_on), (src),   \
+				 (dst), (target));                             \
+	}
+
+DEFINE_LAYOUT3_FS_RENAME_TEST(rename_file_filerule, file1_s1d1, file1_s1d1,
+			      file2_s1d1, file2_s1d1, false)
+DEFINE_LAYOUT3_FS_RENAME_TEST(rename_file_dirrule, dir_s1d1, file1_s1d1,
+			      file2_s1d1, file2_s1d1, false)
+/*
+ * For 9pfs, path-based inode matching currently breaks when parent dir is
+ * moved.
+ */
+DEFINE_LAYOUT3_FS_RENAME_TEST(rename_dir_filerule, file1_s1d1, dir_s1d1,
+			      dir_s2d1, file1_s2d1,
+			      variant->fs_magic == V9FS_MAGIC)
+DEFINE_LAYOUT3_FS_RENAME_TEST(rename_dir_dirrule, dir_s1d1, dir_s1d1, dir_s2d1,
+			      file1_s2d1, false)
 
 static int matches_log_fs_extra(struct __test_metadata *const _metadata,
 				int audit_fd, const char *const blockers,
