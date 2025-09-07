@@ -67,8 +67,10 @@ typedef u16 layer_mask_t;
 static_assert(BITS_PER_TYPE(layer_mask_t) >= LANDLOCK_MAX_NUM_LAYERS);
 
 /*
- * Tracks domains responsible of a denied access.  This is required to avoid
- * storing in each object the full layer_masks[] required by update_request().
+ * Tracks domains responsible of a denied access, stored in the form of
+ * two 4-bit layer numbers packed into a byte (one for each optional
+ * access).  This is required to avoid storing in each object the full
+ * layer_masks[] required by update_request().
  */
 typedef u8 deny_masks_t;
 
