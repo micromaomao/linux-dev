@@ -775,6 +775,17 @@ remote port of UDP sockets (via :manpage:`connect(2)), and sending
 datagrams to an explicit remote port (ignoring any destination set on
 UDP sockets, via e.g. :manpage:`sendto(2)).
 
+Quiet rule flag (ABI < 10)
+-----------------------------------------
+
+Starting with the Landlock ABI version 10, it is possible to selectively
+suppress audit logs for specific denied accesses on a per-object basis with
+the ``LANDLOCK_ADD_RULE_QUIET`` flag of sys_landlock_add_rule(), in
+combination with the ``quiet_access_fs`` and ``quiet_access_net`` fields of
+struct landlock_ruleset_attr.  It is also now possible to suppress audit logs
+for scope accesses via the ``quiet_scoped`` field of struct
+landlock_ruleset_attr.
+
 .. _kernel_support:
 
 Kernel support
