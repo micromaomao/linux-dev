@@ -252,34 +252,56 @@ static void test_get_denied_layer(struct kunit *const test)
  * get_layer_from_fs_deny_masks - get the layer which denied the access request
  *
  * As a side effect, stores the denied access rights from that layer(!) in
- * *access_request.
+ * *access_request, and sets *quiet to indicate if audit logging should be
+ * suppressed for this denial.
  */
 static size_t get_layer_from_fs_deny_masks(access_mask_t *const access_request,
-					   const deny_masks_t deny_masks)
+					   const deny_masks_t deny_masks, u8 quiet_optional_accesses, bool *quiet)
 {
 	const access_mask_t access_req = *access_request;
 	size_t youngest_layer = 0;
 	access_mask_t missing = 0;
+	bool should_quiet = false;
 
 	WARN_ON_ONCE((access_req | _LANDLOCK_ACCESS_FS_OPTIONAL) !=
 		     _LANDLOCK_ACCESS_FS_OPTIONAL);
 
 	if (access_req & LANDLOCK_ACCESS_FS_TRUNCATE) {
 		size_t layer = deny_masks & 0x0f;
+		const bool layer_has_quiet =
+			!!(quiet_optional_accesses & BIT(0));
 
 		missing |= LANDLOCK_ACCESS_FS_TRUNCATE;
 		youngest_layer = max(youngest_layer, layer);
+		should_quiet = layer_has_quiet;
 	}
+
 	if (access_req & LANDLOCK_ACCESS_FS_IOCTL_DEV) {
 		size_t layer = (deny_masks & 0xf0) >> 4;
+		const bool layer_has_quiet =
+			!!(quiet_optional_accesses & BIT(1));
 
-		if (layer > youngest_layer)
+		if (layer > youngest_layer) {
 			missing = 0;
-
-		missing |= LANDLOCK_ACCESS_FS_IOCTL_DEV;
-		youngest_layer = max(youngest_layer, layer);
+			should_quiet = layer_has_quiet;
+			youngest_layer = layer;
+		} else if (layer == youngest_layer) {
+			missing |= LANDLOCK_ACCESS_FS_IOCTL_DEV;
+			/*
+			 * Still set should_quiet here in case it was not set
+			 * previously (e.g. if we're layer 0 and this is the first
+			 * access request matched).
+			 *
+			 * Whether the layer has rules with quiet flag covering
+			 * the file accessed does not depend on the access, and so
+			 * the following WARN_ON_ONCE() should not fail.
+			 */
+			WARN_ON_ONCE(should_quiet && !layer_has_quiet);
+			should_quiet = layer_has_quiet;
+		}
 	}
 	*access_request = missing;
+	*quiet = should_quiet;
 	return youngest_layer;
 }
 
@@ -289,34 +311,188 @@ static void test_get_layer_from_fs_deny_masks(struct kunit *const test)
 {
 	deny_masks_t deny_mask;
 	access_mask_t access;
+	u8 quiet_optional_accesses;
+	bool quiet;
 
 	/* truncate:0 ioctl_dev:2 */
 	deny_mask = 0x20;
+	quiet_optional_accesses = 0;
 
 	access = LANDLOCK_ACCESS_FS_TRUNCATE;
 	KUNIT_EXPECT_EQ(test, 0,
-			get_layer_from_fs_deny_masks(&access, deny_mask));
+			get_layer_from_fs_deny_masks(&access, deny_mask,
+						     quiet_optional_accesses,
+						     &quiet));
 	KUNIT_EXPECT_EQ(test, access, LANDLOCK_ACCESS_FS_TRUNCATE);
+	KUNIT_EXPECT_EQ(test, quiet, false);
+
+	access = LANDLOCK_ACCESS_FS_IOCTL_DEV;
+	KUNIT_EXPECT_EQ(test, 2,
+			get_layer_from_fs_deny_masks(&access, deny_mask,
+						     quiet_optional_accesses,
+						     &quiet));
+	KUNIT_EXPECT_EQ(test, access, LANDLOCK_ACCESS_FS_IOCTL_DEV);
+	KUNIT_EXPECT_EQ(test, quiet, false);
 
 	access = LANDLOCK_ACCESS_FS_TRUNCATE | LANDLOCK_ACCESS_FS_IOCTL_DEV;
 	KUNIT_EXPECT_EQ(test, 2,
-			get_layer_from_fs_deny_masks(&access, deny_mask));
+			get_layer_from_fs_deny_masks(&access, deny_mask,
+						     quiet_optional_accesses,
+						     &quiet));
 	KUNIT_EXPECT_EQ(test, access, LANDLOCK_ACCESS_FS_IOCTL_DEV);
+	KUNIT_EXPECT_EQ(test, quiet, false);
+
+	/* layer denying truncate: quiet, ioctl: not quiet */
+	quiet_optional_accesses = 0b01;
+
+	access = LANDLOCK_ACCESS_FS_TRUNCATE;
+	KUNIT_EXPECT_EQ(test, 0,
+			get_layer_from_fs_deny_masks(&access, deny_mask,
+						     quiet_optional_accesses,
+						     &quiet));
+	KUNIT_EXPECT_EQ(test, access, LANDLOCK_ACCESS_FS_TRUNCATE);
+	KUNIT_EXPECT_EQ(test, quiet, true);
+
+	access = LANDLOCK_ACCESS_FS_IOCTL_DEV;
+	KUNIT_EXPECT_EQ(test, 2,
+			get_layer_from_fs_deny_masks(&access, deny_mask,
+						     quiet_optional_accesses,
+						     &quiet));
+	KUNIT_EXPECT_EQ(test, access, LANDLOCK_ACCESS_FS_IOCTL_DEV);
+	KUNIT_EXPECT_EQ(test, quiet, false);
+
+	access = LANDLOCK_ACCESS_FS_TRUNCATE | LANDLOCK_ACCESS_FS_IOCTL_DEV;
+	KUNIT_EXPECT_EQ(test, 2,
+			get_layer_from_fs_deny_masks(&access, deny_mask,
+						     quiet_optional_accesses,
+						     &quiet));
+	KUNIT_EXPECT_EQ(test, access, LANDLOCK_ACCESS_FS_IOCTL_DEV);
+	KUNIT_EXPECT_EQ(test, quiet, false);
+
+	/* Reverse order - truncate:2 ioctl_dev:0 */
+	deny_mask = 0x02;
+	quiet_optional_accesses = 0;
+
+	access = LANDLOCK_ACCESS_FS_TRUNCATE;
+	KUNIT_EXPECT_EQ(test, 2,
+			get_layer_from_fs_deny_masks(&access, deny_mask,
+						     quiet_optional_accesses,
+						     &quiet));
+	KUNIT_EXPECT_EQ(test, access, LANDLOCK_ACCESS_FS_TRUNCATE);
+	KUNIT_EXPECT_EQ(test, quiet, false);
+
+	access = LANDLOCK_ACCESS_FS_IOCTL_DEV;
+	KUNIT_EXPECT_EQ(test, 0,
+			get_layer_from_fs_deny_masks(&access, deny_mask,
+						     quiet_optional_accesses,
+						     &quiet));
+	KUNIT_EXPECT_EQ(test, access, LANDLOCK_ACCESS_FS_IOCTL_DEV);
+	KUNIT_EXPECT_EQ(test, quiet, false);
+
+	access = LANDLOCK_ACCESS_FS_TRUNCATE | LANDLOCK_ACCESS_FS_IOCTL_DEV;
+	KUNIT_EXPECT_EQ(test, 2,
+			get_layer_from_fs_deny_masks(&access, deny_mask,
+						     quiet_optional_accesses,
+						     &quiet));
+	KUNIT_EXPECT_EQ(test, access, LANDLOCK_ACCESS_FS_TRUNCATE);
+	KUNIT_EXPECT_EQ(test, quiet, false);
+
+	/* layer denying truncate: quiet, ioctl: not quiet */
+	quiet_optional_accesses = 0b01;
+
+	access = LANDLOCK_ACCESS_FS_TRUNCATE;
+	KUNIT_EXPECT_EQ(test, 2,
+			get_layer_from_fs_deny_masks(&access, deny_mask,
+						     quiet_optional_accesses,
+						     &quiet));
+	KUNIT_EXPECT_EQ(test, access, LANDLOCK_ACCESS_FS_TRUNCATE);
+	KUNIT_EXPECT_EQ(test, quiet, true);
+
+	access = LANDLOCK_ACCESS_FS_IOCTL_DEV;
+	KUNIT_EXPECT_EQ(test, 0,
+			get_layer_from_fs_deny_masks(&access, deny_mask,
+						     quiet_optional_accesses,
+						     &quiet));
+	KUNIT_EXPECT_EQ(test, access, LANDLOCK_ACCESS_FS_IOCTL_DEV);
+	KUNIT_EXPECT_EQ(test, quiet, false);
+
+	access = LANDLOCK_ACCESS_FS_TRUNCATE | LANDLOCK_ACCESS_FS_IOCTL_DEV;
+	KUNIT_EXPECT_EQ(test, 2,
+			get_layer_from_fs_deny_masks(&access, deny_mask,
+						     quiet_optional_accesses,
+						     &quiet));
+	KUNIT_EXPECT_EQ(test, access, LANDLOCK_ACCESS_FS_TRUNCATE);
+	KUNIT_EXPECT_EQ(test, quiet, true);
+
+	/* layer denying truncate: not quiet, ioctl: quiet */
+	quiet_optional_accesses = 0b10;
+
+	access = LANDLOCK_ACCESS_FS_TRUNCATE;
+	KUNIT_EXPECT_EQ(test, 2,
+			get_layer_from_fs_deny_masks(&access, deny_mask,
+						     quiet_optional_accesses,
+						     &quiet));
+	KUNIT_EXPECT_EQ(test, access, LANDLOCK_ACCESS_FS_TRUNCATE);
+	KUNIT_EXPECT_EQ(test, quiet, false);
+
+	access = LANDLOCK_ACCESS_FS_IOCTL_DEV;
+	KUNIT_EXPECT_EQ(test, 0,
+			get_layer_from_fs_deny_masks(&access, deny_mask,
+						     quiet_optional_accesses,
+						     &quiet));
+	KUNIT_EXPECT_EQ(test, access, LANDLOCK_ACCESS_FS_IOCTL_DEV);
+	KUNIT_EXPECT_EQ(test, quiet, true);
+
+	access = LANDLOCK_ACCESS_FS_TRUNCATE | LANDLOCK_ACCESS_FS_IOCTL_DEV;
+	KUNIT_EXPECT_EQ(test, 2,
+			get_layer_from_fs_deny_masks(&access, deny_mask,
+						     quiet_optional_accesses,
+						     &quiet));
+	KUNIT_EXPECT_EQ(test, access, LANDLOCK_ACCESS_FS_TRUNCATE);
+	KUNIT_EXPECT_EQ(test, quiet, false);
 
 	/* truncate:15 ioctl_dev:15 */
 	deny_mask = 0xff;
+	quiet_optional_accesses = 0;
 
 	access = LANDLOCK_ACCESS_FS_TRUNCATE;
 	KUNIT_EXPECT_EQ(test, 15,
-			get_layer_from_fs_deny_masks(&access, deny_mask));
+			get_layer_from_fs_deny_masks(&access, deny_mask,
+						     quiet_optional_accesses,
+						     &quiet));
 	KUNIT_EXPECT_EQ(test, access, LANDLOCK_ACCESS_FS_TRUNCATE);
+	KUNIT_EXPECT_EQ(test, quiet, false);
 
 	access = LANDLOCK_ACCESS_FS_TRUNCATE | LANDLOCK_ACCESS_FS_IOCTL_DEV;
 	KUNIT_EXPECT_EQ(test, 15,
-			get_layer_from_fs_deny_masks(&access, deny_mask));
+			get_layer_from_fs_deny_masks(&access, deny_mask,
+						     quiet_optional_accesses,
+						     &quiet));
 	KUNIT_EXPECT_EQ(test, access,
 			LANDLOCK_ACCESS_FS_TRUNCATE |
 				LANDLOCK_ACCESS_FS_IOCTL_DEV);
+	KUNIT_EXPECT_EQ(test, quiet, false);
+
+	/* Both quiet (same layer so quietness must be the same) */
+	quiet_optional_accesses = 0b11;
+
+	access = LANDLOCK_ACCESS_FS_TRUNCATE;
+	KUNIT_EXPECT_EQ(test, 15,
+			get_layer_from_fs_deny_masks(&access, deny_mask,
+						     quiet_optional_accesses,
+						     &quiet));
+	KUNIT_EXPECT_EQ(test, access, LANDLOCK_ACCESS_FS_TRUNCATE);
+	KUNIT_EXPECT_EQ(test, quiet, true);
+
+	access = LANDLOCK_ACCESS_FS_TRUNCATE | LANDLOCK_ACCESS_FS_IOCTL_DEV;
+	KUNIT_EXPECT_EQ(test, 15,
+			get_layer_from_fs_deny_masks(&access, deny_mask,
+						     quiet_optional_accesses,
+						     &quiet));
+	KUNIT_EXPECT_EQ(test, access,
+			LANDLOCK_ACCESS_FS_TRUNCATE |
+				LANDLOCK_ACCESS_FS_IOCTL_DEV);
+	KUNIT_EXPECT_EQ(test, quiet, true);
 }
 
 #endif /* CONFIG_SECURITY_LANDLOCK_KUNIT_TEST */
@@ -347,6 +523,22 @@ static bool is_valid_request(const struct landlock_request *const request)
 	return true;
 }
 
+static access_mask_t
+pick_access_mask_for_request_type(const enum landlock_request_type type,
+				  const struct access_masks access_masks)
+{
+	switch (type) {
+	case LANDLOCK_REQUEST_FS_ACCESS:
+		return access_masks.fs;
+	case LANDLOCK_REQUEST_NET_ACCESS:
+		return access_masks.net;
+	default:
+		WARN_ONCE(1, "Invalid request type %d passed to %s", type,
+			  __func__);
+		return 0;
+	}
+}
+
 /**
  * landlock_log_denial - Create audit records related to a denial
  *
@@ -360,6 +552,7 @@ void landlock_log_denial(const struct landlock_cred_security *const subject,
 	struct landlock_hierarchy *youngest_denied;
 	size_t youngest_layer;
 	access_mask_t missing;
+	bool object_quiet_flag = false, quiet_applicable_to_access = false;
 
 	if (WARN_ON_ONCE(!subject || !subject->domain ||
 			 !subject->domain->hierarchy || !request))
@@ -374,9 +567,13 @@ void landlock_log_denial(const struct landlock_cred_security *const subject,
 		if (request->masks) {
 			youngest_layer = get_denied_layer(
 				subject->domain, &missing, request->masks);
+			object_quiet_flag = !!(request->rule_flags.quiet_masks &
+					       BIT(youngest_layer));
 		} else {
 			youngest_layer = get_layer_from_fs_deny_masks(
-				&missing, request->deny_masks);
+				&missing, request->deny_masks,
+				request->quiet_optional_accesses,
+				&object_quiet_flag);
 		}
 		youngest_denied =
 			get_hierarchy(subject->domain, youngest_layer);
@@ -410,6 +607,53 @@ void landlock_log_denial(const struct landlock_cred_security *const subject,
 		if (!youngest_denied->log_new_exec)
 			return;
 	}
+
+	/*
+	 * Checks if the object is marked quiet by the layer that denied the
+	 * request.  If it's a different layer that marked it as quiet, but
+	 * that layer is not the one that denied the request, we should still
+	 * audit log the denial.
+	 */
+	if (object_quiet_flag) {
+		/*
+		 * We now check if the denied requests are all covered by the
+		 * layer's quiet access bits.
+		 */
+		const access_mask_t quiet_mask =
+			pick_access_mask_for_request_type(
+				request->type, youngest_denied->quiet_masks);
+
+		quiet_applicable_to_access = (quiet_mask & missing) == missing;
+	} else {
+		/*
+		 * Either the object is not quiet, or this is a scope request.  We
+		 * check request->type to distinguish between the two cases.
+		 */
+		const access_mask_t quiet_mask =
+			youngest_denied->quiet_masks.scope;
+
+		switch (request->type) {
+		case LANDLOCK_REQUEST_SCOPE_SIGNAL:
+			quiet_applicable_to_access =
+				!!(quiet_mask & LANDLOCK_SCOPE_SIGNAL);
+			break;
+		case LANDLOCK_REQUEST_SCOPE_ABSTRACT_UNIX_SOCKET:
+			quiet_applicable_to_access =
+				!!(quiet_mask &
+				   LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET);
+			break;
+		/*
+		 * Leave LANDLOCK_REQUEST_PTRACE and
+		 * LANDLOCK_REQUEST_FS_CHANGE_TOPOLOGY unhandled for now - they are
+		 * never quiet.
+		 */
+		default:
+			break;
+		}
+	}
+
+	if (quiet_applicable_to_access)
+		return;
 
 	/* Uses consistent allocation flags wrt common_lsm_audit(). */
 	ab = audit_log_start(audit_context(), GFP_ATOMIC | __GFP_NOWARN,
