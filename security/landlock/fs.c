@@ -984,7 +984,7 @@ static int current_check_access_path(const struct path *const path,
 				       NULL, 0, NULL, NULL, NULL, NULL))
 		return 0;
 
-	landlock_log_denial(subject, &request);
+	landlock_log_denial(subject, &request, rule_flags);
 	return -EACCES;
 }
 
@@ -1194,7 +1194,7 @@ static int current_check_refer_path(struct dentry *const old_dentry,
 			    &request1, NULL, 0, NULL, NULL, NULL, NULL))
 			return 0;
 
-		landlock_log_denial(subject, &request1);
+		landlock_log_denial(subject, &request1, rule_flags_parent1);
 		return -EACCES;
 	}
 
@@ -1243,11 +1243,11 @@ static int current_check_refer_path(struct dentry *const old_dentry,
 
 	if (request1.access) {
 		request1.audit.u.path.dentry = old_parent;
-		landlock_log_denial(subject, &request1);
+		landlock_log_denial(subject, &request1, rule_flags_parent1);
 	}
 	if (request2.access) {
 		request2.audit.u.path.dentry = new_dir->dentry;
-		landlock_log_denial(subject, &request2);
+		landlock_log_denial(subject, &request2, rule_flags_parent2);
 	}
 
 	/*
@@ -1403,7 +1403,7 @@ log_fs_change_topology_path(const struct landlock_cred_security *const subject,
 			.u.path = *path,
 		},
 		.layer_plus_one = handle_layer + 1,
-	});
+	}, no_rule_flags);
 }
 
 static void log_fs_change_topology_dentry(
@@ -1417,7 +1417,7 @@ static void log_fs_change_topology_dentry(
 			.u.dentry = dentry,
 		},
 		.layer_plus_one = handle_layer + 1,
-	});
+	}, no_rule_flags);
 }
 
 /*
@@ -1705,7 +1705,7 @@ static int hook_file_open(struct file *const file)
 
 	/* Sets access to reflect the actual request. */
 	request.access = open_access_request;
-	landlock_log_denial(subject, &request);
+	landlock_log_denial(subject, &request, rule_flags);
 	return -EACCES;
 }
 
@@ -1735,7 +1735,7 @@ static int hook_file_truncate(struct file *const file)
 #ifdef CONFIG_AUDIT
 		.deny_masks = landlock_file(file)->deny_masks,
 #endif /* CONFIG_AUDIT */
-	});
+	}, no_rule_flags);
 	return -EACCES;
 }
 
@@ -1774,7 +1774,7 @@ static int hook_file_ioctl_common(const struct file *const file,
 #ifdef CONFIG_AUDIT
 		.deny_masks = landlock_file(file)->deny_masks,
 #endif /* CONFIG_AUDIT */
-	});
+	}, no_rule_flags);
 	return -EACCES;
 }
 

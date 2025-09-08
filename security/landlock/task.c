@@ -115,7 +115,7 @@ static int hook_ptrace_access_check(struct task_struct *const child,
 				.u.tsk = child,
 			},
 			.layer_plus_one = parent_subject->domain->num_layers,
-		});
+		}, no_rule_flags);
 
 	return err;
 }
@@ -161,7 +161,7 @@ static int hook_ptrace_traceme(struct task_struct *const parent)
 			.u.tsk = current,
 		},
 		.layer_plus_one = parent_subject->domain->num_layers,
-	});
+	}, no_rule_flags);
 	return err;
 }
 
@@ -290,7 +290,7 @@ static int hook_unix_stream_connect(struct sock *const sock,
 			},
 		},
 		.layer_plus_one = handle_layer + 1,
-	});
+	}, no_rule_flags);
 	return -EPERM;
 }
 
@@ -327,7 +327,7 @@ static int hook_unix_may_send(struct socket *const sock,
 			},
 		},
 		.layer_plus_one = handle_layer + 1,
-	});
+	}, no_rule_flags);
 	return -EPERM;
 }
 
@@ -383,7 +383,7 @@ static int hook_task_kill(struct task_struct *const p,
 			.u.tsk = p,
 		},
 		.layer_plus_one = handle_layer + 1,
-	});
+	}, no_rule_flags);
 	return -EPERM;
 }
 
@@ -426,7 +426,7 @@ static int hook_file_send_sigiotask(struct task_struct *tsk,
 #ifdef CONFIG_AUDIT
 		.layer_plus_one = landlock_file(fown->file)->fown_layer + 1,
 #endif /* CONFIG_AUDIT */
-	});
+	}, no_rule_flags);
 	return -EPERM;
 }
 
