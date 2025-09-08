@@ -62,18 +62,37 @@ static_assert(sizeof(typeof_member(union access_masks_all, masks)) ==
 	      sizeof(typeof_member(union access_masks_all, all)));
 
 /**
- * struct layer_access_masks - A boolean matrix of layers and access rights
+ * struct layer_mask - The unfulfilled access rights and rule flags for
+ * a layer.
  *
- * This has a bit for each combination of layer numbers and access rights.
- * During access checks, it is used to represent the access rights for each
- * layer which still need to be fulfilled.  When all bits are 0, the access
- * request is considered to be fulfilled.
+ * During access checks, @access is used to represent the access rights
+ * for each layer which still need to be fulfilled.  When all bits in
+ * @access is 0, the access request is allowed by this layer.
+ *
+ * @quiet is used to store whether we have encountered a rule with the
+ * quiet flag for this layer, which will be used to control audit logging.
  */
-struct layer_access_masks {
+struct layer_mask {
+	access_mask_t access:LANDLOCK_NUM_ACCESS_MAX;
+#ifdef CONFIG_AUDIT
+	bool quiet:1;
+#endif /* CONFIG_AUDIT */
+};
+
+/*
+ * Make sure that we don't increase the size of struct layer_mask when
+ * storing rule flags.
+ */
+static_assert(sizeof(struct layer_mask) == sizeof(access_mask_t));
+
+/**
+ * struct layer_masks - An array of struct layer_mask, one per layer.
+ */
+struct layer_masks {
 	/**
-	 * @access: The unfulfilled access rights for each layer.
+	 * @layers: The unfulfilled access rights for each layer.
 	 */
-	access_mask_t access[LANDLOCK_MAX_NUM_LAYERS];
+	struct layer_mask layers[LANDLOCK_MAX_NUM_LAYERS];
 };
 
 /*

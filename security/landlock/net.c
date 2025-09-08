@@ -48,7 +48,7 @@ static int current_check_access_socket(struct socket *const sock,
 				       bool connecting)
 {
 	__be16 port;
-	struct layer_access_masks layer_masks = {};
+	struct layer_masks layer_masks = {};
 	const struct landlock_rule *rule;
 	struct landlock_id id = {
 		.type = LANDLOCK_KEY_NET_PORT,
