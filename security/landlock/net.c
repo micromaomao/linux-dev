@@ -242,7 +242,7 @@ static int current_check_access_socket(struct socket *const sock,
 				    .audit.u.net = &audit_net,
 				    .access = access_request,
 				    .masks = &layer_masks,
-			    });
+				    .rule_flags = rule_flags });
 	return -EACCES;
 }
 
