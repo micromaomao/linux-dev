@@ -722,6 +722,17 @@ Starting with the Landlock ABI version 9, it is possible to restrict
 connections to pathname UNIX domain sockets (:manpage:`unix(7)`) using
 the new ``LANDLOCK_ACCESS_FS_RESOLVE_UNIX`` right.
 
+Quiet rule flag (ABI < 10)
+-----------------------------------------
+
+Starting with the Landlock ABI version 10, it is possible to selectively
+suppress audit logs for specific denied accesses on a per-object basis with
+the ``LANDLOCK_ADD_RULE_QUIET`` flag of sys_landlock_add_rule(), in
+combination with the ``quiet_access_fs`` and ``quiet_access_net`` fields of
+struct landlock_ruleset_attr.  It is also now possible to suppress audit logs
+for scope accesses via the ``quiet_scoped`` field of struct
+landlock_ruleset_attr.
+
 .. _kernel_support:
 
 Kernel support
