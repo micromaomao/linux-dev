@@ -48,6 +48,7 @@ static int current_check_access_socket(struct socket *const sock,
 {
 	__be16 port;
 	struct layer_access_masks layer_masks = {};
+	struct collected_rule_flags rule_flags = {};
 	const struct landlock_rule *rule;
 	struct landlock_id id = {
 		.type = LANDLOCK_KEY_NET_PORT,
@@ -194,7 +195,7 @@ static int current_check_access_socket(struct socket *const sock,
 	if (!access_request)
 		return 0;
 
-	if (landlock_unmask_layers(rule, &layer_masks))
+	if (landlock_unmask_layers(rule, &layer_masks, &rule_flags))
 		return 0;
 
 	audit_net.family = address->sa_family;

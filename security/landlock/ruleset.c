@@ -627,7 +627,8 @@ landlock_find_rule(const struct landlock_ruleset *const ruleset,
  * remaining unfulfilled access rights and masks has no leftover set bits).
  */
 bool landlock_unmask_layers(const struct landlock_rule *const rule,
-			    struct layer_access_masks *masks)
+			    struct layer_access_masks *masks,
+			    struct collected_rule_flags *const rule_flags)
 {
 	if (!masks)
 		return true;
@@ -646,9 +647,14 @@ bool landlock_unmask_layers(const struct landlock_rule *const rule,
 	 */
 	for (size_t i = 0; i < rule->num_layers; i++) {
 		const struct landlock_layer *const layer = &rule->layers[i];
+		const layer_mask_t layer_bit = BIT_ULL(layer->level - 1);
 
 		/* Clear the bits where the layer in the rule grants access. */
 		masks->access[layer->level - 1] &= ~layer->access;
+
+		/* Collect rule flags for each layer. */
+		if (rule_flags && layer->flags.quiet)
+			rule_flags->quiet_masks |= layer_bit;
 	}
 
 	for (size_t i = 0; i < ARRAY_SIZE(masks->access); i++) {

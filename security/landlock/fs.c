@@ -714,6 +714,9 @@ static void test_is_eacces_with_write(struct kunit *const test)
  *     those identified by @access_request_parent1).  This matrix can
  *     initially refer to domain layer masks and, when the accesses for the
  *     destination and source are the same, to requested layer masks.
+ * @rule_flags_parent1: Pointer to a collected_rule_flags struct
+ *     corresponding to the accumulated rule flags for parent1 to be read from
+ *     and filled as we traverse the path.
  * @log_request_parent1: Audit request to fill if the related access is denied.
  * @dentry_child1: Dentry to the initial child of the parent1 path.  This
  *     pointer must be NULL for non-refer actions (i.e. not link nor rename).
@@ -723,6 +726,7 @@ static void test_is_eacces_with_write(struct kunit *const test)
  *     the source.  Must be set to 0 when using a simple path request.
  * @layer_masks_parent2: Similar to @layer_masks_parent1 but for a refer
  *     action.  This must be NULL otherwise.
+ * @rule_flags_parent2: Similar to @rule_flags_parent1 but for parent2.
  * @log_request_parent2: Audit request to fill if the related access is denied.
  * @dentry_child2: Dentry to the initial child of the parent2 path.  This
  *     pointer is only set for RENAME_EXCHANGE actions and must be NULL
@@ -738,17 +742,19 @@ static void test_is_eacces_with_write(struct kunit *const test)
  * - true if the access request is granted;
  * - false otherwise.
  */
-static bool
-is_access_to_paths_allowed(const struct landlock_ruleset *const domain,
-			   const struct path *const path,
-			   const access_mask_t access_request_parent1,
-			   struct layer_access_masks *layer_masks_parent1,
-			   struct landlock_request *const log_request_parent1,
-			   struct dentry *const dentry_child1,
-			   const access_mask_t access_request_parent2,
-			   struct layer_access_masks *layer_masks_parent2,
-			   struct landlock_request *const log_request_parent2,
-			   struct dentry *const dentry_child2)
+static bool is_access_to_paths_allowed(
+	const struct landlock_ruleset *const domain,
+	const struct path *const path,
+	const access_mask_t access_request_parent1,
+	struct layer_access_masks *layer_masks_parent1,
+	struct collected_rule_flags *const rule_flags_parent1,
+	struct landlock_request *const log_request_parent1,
+	struct dentry *const dentry_child1,
+	const access_mask_t access_request_parent2,
+	struct layer_access_masks *layer_masks_parent2,
+	struct collected_rule_flags *const rule_flags_parent2,
+	struct landlock_request *const log_request_parent2,
+	struct dentry *const dentry_child2)
 {
 	bool allowed_parent1 = false, allowed_parent2 = false, is_dom_check,
 	     child1_is_directory = true, child2_is_directory = true;
@@ -796,20 +802,28 @@ is_access_to_paths_allowed(const struct landlock_ruleset *const domain,
 	}
 
 	if (unlikely(dentry_child1)) {
+		/*
+		 * Get the layer masks for the child dentries for use by domain
+		 * check later.  The rule_flags for child1 should have been
+		 * included in rule_flags_parent1 already (cf.
+		 * collect_domain_accesses), and is not relevant for domain check,
+		 * so we don't have to pass it to landlock_unmask_layers.
+		 */
 		if (landlock_init_layer_masks(domain, LANDLOCK_MASK_ACCESS_FS,
 					      &_layer_masks_child1,
 					      LANDLOCK_KEY_INODE))
 			landlock_unmask_layers(find_rule(domain, dentry_child1),
-					       &_layer_masks_child1);
+					       &_layer_masks_child1, NULL);
 		layer_masks_child1 = &_layer_masks_child1;
 		child1_is_directory = d_is_dir(dentry_child1);
 	}
 	if (unlikely(dentry_child2)) {
+		/* See above comment for why NULL is passed as rule_flags_masks. */
 		if (landlock_init_layer_masks(domain, LANDLOCK_MASK_ACCESS_FS,
 					      &_layer_masks_child2,
 					      LANDLOCK_KEY_INODE))
 			landlock_unmask_layers(find_rule(domain, dentry_child2),
-					       &_layer_masks_child2);
+					       &_layer_masks_child2, NULL);
 		layer_masks_child2 = &_layer_masks_child2;
 		child2_is_directory = d_is_dir(dentry_child2);
 	}
@@ -864,12 +878,14 @@ is_access_to_paths_allowed(const struct landlock_ruleset *const domain,
 		}
 
 		rule = find_rule(domain, walker_path.dentry);
-		allowed_parent1 =
-			allowed_parent1 ||
-			landlock_unmask_layers(rule, layer_masks_parent1);
-		allowed_parent2 =
-			allowed_parent2 ||
-			landlock_unmask_layers(rule, layer_masks_parent2);
+		allowed_parent1 = allowed_parent1 ||
+				  landlock_unmask_layers(rule,
+							 layer_masks_parent1,
+							 rule_flags_parent1);
+		allowed_parent2 = allowed_parent2 ||
+				  landlock_unmask_layers(rule,
+							 layer_masks_parent2,
+							 rule_flags_parent2);
 
 		/* Stops when a rule from each layer grants access. */
 		if (allowed_parent1 && allowed_parent2)
@@ -953,6 +969,7 @@ static int current_check_access_path(const struct path *const path,
 		landlock_get_applicable_subject(current_cred(), masks, NULL);
 	struct layer_access_masks layer_masks;
 	struct landlock_request request = {};
+	struct collected_rule_flags rule_flags = {};
 
 	if (!subject)
 		return 0;
@@ -961,8 +978,8 @@ static int current_check_access_path(const struct path *const path,
 						   access_request, &layer_masks,
 						   LANDLOCK_KEY_INODE);
 	if (is_access_to_paths_allowed(subject->domain, path, access_request,
-				       &layer_masks, &request, NULL, 0, NULL,
-				       NULL, NULL))
+				       &layer_masks, &rule_flags, &request,
+				       NULL, 0, NULL, NULL, NULL, NULL))
 		return 0;
 
 	landlock_log_denial(subject, &request);
@@ -1026,10 +1043,11 @@ static access_mask_t maybe_remove(const struct dentry *const dentry)
  * - true if all the domain access rights are allowed for @dir;
  * - false if the walk reached @mnt_root.
  */
-static bool collect_domain_accesses(const struct landlock_ruleset *const domain,
-				    const struct dentry *const mnt_root,
-				    struct dentry *dir,
-				    struct layer_access_masks *layer_masks_dom)
+static bool
+collect_domain_accesses(const struct landlock_ruleset *const domain,
+			const struct dentry *const mnt_root, struct dentry *dir,
+			struct layer_access_masks *layer_masks_dom,
+			struct collected_rule_flags *const rule_flags)
 {
 	bool ret = false;
 
@@ -1048,7 +1066,7 @@ static bool collect_domain_accesses(const struct landlock_ruleset *const domain,
 
 		/* Gets all layers allowing all domain accesses. */
 		if (landlock_unmask_layers(find_rule(domain, dir),
-					   layer_masks_dom)) {
+					   layer_masks_dom, rule_flags)) {
 			/*
 			 * Stops when all handled accesses are allowed by at
 			 * least one rule in each layer.
@@ -1139,6 +1157,8 @@ static int current_check_refer_path(struct dentry *const old_dentry,
 	struct layer_access_masks layer_masks_parent1 = {},
 				  layer_masks_parent2 = {};
 	struct landlock_request request1 = {}, request2 = {};
+	struct collected_rule_flags rule_flags_parent1 = {},
+				    rule_flags_parent2 = {};
 
 	if (!subject)
 		return 0;
@@ -1170,10 +1190,10 @@ static int current_check_refer_path(struct dentry *const old_dentry,
 			subject->domain,
 			access_request_parent1 | access_request_parent2,
 			&layer_masks_parent1, LANDLOCK_KEY_INODE);
-		if (is_access_to_paths_allowed(subject->domain, new_dir,
-					       access_request_parent1,
-					       &layer_masks_parent1, &request1,
-					       NULL, 0, NULL, NULL, NULL))
+		if (is_access_to_paths_allowed(
+			    subject->domain, new_dir, access_request_parent1,
+			    &layer_masks_parent1, &rule_flags_parent1,
+			    &request1, NULL, 0, NULL, NULL, NULL, NULL))
 			return 0;
 
 		landlock_log_denial(subject, &request1);
@@ -1199,11 +1219,12 @@ static int current_check_refer_path(struct dentry *const old_dentry,
 	/* new_dir->dentry is equal to new_dentry->d_parent */
 	allow_parent1 = collect_domain_accesses(subject->domain, mnt_dir.dentry,
 						old_parent,
-						&layer_masks_parent1);
+						&layer_masks_parent1,
+						&rule_flags_parent1);
 	allow_parent2 = collect_domain_accesses(subject->domain, mnt_dir.dentry,
 						new_dir->dentry,
-						&layer_masks_parent2);
-
+						&layer_masks_parent2,
+						&rule_flags_parent2);
 	if (allow_parent1 && allow_parent2)
 		return 0;
 
@@ -1215,8 +1236,9 @@ static int current_check_refer_path(struct dentry *const old_dentry,
 	 */
 	if (is_access_to_paths_allowed(
 		    subject->domain, &mnt_dir, access_request_parent1,
-		    &layer_masks_parent1, &request1, old_dentry,
-		    access_request_parent2, &layer_masks_parent2, &request2,
+		    &layer_masks_parent1, &rule_flags_parent1, &request1,
+		    old_dentry, access_request_parent2, &layer_masks_parent2,
+		    &rule_flags_parent2, &request2,
 		    exchange ? new_dentry : NULL))
 		return 0;
 
@@ -1619,6 +1641,7 @@ static int hook_file_open(struct file *const file)
 	const struct landlock_cred_security *const subject =
 		landlock_get_applicable_subject(file->f_cred, any_fs, NULL);
 	struct landlock_request request = {};
+	struct collected_rule_flags rule_flags = {};
 
 	if (!subject)
 		return 0;
@@ -1645,7 +1668,8 @@ static int hook_file_open(struct file *const file)
 		    landlock_init_layer_masks(subject->domain,
 					      full_access_request, &layer_masks,
 					      LANDLOCK_KEY_INODE),
-		    &layer_masks, &request, NULL, 0, NULL, NULL, NULL)) {
+		    &layer_masks, &rule_flags, &request, NULL, 0, NULL, NULL,
+		    NULL, NULL)) {
 		allowed_access = full_access_request;
 	} else {
 		/*
