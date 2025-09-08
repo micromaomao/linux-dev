@@ -623,7 +623,8 @@ landlock_find_rule(const struct landlock_ruleset *const ruleset,
 bool landlock_unmask_layers(const struct landlock_rule *const rule,
 			    const access_mask_t access_request,
 			    layer_mask_t (*const layer_masks)[],
-			    const size_t masks_array_size)
+			    const size_t masks_array_size,
+			    struct collected_rule_flags *const rule_flags)
 {
 	size_t layer_level;
 
@@ -649,6 +650,10 @@ bool landlock_unmask_layers(const struct landlock_rule *const rule,
 		const unsigned long access_req = access_request;
 		unsigned long access_bit;
 		bool is_empty;
+
+		/* Collect rule flags for each layer. */
+		if (rule_flags && layer->flags.quiet)
+			rule_flags->quiet_masks |= layer_bit;
 
 		/*
 		 * Records in @layer_masks which layer grants access to each requested
