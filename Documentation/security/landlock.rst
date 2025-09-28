@@ -110,6 +110,12 @@ Filesystem
 .. kernel-doc:: security/landlock/fs.h
     :identifiers:
 
+Process credential
+------------------
+
+.. kernel-doc:: security/landlock/cred.h
+    :identifiers:
+
 Ruleset and domain
 ------------------
 
@@ -126,6 +132,9 @@ The definition of a subject is implicit for a task sandboxing itself, which
 makes the reasoning much easier and helps avoid pitfalls.
 
 .. kernel-doc:: security/landlock/ruleset.h
+    :identifiers:
+
+.. kernel-doc:: security/landlock/domain.h
     :identifiers:
 
 Additional documentation
