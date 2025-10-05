@@ -64,10 +64,18 @@ struct landlock_file_security {
 	 */
 	deny_masks_t deny_masks;
 	/**
+	 * @quiet_optional_accesses: Stores which optional accesses are
+	 * covered by quiet rules within the layer referred to in deny_masks,
+	 * one access per bit.  Does not take into account whether the quiet
+	 * access bits are actually set in the layer's corresponding
+	 * landlock_hierarchy.
+	 */
+	u8 quiet_optional_accesses:2;
+	/**
 	 * @fown_layer: Layer level of @fown_subject->domain with
 	 * LANDLOCK_SCOPE_SIGNAL.
 	 */
-	u8 fown_layer;
+	u8 fown_layer:4;
 #endif /* CONFIG_AUDIT */
 
 	/**
@@ -80,13 +88,24 @@ struct landlock_file_security {
 	struct landlock_cred_security fown_subject;
 };
 
-#ifdef CONFIG_AUDIT
+static void build_check_file_security(void)
+{
+	const struct landlock_file_security file_sec = {
+		.quiet_optional_accesses = ~0,
+		.fown_layer = ~0,
+	};
 
-/* Makes sure all layers can be identified. */
-/* clang-format off */
-static_assert((typeof_member(struct landlock_file_security, fown_layer))~0 >=
-	      LANDLOCK_MAX_NUM_LAYERS);
-/* clang-format off */
+	/*
+	 * Make sure quiet_optional_accesses has enough bits to cover all
+	 * optional accesses
+	 */
+	BUILD_BUG_ON(__const_hweight8(file_sec.quiet_optional_accesses) <
+		     __const_hweight64(_LANDLOCK_ACCESS_FS_OPTIONAL));
+	/* Makes sure all layers can be identified. */
+	BUILD_BUG_ON(file_sec.fown_layer < LANDLOCK_MAX_NUM_LAYERS - 1);
+}
+
+#ifdef CONFIG_AUDIT
 
 #endif /* CONFIG_AUDIT */
 
@@ -107,6 +126,7 @@ struct landlock_superblock_security {
 static inline struct landlock_file_security *
 landlock_file(const struct file *const file)
 {
+	build_check_file_security();
 	return file->f_security + landlock_blob_sizes.lbs_file;
 }
 
