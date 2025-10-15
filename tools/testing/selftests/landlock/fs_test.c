@@ -6927,8 +6927,8 @@ static int matches_log_fs_extra(struct __test_metadata *const _metadata,
 		return -E2BIG;
 
 	/*
-	 * It is assume that absolute_path does not contain control characters nor
-	 * spaces, see audit_string_contains_control().
+	 * It is assumed that absolute_path does not contain control
+	 * characters nor spaces, see audit_string_contains_control().
 	 */
 	absolute_path = realpath(path, NULL);
 	if (!absolute_path)
@@ -7498,6 +7498,916 @@ TEST_F(audit_layout1, mount)
 	EXPECT_EQ(0, audit_count_records(self->audit_fd, &records));
 	EXPECT_EQ(0, records.access);
 	EXPECT_EQ(1, records.domain);
+}
+
+static bool debug_quiet_tests = false;
+
+FIXTURE(audit_quiet)
+{
+	struct audit_filter audit_filter;
+	int audit_fd;
+};
+
+FIXTURE_SETUP(audit_quiet)
+{
+	/* Prepare filesystem layout needed by variant rules. */
+	prepare_layout(_metadata);
+	create_layout1(_metadata);
+
+	set_cap(_metadata, CAP_AUDIT_CONTROL);
+	self->audit_fd = audit_init_with_exe_filter(&self->audit_filter);
+	EXPECT_LE(0, self->audit_fd);
+	clear_cap(_metadata, CAP_AUDIT_CONTROL);
+
+	if (getenv("DEBUG_QUIET_TESTS"))
+		debug_quiet_tests = true;
+}
+
+FIXTURE_TEARDOWN_PARENT(audit_quiet)
+{
+	/* Remove created layout. */
+	remove_layout1(_metadata);
+	cleanup_layout(_metadata);
+
+	set_cap(_metadata, CAP_AUDIT_CONTROL);
+	EXPECT_EQ(0, audit_cleanup(-1, NULL));
+	clear_cap(_metadata, CAP_AUDIT_CONTROL);
+}
+
+struct a_layer {
+	__u64 handled_access_fs;
+	__u64 quiet_access_fs;
+	const char *rule_path;
+	__u64 rule_access;
+	bool rule_quiet;
+	__u64 restrict_flags;
+};
+
+FIXTURE_VARIANT(audit_quiet)
+{
+	struct a_layer layer;
+	/* File to try open */
+	const char *target_file;
+	int open_mode;
+	bool expect_open_success;
+	/* If open fails, whether to expect an audit log for read/write */
+	bool audit_read_blocked;
+	bool audit_write_blocked;
+	/* If ftruncate() is expected to be allowed */
+	bool expect_truncate_success;
+	/* If ftruncate fails, whether to expect an audit log */
+	bool audit_truncate;
+};
+
+#define FS_R LANDLOCK_ACCESS_FS_READ_FILE
+#define FS_W LANDLOCK_ACCESS_FS_WRITE_FILE
+#define FS_TRUNC LANDLOCK_ACCESS_FS_TRUNCATE
+
+static int apply_a_layer(struct __test_metadata *const _metadata,
+			 const struct a_layer *l)
+{
+	struct landlock_ruleset_attr rs_attr = {
+		.handled_access_fs = l->handled_access_fs,
+		.quiet_access_fs = l->quiet_access_fs,
+	};
+	struct landlock_path_beneath_attr rule;
+	__u32 flags = 0;
+	int rs_fd, obj_fd, ret;
+
+	if (!l->rule_path)
+		return 0;
+
+	rs_fd = landlock_create_ruleset(&rs_attr, sizeof(rs_attr), 0);
+	ASSERT_LE(0, rs_fd);
+	obj_fd = open(l->rule_path, O_PATH | O_CLOEXEC);
+	ASSERT_LE(0, obj_fd)
+	{
+		TH_LOG("Failed to open \"%s\": %s", l->rule_path,
+		       strerror(errno));
+	};
+	rule.parent_fd = obj_fd;
+	rule.allowed_access = l->rule_access;
+	if (l->rule_quiet)
+		flags |= LANDLOCK_ADD_RULE_QUIET;
+
+	ret = landlock_add_rule(rs_fd, LANDLOCK_RULE_PATH_BENEATH, &rule,
+				flags);
+	/* Curly braces are necessary here */
+	if (rule.allowed_access || flags) {
+		ASSERT_EQ(0, ret);
+	} else {
+		ASSERT_EQ(-1, ret)
+		{
+			TH_LOG("Expected failure when adding empty rule to ruleset");
+		}
+		ASSERT_EQ(ENOMSG, errno);
+	}
+
+	ASSERT_EQ(0, close(obj_fd));
+	ASSERT_EQ(0, prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0));
+	ASSERT_EQ(0, landlock_restrict_self(rs_fd, l->restrict_flags))
+	{
+		TH_LOG("Failed to enforce ruleset: %s", strerror(errno));
+	}
+	ASSERT_EQ(0, close(rs_fd));
+	if (debug_quiet_tests)
+		TH_LOG("applied layer: handled=%s%s%s quiet=%s%s%s rule_path=%s rule_access=%s%s%s rule_quiet=%d",
+		       (l->handled_access_fs & FS_R) ? "r" : "",
+		       (l->handled_access_fs & FS_W) ? "w" : "",
+		       (l->handled_access_fs & FS_TRUNC) ? "t" : "",
+		       (l->quiet_access_fs & FS_R) ? "r" : "",
+		       (l->quiet_access_fs & FS_W) ? "w" : "",
+		       (l->quiet_access_fs & FS_TRUNC) ? "t" : "", l->rule_path,
+		       (l->rule_access & FS_R) ? "r" : "",
+		       (l->rule_access & FS_W) ? "w" : "",
+		       (l->rule_access & FS_TRUNC) ? "t" : "", l->rule_quiet);
+	return 0;
+}
+
+void audit_quiet_open_truncate_test_body(
+	struct __test_metadata *const _metadata,
+	FIXTURE_DATA(audit_quiet) * self,
+	const FIXTURE_VARIANT(audit_quiet) * variant)
+{
+	struct audit_records records = {};
+	int fd = -1;
+	int open_mode = variant->open_mode & (O_RDONLY | O_WRONLY | O_RDWR);
+	int ret;
+	bool expect_audit;
+	const char *blocker;
+
+	EXPECT_TRUE(open_mode == O_RDONLY || open_mode == O_WRONLY ||
+		    open_mode == O_RDWR);
+
+	if (variant->expect_open_success) {
+		EXPECT_FALSE(variant->audit_read_blocked);
+		EXPECT_FALSE(variant->audit_write_blocked);
+	}
+	if (variant->expect_truncate_success)
+		EXPECT_TRUE(variant->expect_open_success &&
+			    !variant->audit_truncate);
+
+	if (debug_quiet_tests)
+		TH_LOG("Try open \"%s\" with %s%s", variant->target_file,
+		       open_mode != O_WRONLY ? "r" : "",
+		       open_mode != O_RDONLY ? "w" : "");
+
+	fd = openat(AT_FDCWD, variant->target_file,
+		    variant->open_mode | O_CLOEXEC);
+	if (variant->expect_open_success) {
+		ASSERT_LE(0, fd)
+		{
+			TH_LOG("Failed to open \"%s\": %s",
+			       variant->target_file, strerror(errno));
+		};
+	} else {
+		ASSERT_EQ(-1, fd);
+		ASSERT_EQ(EACCES, errno);
+	}
+
+	expect_audit = true;
+	if (variant->audit_read_blocked && variant->audit_write_blocked) {
+		blocker = "fs\\.write_file,fs\\.read_file";
+	} else if (variant->audit_read_blocked) {
+		blocker = "fs\\.read_file";
+	} else if (variant->audit_write_blocked) {
+		blocker = "fs\\.write_file";
+	} else {
+		expect_audit = false;
+	}
+	if (expect_audit)
+		ASSERT_EQ(0, matches_log_fs(_metadata, self->audit_fd, blocker,
+					    variant->target_file));
+
+	/* No other logs */
+	audit_count_records(self->audit_fd, &records);
+	ASSERT_EQ(0, records.access);
+	ASSERT_EQ(expect_audit ? 1 : 0, records.domain);
+
+	if (variant->expect_open_success && fd >= 0) {
+		ret = ftruncate(fd, 0);
+		if (variant->expect_truncate_success) {
+			ASSERT_EQ(0, ret);
+		} else {
+			ASSERT_EQ(-1, ret);
+			if (open_mode == O_RDWR || open_mode == O_WRONLY)
+				ASSERT_EQ(EACCES, errno);
+		}
+
+		if (variant->audit_truncate)
+			ASSERT_EQ(0, matches_log_fs(_metadata, self->audit_fd,
+						    "fs\\.truncate",
+						    variant->target_file));
+
+		/* No other logs */
+		audit_count_records(self->audit_fd, &records);
+		ASSERT_EQ(0, records.access);
+		ASSERT_EQ(variant->audit_truncate ? 1 : 0, records.domain);
+		ASSERT_EQ(0, close(fd));
+	}
+}
+
+TEST_F(audit_quiet, open_truncate)
+{
+	ASSERT_EQ(0, apply_a_layer(_metadata, &variant->layer));
+
+	audit_quiet_open_truncate_test_body(_metadata, self, variant);
+}
+
+FIXTURE_VARIANT_ADD(audit_quiet, quiet) {
+	.layer = {
+		.handled_access_fs = FS_R | FS_W | FS_TRUNC,
+		.quiet_access_fs = FS_R,
+		.rule_path = dir_s1d1,
+		.rule_access = 0,
+		.rule_quiet = true,
+	},
+	.target_file = file1_s1d1,
+	.open_mode = O_RDONLY,
+};
+
+FIXTURE_VARIANT_ADD(audit_quiet, not_quiet) {
+	.layer = {
+		.handled_access_fs = FS_R | FS_W | FS_TRUNC,
+		.quiet_access_fs = FS_R,
+		.rule_path = dir_s1d1,
+		.rule_access = 0,
+		.rule_quiet = false,
+	},
+	.target_file = file1_s1d1,
+	.open_mode = O_RDONLY,
+	.audit_read_blocked = true,
+};
+
+FIXTURE_VARIANT_ADD(audit_quiet, allow) {
+	.layer = {
+		.handled_access_fs = FS_R | FS_W | FS_TRUNC,
+		.quiet_access_fs = FS_R | FS_W | FS_TRUNC,
+		.rule_path = dir_s1d1,
+		.rule_access = FS_R | FS_W | FS_TRUNC,
+		.rule_quiet = false,
+	},
+	.target_file = file1_s1d1,
+	.open_mode = O_RDWR,
+	.expect_open_success = true,
+	.expect_truncate_success = true,
+};
+
+FIXTURE_VARIANT_ADD(audit_quiet, allow_quiet) {
+	.layer = {
+		.handled_access_fs = FS_R | FS_W | FS_TRUNC,
+		.quiet_access_fs = FS_R | FS_W | FS_TRUNC,
+		.rule_path = dir_s1d1,
+		.rule_access = FS_R | FS_W | FS_TRUNC,
+		.rule_quiet = true,
+	},
+	.target_file = file1_s1d1,
+	.open_mode = O_RDWR,
+	.expect_open_success = true,
+	.expect_truncate_success = true,
+};
+
+FIXTURE_VARIANT_ADD(audit_quiet, quiet_file) {
+	.layer = {
+		.handled_access_fs = FS_R | FS_W | FS_TRUNC,
+		.quiet_access_fs = FS_R,
+		.rule_path = file1_s1d1,
+		.rule_access = 0,
+		.rule_quiet = true,
+	},
+	.target_file = file1_s1d1,
+	.open_mode = O_RDONLY,
+};
+
+FIXTURE_VARIANT_ADD(audit_quiet, not_quiet_access_mismatch) {
+	.layer = {
+		.handled_access_fs = FS_R | FS_W | FS_TRUNC,
+		.quiet_access_fs = FS_R,
+		.rule_path = dir_s1d1,
+		.rule_access = 0,
+		.rule_quiet = true,
+	},
+	.target_file = file1_s1d1,
+	.open_mode = O_WRONLY,
+	.audit_write_blocked = true,
+};
+
+FIXTURE_VARIANT_ADD(audit_quiet, not_quiet_wrong_dir) {
+	.layer = {
+		.handled_access_fs = FS_R | FS_W | FS_TRUNC,
+		.quiet_access_fs = FS_R,
+		.rule_path = dir_s2d1,
+		.rule_access = 0,
+		.rule_quiet = true,
+	},
+	.target_file = file1_s1d1,
+	.open_mode = O_RDONLY,
+	.audit_read_blocked = true,
+};
+
+FIXTURE_VARIANT_ADD(audit_quiet, not_quiet_wrong_file) {
+	.layer = {
+		.handled_access_fs = FS_R | FS_W | FS_TRUNC,
+		.quiet_access_fs = FS_R,
+		.rule_path = file2_s1d1,
+		.rule_access = 0,
+		.rule_quiet = true,
+	},
+	.target_file = file1_s1d1,
+	.open_mode = O_RDONLY,
+	.audit_read_blocked = true,
+};
+
+FIXTURE_VARIANT_ADD(audit_quiet, not_all_access_quiet) {
+	.layer = {
+		.handled_access_fs = FS_R | FS_W | FS_TRUNC,
+		.quiet_access_fs = FS_R,
+		.rule_path = dir_s1d1,
+		.rule_access = 0,
+		.rule_quiet = true,
+	},
+	.target_file = file1_s1d1,
+	.open_mode = O_RDWR,
+	/*
+	 * Quiet flag only takes effect if all blocked access bits are
+	 * quieted, otherwise audit log emitted as normal (with all blockers)
+	 */
+	.audit_read_blocked = true,
+	.audit_write_blocked = true,
+};
+
+/*
+ * The above case, but this time, read is allowed, so we only see
+ * blockers=write
+ */
+FIXTURE_VARIANT_ADD(audit_quiet, not_quiet_access_mismatch_has_allowed_access) {
+	.layer = {
+		.handled_access_fs = FS_R | FS_W | FS_TRUNC,
+		.quiet_access_fs = FS_R,
+		.rule_path = dir_s1d1,
+		.rule_access = FS_R,
+		.rule_quiet = true,
+	},
+	.target_file = file1_s1d1,
+	.open_mode = O_RDWR,
+	.audit_read_blocked = false,
+	.audit_write_blocked = true,
+};
+
+FIXTURE_VARIANT_ADD(audit_quiet, quiet_partial_denial) {
+	.layer = {
+		.handled_access_fs = FS_R | FS_W | FS_TRUNC,
+		.quiet_access_fs = FS_W,
+		.rule_path = dir_s1d1,
+		.rule_access = FS_R,
+		.rule_quiet = true,
+	},
+	.target_file = file1_s1d1,
+	.open_mode = O_RDWR,
+	/* Read allowed, write quieted, so no audit */
+};
+
+FIXTURE_VARIANT_ADD(audit_quiet, not_quiet_multiple_blockers) {
+	.layer = {
+		.handled_access_fs = FS_R | FS_W | FS_TRUNC,
+		.quiet_access_fs = FS_TRUNC,
+		.rule_path = dir_s1d1,
+		.rule_access = 0,
+		.rule_quiet = true,
+	},
+	.target_file = file1_s1d1,
+	.open_mode = O_RDWR,
+	.audit_read_blocked = true,
+	.audit_write_blocked = true,
+};
+
+FIXTURE_VARIANT_ADD(audit_quiet, quiet_complete_denial) {
+	.layer = {
+		.handled_access_fs = FS_R | FS_W | FS_TRUNC,
+		.quiet_access_fs = FS_R | FS_W,
+		.rule_path = dir_s1d1,
+		.rule_access = 0,
+		.rule_quiet = true,
+	},
+	.target_file = file1_s1d1,
+	.open_mode = O_RDWR,
+};
+
+FIXTURE_VARIANT_ADD(audit_quiet, not_quiet_truncate) {
+	.layer = {
+		.handled_access_fs = FS_R | FS_W | FS_TRUNC,
+		.quiet_access_fs = FS_R,
+		.rule_path = dir_s1d1,
+		.rule_access = FS_R | FS_W,
+		.rule_quiet = true,
+	},
+	.target_file = file1_s1d1,
+	.open_mode = O_RDWR,
+	.expect_open_success = true,
+	.expect_truncate_success = false,
+	.audit_truncate = true,
+};
+
+FIXTURE_VARIANT_ADD(audit_quiet, quiet_truncate_1) {
+	.layer = {
+		.handled_access_fs = FS_R | FS_W | FS_TRUNC,
+		.quiet_access_fs = FS_TRUNC,
+		.rule_path = dir_s1d1,
+		.rule_access = FS_R | FS_W,
+		.rule_quiet = true,
+	},
+	.target_file = file1_s1d1,
+	.open_mode = O_RDWR,
+	.expect_open_success = true,
+	.expect_truncate_success = false,
+	.audit_truncate = false,
+};
+
+FIXTURE_VARIANT_ADD(audit_quiet, quiet_truncate_2) {
+	.layer = {
+		.handled_access_fs = FS_R | FS_W | FS_TRUNC,
+		.quiet_access_fs = FS_R | FS_TRUNC,
+		.rule_path = dir_s1d1,
+		.rule_access = FS_R | FS_W,
+		.rule_quiet = true,
+	},
+	.target_file = file1_s1d1,
+	.open_mode = O_RDWR,
+	.expect_open_success = true,
+	.expect_truncate_success = false,
+	.audit_truncate = false,
+};
+
+/*
+ * The following TEST_F extend the above test cases to test two layers,
+ * with the second layer having varying configurations.
+ */
+
+/* An extra allow all layer does not change any behaviour */
+TEST_F(audit_quiet, open_truncate_extra_allow_all_layer)
+{
+	struct a_layer layer_2 = {
+		.handled_access_fs = FS_R | FS_W | FS_TRUNC,
+		.quiet_access_fs = 0,
+		.rule_path = TMP_DIR,
+		.rule_access = FS_R | FS_W | FS_TRUNC,
+		.rule_quiet = false,
+	};
+
+	ASSERT_EQ(0, apply_a_layer(_metadata, &variant->layer));
+	ASSERT_EQ(0, apply_a_layer(_metadata, &layer_2));
+
+	audit_quiet_open_truncate_test_body(_metadata, self, variant);
+}
+
+/* An extra outer allow all layer also does not change anything. */
+TEST_F(audit_quiet, open_truncate_outer_allow_all_layer)
+{
+	struct a_layer layer_0 = {
+		.handled_access_fs = FS_R | FS_W | FS_TRUNC,
+		.quiet_access_fs = 0,
+		.rule_path = TMP_DIR,
+		.rule_access = FS_R | FS_W | FS_TRUNC,
+		.rule_quiet = false,
+	};
+
+	ASSERT_EQ(0, apply_a_layer(_metadata, &layer_0));
+	ASSERT_EQ(0, apply_a_layer(_metadata, &variant->layer));
+
+	audit_quiet_open_truncate_test_body(_metadata, self, variant);
+}
+
+/*
+ * An extra allow all layer with quiet bit covering all files also does
+ * not change any behaviour, since the audit behaviour depends on the
+ * youngest layer which denied the request.
+ */
+TEST_F(audit_quiet, open_truncate_extra_allow_all_quiet_layer)
+{
+	struct a_layer layer_2 = {
+		.handled_access_fs = FS_R | FS_W | FS_TRUNC,
+		.quiet_access_fs = FS_R | FS_W | FS_TRUNC,
+		.rule_path = TMP_DIR,
+		.rule_access = FS_R | FS_W | FS_TRUNC,
+		.rule_quiet = true,
+	};
+
+	ASSERT_EQ(0, apply_a_layer(_metadata, &variant->layer));
+	ASSERT_EQ(0, apply_a_layer(_metadata, &layer_2));
+
+	audit_quiet_open_truncate_test_body(_metadata, self, variant);
+}
+
+/* An extra outer allow all layer also does not change anything. */
+TEST_F(audit_quiet, open_truncate_outer_allow_all_quiet_layer)
+{
+	struct a_layer layer_0 = {
+		.handled_access_fs = FS_R | FS_W | FS_TRUNC,
+		.quiet_access_fs = FS_R | FS_W | FS_TRUNC,
+		.rule_path = TMP_DIR,
+		.rule_access = FS_R | FS_W | FS_TRUNC,
+		.rule_quiet = true,
+	};
+
+	ASSERT_EQ(0, apply_a_layer(_metadata, &layer_0));
+	ASSERT_EQ(0, apply_a_layer(_metadata, &variant->layer));
+
+	audit_quiet_open_truncate_test_body(_metadata, self, variant);
+}
+
+/* Same for custom restrict self flags */
+TEST_F(audit_quiet, open_truncate_extra_allow_all_no_log_layer)
+{
+	struct a_layer layer_2 = {
+		.handled_access_fs = FS_R | FS_W | FS_TRUNC,
+		.quiet_access_fs = FS_R | FS_W | FS_TRUNC,
+		.rule_path = TMP_DIR,
+		.rule_access = FS_R | FS_W | FS_TRUNC,
+		.rule_quiet = true,
+		.restrict_flags = LANDLOCK_RESTRICT_SELF_LOG_SAME_EXEC_OFF,
+	};
+
+	ASSERT_EQ(0, apply_a_layer(_metadata, &variant->layer));
+	ASSERT_EQ(0, apply_a_layer(_metadata, &layer_2));
+
+	audit_quiet_open_truncate_test_body(_metadata, self, variant);
+}
+
+/* Same for custom restrict self flags */
+TEST_F(audit_quiet, open_truncate_outer_allow_all_no_log_layer)
+{
+	struct a_layer layer_0 = {
+		.handled_access_fs = FS_R | FS_W | FS_TRUNC,
+		.quiet_access_fs = FS_R | FS_W | FS_TRUNC,
+		.rule_path = TMP_DIR,
+		.rule_access = FS_R | FS_W | FS_TRUNC,
+		.rule_quiet = true,
+		.restrict_flags = LANDLOCK_RESTRICT_SELF_LOG_SAME_EXEC_OFF,
+	};
+
+	ASSERT_EQ(0, apply_a_layer(_metadata, &layer_0));
+	ASSERT_EQ(0, apply_a_layer(_metadata, &variant->layer));
+
+	audit_quiet_open_truncate_test_body(_metadata, self, variant);
+}
+
+/*
+ * However, LANDLOCK_RESTRICT_SELF_LOG_SUBDOMAINS_OFF would prevent audit,
+ * regardless of children layer's quiet flags
+ */
+TEST_F(audit_quiet, open_truncate_top_allow_all_disable_subdomain_logging)
+{
+	struct a_layer layer_0 = {
+		.handled_access_fs = FS_R | FS_W | FS_TRUNC,
+		.rule_path = TMP_DIR,
+		.rule_access = FS_R | FS_W | FS_TRUNC,
+		.restrict_flags = LANDLOCK_RESTRICT_SELF_LOG_SUBDOMAINS_OFF,
+	};
+	FIXTURE_VARIANT(audit_quiet) variant_2 = {
+		.target_file = variant->target_file,
+		.open_mode = variant->open_mode,
+		.expect_open_success = variant->expect_open_success,
+		.expect_truncate_success = variant->expect_truncate_success,
+	};
+
+	ASSERT_EQ(0, apply_a_layer(_metadata, &layer_0));
+	ASSERT_EQ(0, apply_a_layer(_metadata, &variant->layer));
+
+	audit_quiet_open_truncate_test_body(_metadata, self, &variant_2);
+}
+
+/*
+ * An extra outer layer that does not handle any access tested does not
+ * change anything.
+ */
+TEST_F(audit_quiet, open_truncate_outer_unrelated_layer)
+{
+	struct a_layer layer_0 = {
+		.handled_access_fs = LANDLOCK_ACCESS_FS_MAKE_FIFO,
+		.quiet_access_fs = LANDLOCK_ACCESS_FS_MAKE_FIFO,
+		.rule_path = TMP_DIR,
+		.rule_access = 0,
+		.rule_quiet = true,
+	};
+
+	ASSERT_EQ(0, apply_a_layer(_metadata, &layer_0));
+	ASSERT_EQ(0, apply_a_layer(_metadata, &variant->layer));
+
+	audit_quiet_open_truncate_test_body(_metadata, self, variant);
+}
+
+/* 15 useless outer layers should not change anything */
+TEST_F(audit_quiet, open_truncate_15_outer_layer)
+{
+	struct a_layer layer_outer = {
+		.handled_access_fs = FS_R | FS_W | FS_TRUNC,
+		.quiet_access_fs = FS_R | FS_W | FS_TRUNC,
+		.rule_path = TMP_DIR,
+		.rule_access = FS_R | FS_W | FS_TRUNC,
+		.rule_quiet = false,
+	};
+	int i;
+
+	for (i = 0; i < LANDLOCK_MAX_NUM_LAYERS - 1; i++)
+		ASSERT_EQ(0, apply_a_layer(_metadata, &layer_outer));
+
+	ASSERT_EQ(0, apply_a_layer(_metadata, &variant->layer));
+
+	audit_quiet_open_truncate_test_body(_metadata, self, variant);
+}
+
+/*
+ * An inner layer that denies and quiets everything should result in no
+ * logs
+ */
+TEST_F(audit_quiet, open_truncate_extra_deny_all_quiet_layer)
+{
+	struct a_layer layer_2 = {
+		.handled_access_fs = FS_R | FS_W | FS_TRUNC,
+		.quiet_access_fs = FS_R | FS_W | FS_TRUNC,
+		.rule_path = TMP_DIR,
+		.rule_access = 0,
+		.rule_quiet = true,
+	};
+	FIXTURE_VARIANT(audit_quiet)
+	variant_2 = {
+		.target_file = variant->target_file,
+		.open_mode = variant->open_mode,
+		.expect_open_success = false,
+		.expect_truncate_success = false,
+	};
+
+	ASSERT_EQ(0, apply_a_layer(_metadata, &variant->layer));
+	ASSERT_EQ(0, apply_a_layer(_metadata, &layer_2));
+
+	audit_quiet_open_truncate_test_body(_metadata, self, &variant_2);
+}
+
+/*
+ * For an outer layer that denies everything with quiet, two cases exists:
+ *
+ * - If the inner layer allowed the access, the outer layer decides
+ *   whether the denial is quieted or not, therefore we would not log.
+ *
+ * - If the inner layer denied the access, the inner layer decides
+ *   whether the denial is quieted or not, and this does not depend on the
+ *   outer layer.
+ */
+TEST_F(audit_quiet, open_truncate_outer_deny_all_quiet_layer)
+{
+	struct a_layer layer_0 = {
+		.handled_access_fs = FS_R | FS_W | FS_TRUNC,
+		.quiet_access_fs = FS_R | FS_W | FS_TRUNC,
+		.rule_path = TMP_DIR,
+		.rule_access = 0,
+		.rule_quiet = true,
+	};
+	FIXTURE_VARIANT(audit_quiet)
+	variant_2 = {
+		.target_file = variant->target_file,
+		.open_mode = variant->open_mode,
+
+		/* We denied everything, open should always fail */
+		.expect_open_success = false,
+		/*
+		 * If inner layer denies it, variant->expect_open_success would be
+		 * false, and therefore we delegate to the inner layer.  Otherwise
+		 * the denied access is not logged.
+		 */
+		.audit_read_blocked = variant->expect_open_success ?
+					      false :
+					      variant->audit_read_blocked,
+		.audit_write_blocked = variant->expect_open_success ?
+					       false :
+					       variant->audit_write_blocked,
+	};
+
+	ASSERT_EQ(0, apply_a_layer(_metadata, &layer_0));
+	ASSERT_EQ(0, apply_a_layer(_metadata, &variant->layer));
+
+	audit_quiet_open_truncate_test_body(_metadata, self, &variant_2);
+}
+
+/*
+ * Denying and quieting an unrelated file should not change auditing
+ * behaviour for our test target
+ */
+TEST_F(audit_quiet, open_truncate_extra_deny_unrelated_quiet_layer)
+{
+	struct landlock_ruleset_attr rs_attr_2 = {
+		.handled_access_fs = FS_R | FS_W | FS_TRUNC,
+		.quiet_access_fs = FS_R | FS_W | FS_TRUNC,
+	};
+	struct landlock_path_beneath_attr rule_2 = {
+		.parent_fd = -1,
+		.allowed_access = 0,
+	};
+	int rs_fd, obj_fd, ret;
+
+	ASSERT_EQ(0, apply_a_layer(_metadata, &variant->layer));
+
+	rs_fd = landlock_create_ruleset(&rs_attr_2, sizeof(rs_attr_2), 0);
+	ASSERT_LE(0, rs_fd);
+
+	/* Add unrelated quiet rule */
+	obj_fd = open(dir_s3d1, O_PATH | O_CLOEXEC);
+	ASSERT_LE(0, obj_fd)
+	{
+		TH_LOG("Failed to open \"%s\": %s", dir_s3d1, strerror(errno));
+	}
+	rule_2.parent_fd = obj_fd;
+	ret = landlock_add_rule(rs_fd, LANDLOCK_RULE_PATH_BENEATH, &rule_2,
+				LANDLOCK_ADD_RULE_QUIET);
+	ASSERT_EQ(0, ret);
+	ASSERT_EQ(0, close(obj_fd));
+
+	/* Add allow for our test targets */
+	obj_fd = open(dir_s1d1, O_PATH | O_CLOEXEC);
+	ASSERT_LE(0, obj_fd)
+	{
+		TH_LOG("Failed to open \"%s\": %s", dir_s1d1, strerror(errno));
+	}
+	rule_2.parent_fd = obj_fd;
+	rule_2.allowed_access = FS_R | FS_W | FS_TRUNC;
+	ret = landlock_add_rule(rs_fd, LANDLOCK_RULE_PATH_BENEATH, &rule_2, 0);
+	ASSERT_EQ(0, ret);
+	ASSERT_EQ(0, close(obj_fd));
+
+	obj_fd = open(dir_s2d1, O_PATH | O_CLOEXEC);
+	ASSERT_LE(0, obj_fd)
+	{
+		TH_LOG("Failed to open \"%s\": %s", dir_s2d1, strerror(errno));
+	}
+	rule_2.parent_fd = obj_fd;
+	ret = landlock_add_rule(rs_fd, LANDLOCK_RULE_PATH_BENEATH, &rule_2, 0);
+	ASSERT_EQ(0, ret);
+	ASSERT_EQ(0, close(obj_fd));
+
+	ASSERT_EQ(0, prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0));
+	ASSERT_EQ(0, landlock_restrict_self(rs_fd, 0))
+	{
+		TH_LOG("Failed to enforce ruleset: %s", strerror(errno));
+	}
+	ASSERT_EQ(0, close(rs_fd));
+
+	audit_quiet_open_truncate_test_body(_metadata, self, variant);
+}
+
+/*
+ * An inner layer that denies everything without quiet should produce logs
+ * for all access
+ */
+TEST_F(audit_quiet, open_truncate_extra_deny_all_not_quiet_layer)
+{
+	struct a_layer layer_2 = {
+		.handled_access_fs = FS_R | FS_W | FS_TRUNC,
+		.quiet_access_fs = FS_R | FS_W | FS_TRUNC,
+		.rule_path = TMP_DIR,
+		.rule_access = 0,
+		.rule_quiet = false,
+	};
+	FIXTURE_VARIANT(audit_quiet)
+	variant_2 = {
+		.target_file = variant->target_file,
+		.open_mode = variant->open_mode,
+
+		/* We denied everything, open should always fail */
+		.expect_open_success = false,
+		/* Audit should always happen as long as open request contains read */
+		.audit_read_blocked = variant->open_mode != O_WRONLY,
+		/* Audit should always happen as long as open request contains write */
+		.audit_write_blocked = variant->open_mode != O_RDONLY,
+	};
+
+	ASSERT_EQ(0, apply_a_layer(_metadata, &variant->layer));
+	ASSERT_EQ(0, apply_a_layer(_metadata, &layer_2));
+
+	audit_quiet_open_truncate_test_body(_metadata, self, &variant_2);
+}
+
+/*
+ * For an outer layer that denies everything without quiet, two cases
+ * exists:
+ *
+ * - If the inner layer allowed the access, the outer layer decides
+ *   whether the denial is quieted or not, therefore we would log.
+ *
+ * - If the inner layer denied the access, the inner layer decides
+ *   whether the denial is quieted or not, and this does not depend on the
+ *   outer layer.
+ */
+TEST_F(audit_quiet, open_truncate_outer_deny_all_not_quiet_layer)
+{
+	struct a_layer layer_0 = {
+		.handled_access_fs = FS_R | FS_W | FS_TRUNC,
+		.quiet_access_fs = FS_R | FS_W | FS_TRUNC,
+		.rule_path = TMP_DIR,
+		.rule_access = 0,
+		.rule_quiet = false,
+	};
+	FIXTURE_VARIANT(audit_quiet)
+	variant_2 = {
+		.target_file = variant->target_file,
+		.open_mode = variant->open_mode,
+
+		/* We denied everything, open should always fail */
+		.expect_open_success = false,
+		/*
+		 * If inner layer denies it, variant->expect_open_success would be
+		 * false, and therefore we delegate to the inner layer.  Otherwise
+		 * the denied access is logged.
+		 */
+		.audit_read_blocked = variant->expect_open_success ?
+					      (variant->open_mode != O_WRONLY) :
+					      variant->audit_read_blocked,
+		.audit_write_blocked =
+			variant->expect_open_success ?
+				(variant->open_mode != O_RDONLY) :
+				variant->audit_write_blocked,
+	};
+
+	ASSERT_EQ(0, apply_a_layer(_metadata, &layer_0));
+	ASSERT_EQ(0, apply_a_layer(_metadata, &variant->layer));
+
+	audit_quiet_open_truncate_test_body(_metadata, self, &variant_2);
+}
+
+/*
+ * A non-quiet inner layer that denies reads should cause any open request
+ * containing read to fail and audit.
+ */
+TEST_F(audit_quiet, open_truncate_extra_deny_read_not_quiet_layer)
+{
+	struct a_layer layer_2 = {
+		.handled_access_fs = FS_R | FS_W | FS_TRUNC,
+		.quiet_access_fs = FS_R | FS_W | FS_TRUNC,
+		.rule_path = TMP_DIR,
+		.rule_access = FS_W | FS_TRUNC,
+		.rule_quiet = false,
+	};
+	bool test_read = variant->open_mode != O_WRONLY;
+	FIXTURE_VARIANT(audit_quiet)
+	variant_2 = {
+		.target_file = variant->target_file,
+		.open_mode = variant->open_mode,
+		/* We denied read, so it will only succeed if it is write only */
+		.expect_open_success = !test_read &&
+				       variant->expect_open_success,
+		/* Otherwise we expect audit due to the inner layer being not quiet */
+		.audit_read_blocked = test_read,
+		/*
+		 * If the test open needs read, it will be denied by the inner
+		 * layer, but the inner layer only denies read, not write, so
+		 * write should not appear in the blockers list.
+		 *
+		 * Otherwise whether write is audited depends on the original
+		 * outer layer.
+		 */
+		.audit_write_blocked = !test_read &&
+				       variant->audit_write_blocked,
+	};
+	/* We only do truncate if the open succeeded */
+	if (variant_2.expect_open_success) {
+		variant_2.expect_truncate_success =
+			variant->expect_truncate_success;
+		variant_2.audit_truncate = variant->audit_truncate;
+	}
+
+	ASSERT_EQ(0, apply_a_layer(_metadata, &variant->layer));
+	ASSERT_EQ(0, apply_a_layer(_metadata, &layer_2));
+
+	audit_quiet_open_truncate_test_body(_metadata, self, &variant_2);
+}
+
+TEST_F(audit_quiet, open_truncate_extra_deny_write_not_quiet_layer)
+{
+	struct a_layer layer_2 = {
+		.handled_access_fs = FS_R | FS_W | FS_TRUNC,
+		.quiet_access_fs = FS_R | FS_W | FS_TRUNC,
+		.rule_path = TMP_DIR,
+		.rule_access = FS_R,
+		.rule_quiet = false,
+	};
+	FIXTURE_VARIANT(audit_quiet)
+	variant_2 = {
+		.target_file = variant->target_file,
+		.open_mode = variant->open_mode,
+		.expect_open_success = variant->expect_open_success &&
+				       (variant->open_mode == O_RDONLY),
+		.audit_read_blocked = variant->audit_read_blocked &&
+				      (variant->open_mode == O_RDONLY),
+		.audit_write_blocked = variant->open_mode != O_RDONLY,
+		.expect_truncate_success = false,
+	};
+	if (variant_2.expect_open_success) {
+		variant_2.expect_truncate_success = false;
+		variant_2.audit_truncate = true;
+	}
+
+	ASSERT_EQ(0, apply_a_layer(_metadata, &variant->layer));
+	ASSERT_EQ(0, apply_a_layer(_metadata, &layer_2));
+
+	audit_quiet_open_truncate_test_body(_metadata, self, &variant_2);
 }
 
 TEST_HARNESS_MAIN
