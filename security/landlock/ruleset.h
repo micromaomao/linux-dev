@@ -59,6 +59,11 @@ struct collected_rule_flags {
 };
 
 /**
+ * no_rule_flags - Convenience constant for an empty collected_rule_flags.
+ */
+static const struct collected_rule_flags no_rule_flags = {};
+
+/**
  * union landlock_key - Key of a ruleset's red-black tree
  */
 union landlock_key {
