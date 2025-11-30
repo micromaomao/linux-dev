@@ -478,8 +478,8 @@ SYSCALL_DEFINE4(landlock_add_rule, const int, ruleset_fd,
 SYSCALL_DEFINE2(landlock_restrict_self, const int, ruleset_fd, const __u32,
 		flags)
 {
-	struct landlock_ruleset *new_dom,
-		*ruleset __free(landlock_put_ruleset) = NULL;
+	struct landlock_domain *new_dom;
+	struct landlock_ruleset *ruleset __free(landlock_put_ruleset) = NULL;
 	struct cred *new_cred;
 	struct landlock_cred_security *new_llcred;
 	bool __maybe_unused log_same_exec, log_new_exec, log_subdomains,
@@ -545,7 +545,7 @@ SYSCALL_DEFINE2(landlock_restrict_self, const int, ruleset_fd, const __u32,
 	 * There is no possible race condition while copying and manipulating
 	 * the current credentials because they are dedicated per thread.
 	 */
-	new_dom = landlock_merge_ruleset(new_llcred->domain, ruleset);
+	new_dom = landlock_domain_merge_ruleset(new_llcred->domain, ruleset);
 	if (IS_ERR(new_dom)) {
 		abort_creds(new_cred);
 		return PTR_ERR(new_dom);
@@ -559,7 +559,7 @@ SYSCALL_DEFINE2(landlock_restrict_self, const int, ruleset_fd, const __u32,
 #endif /* CONFIG_AUDIT */
 
 	/* Replaces the old (prepared) domain. */
-	landlock_put_ruleset(new_llcred->domain);
+	landlock_put_domain(new_llcred->domain);
 	new_llcred->domain = new_dom;
 
 #ifdef CONFIG_AUDIT

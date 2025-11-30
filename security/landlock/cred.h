@@ -17,7 +17,7 @@
 
 #include "access.h"
 #include "limits.h"
-#include "ruleset.h"
+#include "domain.h"
 #include "setup.h"
 
 /**
@@ -29,9 +29,9 @@
  */
 struct landlock_cred_security {
 	/**
-	 * @domain: Immutable ruleset enforced on a task.
+	 * @domain: Immutable domain enforced on a task.
 	 */
-	struct landlock_ruleset *domain;
+	struct landlock_domain *domain;
 
 #ifdef CONFIG_AUDIT
 	/**
@@ -65,7 +65,7 @@ landlock_cred(const struct cred *cred)
 	return cred->security + landlock_blob_sizes.lbs_cred;
 }
 
-static inline struct landlock_ruleset *landlock_get_current_domain(void)
+static inline struct landlock_domain *landlock_get_current_domain(void)
 {
 	return landlock_cred(current_cred())->domain;
 }
@@ -73,7 +73,7 @@ static inline struct landlock_ruleset *landlock_get_current_domain(void)
 /*
  * The call needs to come from an RCU read-side critical section.
  */
-static inline const struct landlock_ruleset *
+static inline const struct landlock_domain *
 landlock_get_task_domain(const struct task_struct *const task)
 {
 	return landlock_cred(__task_cred(task))->domain;
@@ -114,7 +114,7 @@ landlock_get_applicable_subject(const struct cred *const cred,
 	const union access_masks_all masks_all = {
 		.masks = masks,
 	};
-	const struct landlock_ruleset *domain;
+	const struct landlock_domain *domain;
 	ssize_t layer_level;
 
 	if (!cred)
@@ -127,7 +127,7 @@ landlock_get_applicable_subject(const struct cred *const cred,
 	for (layer_level = domain->num_layers - 1; layer_level >= 0;
 	     layer_level--) {
 		union access_masks_all layer = {
-			.masks = domain->access_masks[layer_level],
+			.masks = dom_access_masks(domain)[layer_level],
 		};
 
 		if (layer.all & masks_all.all) {

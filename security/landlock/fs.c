@@ -360,26 +360,24 @@ int landlock_append_fs_rule(struct landlock_ruleset *const ruleset,
  *
  * Returns NULL if no rule is found or if @dentry is negative.
  */
-static const struct landlock_rule *
-find_rule(const struct landlock_ruleset *const domain,
+static struct landlock_found_rule
+find_rule(const struct landlock_domain *const domain,
 	  const struct dentry *const dentry)
 {
-	const struct landlock_rule *rule;
 	const struct inode *inode;
-	struct landlock_id id = {
-		.type = LANDLOCK_KEY_INODE,
-	};
+	union landlock_key key;
+	struct landlock_found_rule found_rule = {};
 
 	/* Ignores nonexistent leafs. */
 	if (d_is_negative(dentry))
-		return NULL;
+		return found_rule;
 
 	inode = d_backing_inode(dentry);
 	rcu_read_lock();
-	id.key.object = rcu_dereference(landlock_inode(inode)->object);
-	rule = landlock_find_rule(domain, id);
+	key.object = rcu_dereference(landlock_inode(inode)->object);
+	found_rule = dom_find_index_fs(domain, key);
 	rcu_read_unlock();
-	return rule;
+	return found_rule;
 }
 
 /*
@@ -753,7 +751,7 @@ static void test_is_eacces_with_write(struct kunit *const test)
  * - false otherwise.
  */
 static bool is_access_to_paths_allowed(
-	const struct landlock_ruleset *const domain,
+	const struct landlock_domain *const domain,
 	const struct path *const path,
 	const access_mask_t access_request_parent1,
 	layer_mask_t (*const layer_masks_parent1)[LANDLOCK_NUM_ACCESS_FS],
@@ -799,7 +797,7 @@ static bool is_access_to_paths_allowed(
 		 * a superset of the meaningful requested accesses).
 		 */
 		access_masked_parent1 = access_masked_parent2 =
-			landlock_union_access_masks(domain).fs;
+			landlock_dom_union_access_masks(domain).fs;
 		is_dom_check = true;
 	} else {
 		if (WARN_ON_ONCE(dentry_child1 || dentry_child2))
@@ -838,7 +836,7 @@ static bool is_access_to_paths_allowed(
 	 * restriction.
 	 */
 	while (true) {
-		const struct landlock_rule *rule;
+		struct landlock_found_rule rule;
 
 		/*
 		 * If at least all accesses allowed on the destination are
@@ -1045,7 +1043,7 @@ static access_mask_t maybe_remove(const struct dentry *const dentry)
  * - false if the walk reached @mnt_root.
  */
 static bool collect_domain_accesses(
-	const struct landlock_ruleset *const domain,
+	const struct landlock_domain *const domain,
 	const struct dentry *const mnt_root, struct dentry *dir,
 	layer_mask_t (*const layer_masks_dom)[LANDLOCK_NUM_ACCESS_FS])
 {
@@ -1814,7 +1812,7 @@ static bool control_current_fowner(struct fown_struct *const fown)
 
 static void hook_file_set_fowner(struct file *file)
 {
-	struct landlock_ruleset *prev_dom;
+	struct landlock_domain *prev_dom;
 	struct landlock_cred_security fown_subject = {};
 	size_t fown_layer = 0;
 
@@ -1826,7 +1824,7 @@ static void hook_file_set_fowner(struct file *file)
 			landlock_get_applicable_subject(
 				current_cred(), signal_scope, &fown_layer);
 		if (new_subject) {
-			landlock_get_ruleset(new_subject->domain);
+			landlock_get_domain(new_subject->domain);
 			fown_subject = *new_subject;
 		}
 	}
@@ -1838,12 +1836,12 @@ static void hook_file_set_fowner(struct file *file)
 #endif /* CONFIG_AUDIT*/
 
 	/* May be called in an RCU read-side critical section. */
-	landlock_put_ruleset_deferred(prev_dom);
+	landlock_put_domain_deferred(prev_dom);
 }
 
 static void hook_file_free_security(struct file *file)
 {
-	landlock_put_ruleset_deferred(landlock_file(file)->fown_subject.domain);
+	landlock_put_domain_deferred(landlock_file(file)->fown_subject.domain);
 }
 
 static struct security_hook_list landlock_hooks[] __ro_after_init = {

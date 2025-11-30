@@ -134,7 +134,7 @@ static void log_domain(struct landlock_hierarchy *const hierarchy)
 }
 
 static struct landlock_hierarchy *
-get_hierarchy(const struct landlock_ruleset *const domain, const size_t layer)
+get_hierarchy(const struct landlock_domain *const domain, const size_t layer)
 {
 	struct landlock_hierarchy *hierarchy = domain->hierarchy;
 	ssize_t i;
@@ -167,7 +167,7 @@ static void test_get_hierarchy(struct kunit *const test)
 		.parent = &dom1_hierarchy,
 		.id = 30,
 	};
-	struct landlock_ruleset dom2 = {
+	struct landlock_domain dom2 = {
 		.hierarchy = &dom2_hierarchy,
 		.num_layers = 3,
 	};
@@ -180,7 +180,7 @@ static void test_get_hierarchy(struct kunit *const test)
 
 #endif /* CONFIG_SECURITY_LANDLOCK_KUNIT_TEST */
 
-static size_t get_denied_layer(const struct landlock_ruleset *const domain,
+static size_t get_denied_layer(const struct landlock_domain *const domain,
 			       access_mask_t *const access_request,
 			       const layer_mask_t (*const layer_masks)[],
 			       const size_t layer_masks_size)
@@ -218,7 +218,7 @@ static size_t get_denied_layer(const struct landlock_ruleset *const domain,
 
 static void test_get_denied_layer(struct kunit *const test)
 {
-	const struct landlock_ruleset dom = {
+	const struct landlock_domain dom = {
 		.num_layers = 5,
 	};
 	const layer_mask_t layer_masks[LANDLOCK_NUM_ACCESS_FS] = {
