@@ -38,7 +38,7 @@ h_find(const void *table, h_index_t table_size, int hash_bits, size_t elem_size,
        compare_element_t compare_elem, element_is_empty_t element_is_empty)
 {
 	h_index_t curr_index, next_collision, target_hash;
-	const void *curr_elem, *next_elem;
+	const void *curr_elem;
 
 	if (nb_collisions_followed)
 		*nb_collisions_followed = 0;
@@ -63,7 +63,10 @@ h_find(const void *table, h_index_t table_size, int hash_bits, size_t elem_size,
 	/*
 	 * Early termination: if the element at target_hash doesn't hash to
 	 * its own position, then no element with our target hash exists in
-	 * the table, so we can return immediately.
+	 * the table, so we can return immediately.  This saves traversing
+	 * collision chains that cannot contain our element.  The extra hash
+	 * computation is worthwhile because it avoids potentially many memory
+	 * accesses in the collision chain.
 	 */
 	if (hash_elem(curr_elem, table_size, hash_bits) != target_hash)
 		return NULL;
@@ -74,14 +77,17 @@ h_find(const void *table, h_index_t table_size, int hash_bits, size_t elem_size,
 		curr_index = next_collision;
 		if (nb_collisions_followed)
 			(*nb_collisions_followed)++;
+		if (WARN_ON_ONCE(curr_index >= table_size))
+			return NULL;
 		curr_elem = table + curr_index * elem_size;
 
-		/* Prefetch the next element while we process current */
+		/*
+		 * Prefetch the next element while we process current.
+		 * Get next_collision early to enable prefetching.
+		 */
 		next_collision = get_next_collision(curr_elem);
-		if (next_collision != curr_index) {
-			next_elem = table + next_collision * elem_size;
-			prefetch(next_elem);
-		}
+		if (next_collision != curr_index && next_collision < table_size)
+			prefetch(table + next_collision * elem_size);
 
 		if (likely(compare_elem(elem_to_find, curr_elem)))
 			return (void *)curr_elem;
