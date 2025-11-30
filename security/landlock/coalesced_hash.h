@@ -375,7 +375,7 @@ static inline void h_insert(struct h_insert_scratch *scratch, const void *elem,
 		return hash_expr;                                             \
 	}                                                                     \
 	static __always_inline h_index_t                                      \
-	table_func_prefix##_get_next_collision(const void *elem)              \
+		table_func_prefix##_get_next_collision(const void *elem)      \
 	{                                                                     \
 		return ((const elem_type *)elem)->next_collision_member;      \
 	}                                                                     \
