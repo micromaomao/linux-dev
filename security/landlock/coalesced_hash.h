@@ -17,7 +17,9 @@
  * Copyright © 2025      Tingmao Wang <m@maowtm.org>
  */
 
+#include <linux/compiler.h>
 #include <linux/mm.h>
+#include <linux/prefetch.h>
 #include <linux/types.h>
 
 typedef u32 h_index_t;
@@ -29,14 +31,14 @@ typedef void (*set_next_collision_t)(void *elem, h_index_t next_collision);
 typedef bool (*compare_element_t)(const void *key_elem, const void *found_elem);
 typedef bool (*element_is_empty_t)(const void *elem);
 
-static inline void *
+static __always_inline void *
 h_find(const void *table, h_index_t table_size, int hash_bits, size_t elem_size,
        const void *elem_to_find, h_index_t *nb_collisions_followed,
        hash_element_t hash_elem, get_next_collision_t get_next_collision,
        compare_element_t compare_elem, element_is_empty_t element_is_empty)
 {
-	h_index_t curr_index, next_collision;
-	const void *curr_elem;
+	h_index_t curr_index, next_collision, target_hash;
+	const void *curr_elem, *next_elem;
 
 	if (nb_collisions_followed)
 		*nb_collisions_followed = 0;
@@ -44,24 +46,45 @@ h_find(const void *table, h_index_t table_size, int hash_bits, size_t elem_size,
 	if (unlikely(table_size == 0))
 		return NULL;
 
-	curr_index = hash_elem(elem_to_find, table_size, hash_bits);
-	if (WARN_ON_ONCE(curr_index >= table_size))
+	target_hash = hash_elem(elem_to_find, table_size, hash_bits);
+	if (WARN_ON_ONCE(target_hash >= table_size))
 		return NULL;
+
+	curr_index = target_hash;
 	curr_elem = table + curr_index * elem_size;
-	if (compare_elem(elem_to_find, curr_elem))
+
+	/* Fast path: element is at its hash position (most common case) */
+	if (likely(compare_elem(elem_to_find, curr_elem)))
 		return (void *)curr_elem;
 
 	if (element_is_empty(curr_elem))
 		return NULL;
+
+	/*
+	 * Early termination: if the element at target_hash doesn't hash to
+	 * its own position, then no element with our target hash exists in
+	 * the table, so we can return immediately.
+	 */
+	if (hash_elem(curr_elem, table_size, hash_bits) != target_hash)
+		return NULL;
+
+	/* Follow the collision chain */
 	next_collision = get_next_collision(curr_elem);
 	while (next_collision != curr_index) {
 		curr_index = next_collision;
 		if (nb_collisions_followed)
 			(*nb_collisions_followed)++;
 		curr_elem = table + curr_index * elem_size;
-		if (compare_elem(elem_to_find, curr_elem))
-			return (void *)curr_elem;
+
+		/* Prefetch the next element while we process current */
 		next_collision = get_next_collision(curr_elem);
+		if (next_collision != curr_index) {
+			next_elem = table + next_collision * elem_size;
+			prefetch(next_elem);
+		}
+
+		if (likely(compare_elem(elem_to_find, curr_elem)))
+			return (void *)curr_elem;
 	}
 
 	return NULL;
@@ -347,36 +370,36 @@ static inline void h_insert(struct h_insert_scratch *scratch, const void *elem,
 #define DEFINE_COALESCED_HASH_TABLE(elem_type, table_func_prefix, key_member, \
 				    next_collision_member, hash_expr,         \
 				    is_empty_expr, trace_find)                \
-	static inline h_index_t table_func_prefix##_hash_elem(                \
+	static __always_inline h_index_t table_func_prefix##_hash_elem(       \
 		const void *_elem, h_index_t table_size, int hash_bits)       \
 	{                                                                     \
 		const elem_type *elem = _elem;                                \
 		return hash_expr;                                             \
 	}                                                                     \
-	static inline h_index_t table_func_prefix##_get_next_collision(       \
-		const void *elem)                                             \
+	static __always_inline h_index_t                                      \
+	table_func_prefix##_get_next_collision(const void *elem)              \
 	{                                                                     \
 		return ((const elem_type *)elem)->next_collision_member;      \
 	}                                                                     \
-	static inline void table_func_prefix##_set_next_collision(            \
+	static __always_inline void table_func_prefix##_set_next_collision(   \
 		void *elem, h_index_t next_collision)                         \
 	{                                                                     \
 		((elem_type *)elem)->next_collision_member = next_collision;  \
 	}                                                                     \
-	static inline bool table_func_prefix##_compare_elem(                  \
+	static __always_inline bool table_func_prefix##_compare_elem(         \
 		const void *key_elem, const void *found_elem)                 \
 	{                                                                     \
 		const elem_type *key = key_elem;                              \
 		const elem_type *found = found_elem;                          \
 		return key->key_member.data == found->key_member.data;        \
 	}                                                                     \
-	static inline bool table_func_prefix##_element_is_empty(              \
+	static __always_inline bool table_func_prefix##_element_is_empty(     \
 		const void *_elem)                                            \
 	{                                                                     \
 		const elem_type *elem = _elem;                                \
 		return is_empty_expr;                                         \
 	}                                                                     \
-	static inline const elem_type *table_func_prefix##_find(              \
+	static __always_inline const elem_type *table_func_prefix##_find(     \
 		const elem_type *table, h_index_t table_size, int hash_bits,  \
 		const elem_type *elem_to_find)                                \
 	{                                                                     \

@@ -11,6 +11,7 @@
 #ifndef _SECURITY_LANDLOCK_DOMAIN_H
 #define _SECURITY_LANDLOCK_DOMAIN_H
 
+#include <linux/compiler.h>
 #include <linux/limits.h>
 #include <linux/mm.h>
 #include <linux/path.h>
@@ -179,17 +180,17 @@ struct landlock_domain {
 /**
  * dom_index_hash_func - Hash function for the domain index tables.
  */
-static inline h_index_t
+static __always_inline h_index_t
 dom_index_hash_func(const struct landlock_domain_index *elem,
 		    const h_index_t table_size, const int hash_bits)
 {
-	if (hash_bits <= 0)
+	if (unlikely(hash_bits <= 0))
 		/* hash_long requires hash_bits > 0 */
 		return 0;
 	return hash_long(elem->key.data, hash_bits);
 }
 
-static inline int get_hash_bits(const u32 table_size)
+static __always_inline int get_hash_bits(const u32 table_size)
 {
 	if (table_size <= 1)
 		return 0;
@@ -236,7 +237,7 @@ struct landlock_found_rule {
  * @num_layers: The number of elements in @layers_arr.
  * @key: The key to search for.
  */
-static inline struct landlock_found_rule
+static __always_inline struct landlock_found_rule
 landlock_domain_find(const struct landlock_domain_index *const indices_arr,
 		     const u32 num_indices, const int hash_bits,
 		     const struct landlock_layer *const layers_arr,
@@ -250,7 +251,7 @@ landlock_domain_find(const struct landlock_domain_index *const indices_arr,
 
 	found = dom_hash_find(indices_arr, num_indices, hash_bits, &key_elem);
 
-	if (found) {
+	if (likely(found)) {
 		if (WARN_ON_ONCE(found->layer_end > num_layers))
 			return out_found_rule;
 		out_found_rule.layers_start = &layers_arr[found->layer_start];
