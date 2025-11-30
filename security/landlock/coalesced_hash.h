@@ -19,7 +19,6 @@
 
 #include <linux/compiler.h>
 #include <linux/mm.h>
-#include <linux/prefetch.h>
 #include <linux/types.h>
 
 typedef u32 h_index_t;
@@ -81,16 +80,9 @@ h_find(const void *table, h_index_t table_size, int hash_bits, size_t elem_size,
 			return NULL;
 		curr_elem = table + curr_index * elem_size;
 
-		/*
-		 * Prefetch the next element while we process current.
-		 * Get next_collision early to enable prefetching.
-		 */
-		next_collision = get_next_collision(curr_elem);
-		if (next_collision != curr_index && next_collision < table_size)
-			prefetch(table + next_collision * elem_size);
-
 		if (likely(compare_elem(elem_to_find, curr_elem)))
 			return (void *)curr_elem;
+		next_collision = get_next_collision(curr_elem);
 	}
 
 	return NULL;
