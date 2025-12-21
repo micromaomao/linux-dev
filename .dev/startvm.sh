@@ -8,6 +8,7 @@ network=1
 fs_type=9pfs
 no_user_aslr=0
 no_virtio_serial=0
+tmux=0
 
 exec_args=""
 
@@ -19,6 +20,7 @@ function show_help () {
     echo "  -m, --memory SIZE    Set the amount of memory for the VM (default: 2G)"
     echo "  -c, --cpus COUNT     Set the number of CPUs for the VM (default: 2)"
     echo "  -n, --no-network     Disable the network interface (default: no)"
+    echo "  -t                   Enable tty mode on the serial console and run tmux"
     echo "  -f, --fs TYPE        Which type of root filesystem to use. Available options:"
     echo "                         9pfs (default)"
     echo "                         virtiofs (Requires virtiofsd)"
@@ -41,6 +43,9 @@ while [ "${1:-}" != '' ]; do
             ;;
         -n | --no-network )
             network=0
+            ;;
+        -t )
+            tmux=1
             ;;
         -f | --fs ) shift
             case $1 in
@@ -161,6 +166,13 @@ else
     console_cmd="console=ttyS0,115200 kgdboc=ttyS1,115200"
 fi
 
+if [[ $tmux == 1 ]]; then
+    if [[ $exec_args == "" ]]; then
+        exec_args="/bin/fish"
+    fi
+    exec_args="tmux -2 new '$exec_args'"
+fi
+
 qemuFlags=(
     -machine q35,accel=kvm
     -enable-kvm
@@ -215,9 +227,17 @@ else
     )
 fi
 
-qemuFlags+=(
+if [[ $tmux == 1 ]]; then
+    qemuFlags+=(
+        -chardev "stdio,id=stdio,signal=off"
+    )
+else
+    qemuFlags+=(
+        -chardev "stdio,id=stdio,signal=on"
+    )
+fi
 
-    -chardev "stdio,id=stdio,signal=off"
+qemuFlags+=(
     -chardev "socket,path=$PWD/kgdb.sock,server=on,wait=off,id=kgdb"
 
     -drive "file=$DISK,format=raw,if=virtio"
