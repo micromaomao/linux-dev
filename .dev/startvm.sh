@@ -140,16 +140,11 @@ if [ ! -e "$DISK" ]; then
     truncate -s 10G "$DISK"
     # on some distributions, this is in /usr/sbin even though it technically doesn't require root
     export PATH=$PATH:/usr/sbin
-    if ! mkfs.ext4 -F "$DISK"; then
+    if ! sudo mkfs.ext4 -d "$ROOTFS_DIR" -F "$DISK"; then
         echo "Failed to mkfs.ext4 $DISK"
         rm "$DISK"
         exit 1
     fi
-    sudo mkdir -p tmp_mnt
-    sudo mount -o loop "$DISK" tmp_mnt
-    sudo cp -ax "$ROOTFS_DIR/." tmp_mnt
-    sudo umount tmp_mnt
-    sudo rmdir tmp_mnt
     sudo chown $(id -u):$(id -g) "$DISK"
 fi
 
@@ -202,10 +197,15 @@ qemuFlags=(
     "
 )
 
+echo "mkdir -p /linux" >> "$ROOTFS_DIR/_runtime_init.sh"
 if [[ $fs_type == "9pfs" ]]; then
     qemuFlags+=(
         -virtfs "local,path=$ROOTFS_DIR,mount_tag=root,security_model=passthrough,readonly=off"
     )
+    qemuFlags+=(
+        -virtfs "local,path=$LINUX_SOURCE_DIR,mount_tag=linuxsrc,security_model=passthrough,readonly=on"
+    )
+    echo "mount -t 9p -o trans=virtio linuxsrc /linux" >> "$ROOTFS_DIR/_runtime_init.sh"
 elif [[ $fs_type == "virtiofs" ]]; then
     virtiofs_socket_path=$(mktemp -u /tmp/virtiosock-XXXXXXXXXXX)
     sudo virtiofsd --socket-path="$virtiofs_socket_path" --shared-dir="$ROOTFS_DIR" --inode-file-handles=prefer &
@@ -216,6 +216,15 @@ elif [[ $fs_type == "virtiofs" ]]; then
         -object "memory-backend-file,id=mem,size=$memory,mem-path=/dev/shm,share=on"
         -numa "node,memdev=mem"
     )
+
+    linuxsrc_virtiofs_socket_path=$(mktemp -u /tmp/virtiosock-XXXXXXXXXXX)
+    sudo virtiofsd --socket-path="$linuxsrc_virtiofs_socket_path" --shared-dir="$LINUX_SOURCE_DIR" --inode-file-handles=prefer &
+    linuxsrc_virtiofsd_pid=$!
+    qemuFlags+=(
+        -chardev "socket,id=linuxsrc_virtiofs,path=$linuxsrc_virtiofs_socket_path"
+        -device "vhost-user-fs-pci,queue-size=1024,chardev=linuxsrc_virtiofs,tag=linuxsrc"
+    )
+    echo "mount -t virtiofs linuxsrc /linux" >> "$ROOTFS_DIR/_runtime_init.sh"
 fi
 
 if [[ $network == 1 ]]; then
@@ -268,6 +277,20 @@ qemuFlags+=(
 function exit_function {
     if [[ $fs_type == "virtiofs" ]]; then
         kill $virtiofsd_pid
+        kill $linuxsrc_virtiofsd_pid
+    elif [[ $fs_type == "vhd" ]]; then
+        mnt_point="$(mktemp -d /tmp/mnt-XXXXXXXXXX)"
+        set +ex
+        sudo mount "$DISK" "$mnt_point"
+        if [ $? -eq 0 ]; then
+            echo "Copying modified rootfs back to $ROOTFS_DIR"
+            sudo cp -arx "$mnt_point/." "$ROOTFS_DIR"
+            sudo umount "$mnt_point"
+            sudo rmdir "$mnt_point"
+            sudo rm "$DISK"
+        else
+            echo "Failed to unmount $DISK"
+        fi
     fi
 }
 
