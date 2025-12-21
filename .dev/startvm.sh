@@ -10,6 +10,7 @@ fs_type=9pfs
 no_user_aslr=0
 virtio_serial=0
 tmux=0
+bzImage=0
 
 exec_args=""
 
@@ -31,6 +32,7 @@ function show_help () {
     echo "      --virtio-serial"
     echo "                       Use virtio-serial instead of PCI serial (default: no)"
     echo "      --no-preempt     Disable preemption (default: no)"
+    echo "      --bzImage        use bzImage instead of vmlinux PVH"
     echo ""
     exit 1
 }
@@ -74,6 +76,9 @@ while [ "${1:-}" != '' ]; do
             ;;
         --no-preempt )
             nopreempt=1
+            ;;
+        --bzImage )
+            bzImage=1
             ;;
         -h | --help )
             show_help
@@ -166,6 +171,11 @@ if [[ $nopreempt == 1 ]]; then
     preempt_cmd="preempt=none"
 fi
 
+kernel=../vmlinux
+if [ $bzImage == 1 ]; then
+    kernel=../arch/x86/boot/bzImage
+fi
+
 qemuFlags=(
     -machine q35,accel=kvm
     -enable-kvm
@@ -173,7 +183,7 @@ qemuFlags=(
     -m $memory
     -smp $cpus
 
-    -kernel ../vmlinux
+    -kernel $kernel
     -append "\
         $preempt_cmd \
         $root_cmd \
