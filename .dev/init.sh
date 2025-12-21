@@ -6,6 +6,11 @@ if [ `id -u` -ne 0 ]; then
 fi
 
 set -xe
+export PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin
+export HOME=/
+export LC_CTYPE=en_US.UTF-8
+export LANG=en_US.UTF-8
+export USER=root
 mkdir -p /dev /proc /sys /tmp /sys /mnt
 mount -t devtmpfs dev /dev
 mount -t proc proc /proc
