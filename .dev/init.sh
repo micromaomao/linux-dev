@@ -21,6 +21,9 @@ mount -t devpts devpts /dev/pts
 mount -t tmpfs shm /dev/shm
 mount -t hugetlbfs hugetlbfs /dev/hugepages
 mount -t mqueue mqueue /dev/mqueue
+sysctl kernel.printk_ratelimit=0
+uname -r | sed -E 's/[^a-zA-Z0-9]+/-/g' > /etc/hostname
+hostname -F /etc/hostname
 mkdir -p /sys/kernel/security /sys/fs/cgroup /sys/fs/bpf /sys/kernel/tracing
 mount -t securityfs none /sys/kernel/security
 mount -t cgroup2 none /sys/fs/cgroup
