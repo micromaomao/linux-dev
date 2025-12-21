@@ -111,6 +111,18 @@ while [ "${1:-}" != '' ]; do
     shift
 done
 
+VIRTIOFSD_LOCATION=$(which virtiofsd 2>/dev/null)
+if [ $? -ne 0 ] && [[ $fs_type == "virtiofs" ]]; then
+    if [ -e "/usr/lib/virtiofsd" ]; then
+        VIRTIOFSD_LOCATION="/usr/lib/virtiofsd"
+    elif [ -e "/usr/sbin/virtiofsd" ]; then
+        VIRTIOFSD_LOCATION="/usr/sbin/virtiofsd"
+    else
+        echo "virtiofsd not found"
+        exit 1
+    fi
+fi
+
 set -ex
 
 LINUX_SOURCE_DIR=`realpath ../`
@@ -217,7 +229,7 @@ if [[ $fs_type == "9pfs" ]]; then
     echo "mount -t 9p -o trans=virtio linuxsrc /linux" >> "$ROOTFS_DIR/_runtime_init.sh"
 elif [[ $fs_type == "virtiofs" ]]; then
     virtiofs_socket_path=$(mktemp -u /tmp/virtiosock-XXXXXXXXXXX)
-    sudo virtiofsd --socket-path="$virtiofs_socket_path" --shared-dir="$ROOTFS_DIR" --inode-file-handles=prefer &
+    sudo $VIRTIOFSD_LOCATION --socket-path="$virtiofs_socket_path" --shared-dir="$ROOTFS_DIR" --inode-file-handles=prefer &
     virtiofsd_pid=$!
     qemuFlags+=(
         -chardev "socket,id=virtiofs,path=$virtiofs_socket_path"
@@ -227,7 +239,7 @@ fi
 
 if [[ $fs_type != "9pfs" ]]; then
     linuxsrc_virtiofs_socket_path=$(mktemp -u /tmp/virtiosock-XXXXXXXXXXX)
-    sudo virtiofsd --socket-path="$linuxsrc_virtiofs_socket_path" --shared-dir="$LINUX_SOURCE_DIR" --inode-file-handles=prefer &
+    sudo $VIRTIOFSD_LOCATION --socket-path="$linuxsrc_virtiofs_socket_path" --shared-dir="$LINUX_SOURCE_DIR" --inode-file-handles=prefer &
     linuxsrc_virtiofsd_pid=$!
     qemuFlags+=(
         -chardev "socket,id=linuxsrc_virtiofs,path=$linuxsrc_virtiofs_socket_path"
