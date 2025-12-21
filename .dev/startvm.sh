@@ -1,8 +1,69 @@
 #!/usr/bin/bash
 
+cd $(dirname $0)
+
+memory=2G
+cpus=2
+network=1
+no_user_aslr=0
+
+exec_args=""
+
+set -e
+
+function show_help () {
+    echo "Usage: startvm.sh [OPTIONS] [--] [exec program]"
+    echo "Options:"
+    echo "  -m, --memory SIZE    Set the amount of memory for the VM (default: 2G)"
+    echo "  -c, --cpus COUNT     Set the number of CPUs for the VM (default: 2)"
+    echo "  -n, --no-network     Disable the network interface (default: no)"
+    echo "      --no-user-aslr   Disable user-space ASLR (default: no)"
+    echo ""
+    exit 1
+}
+
+while [ "${1:-}" != '' ]; do
+    case $1 in
+        -m | --memory ) shift
+            memory=$1
+            ;;
+        -c | --cpus ) shift
+            cpus=$1
+            ;;
+        -n | --no-network )
+            network=0
+            ;;
+        --no-user-aslr )
+            no_user_aslr=1
+            ;;
+        -h | --help )
+            show_help
+            ;;
+        -- )
+            shift
+            exec_args="$@"
+            break
+            ;;
+        -* | --* )
+            echo "Unknown option $1"
+            show_help
+            ;;
+        *)
+            for restarg in "$@"; do
+                if [[ $restarg == -* ]]; then
+                    echo "Options must come before any positional arguments"
+                    show_help
+                fi
+            done
+            exec_args="$@"
+            break
+            ;;
+    esac
+    shift
+done
+
 set -ex
 
-cd $(dirname $0)
 LINUX_SOURCE_DIR=`realpath ../`
 ROOTFS_DIR=`realpath ./rootfs`
 if [ ! -e "$ROOTFS_DIR/bin" ]; then
@@ -42,11 +103,13 @@ fi
 termsize=(`stty size`)
 termheight=${termsize[0]}
 termwidth=${termsize[1]}
-sudo sh -c "echo 'stty rows $termheight cols $termwidth' > '$ROOTFS_DIR/_termsize.sh'"
-exec_args="${@:1}"
+sudo touch "$ROOTFS_DIR/_runtime_init.sh"
+sudo chown $(id -u):$(id -g) "$ROOTFS_DIR/_runtime_init.sh"
+echo "stty rows $termheight cols $termwidth" > "$ROOTFS_DIR/_runtime_init.sh"
 
-memory=2G
-cpus=2
+if [[ $no_user_aslr == 1 ]]; then
+    echo 'echo 0 > /proc/sys/kernel/randomize_va_space' >> "$ROOTFS_DIR/_runtime_init.sh"
+fi
 
 qemuFlags=(
     -machine q35,accel=kvm
@@ -67,7 +130,6 @@ qemuFlags=(
     -virtfs "local,path=$ROOTFS_DIR,mount_tag=root,security_model=passthrough,readonly=off"
 )
 
-network=1
 if [[ $network == 1 ]]; then
     qemuFlags+=(
         -netdev "user,id=net0,ipv4=on,net=10.0.0.0/24,host=10.0.0.1,dhcpstart=10.0.0.2,ipv6=off,hostfwd=tcp::2222-:22"
@@ -87,6 +149,7 @@ qemuFlags+=(
     -nographic
     -nodefaults
     -pidfile .qemu.pid
+    -gdb tcp:127.0.0.1:1234
 )
 
 {
