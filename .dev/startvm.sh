@@ -11,6 +11,7 @@ no_user_aslr=0
 virtio_serial=0
 tmux=0
 bzImage=0
+kgdboc=0
 
 exec_args=""
 
@@ -33,6 +34,7 @@ function show_help () {
     echo "                       Use virtio-serial instead of PCI serial (default: no)"
     echo "      --no-preempt     Disable preemption (default: no)"
     echo "      --bzImage        use bzImage instead of vmlinux PVH"
+    echo "      --kgdboc         Enable kgdboc (default: no)"
     echo ""
     exit 1
 }
@@ -82,6 +84,9 @@ while [ "${1:-}" != '' ]; do
             ;;
         -h | --help )
             show_help
+            ;;
+        --kgdboc )
+            kgdboc=1
             ;;
         -- )
             shift
@@ -154,9 +159,15 @@ elif [[ $fs_type == "vhd" ]]; then
 fi
 
 if [[ $virtio_serial == 0 ]]; then
-    console_cmd="console=ttyS0,115200 kgdboc=ttyS1,115200"
+    console_cmd="console=ttyS0,115200"
+    if [[ $kgdboc == 1 ]]; then
+        console_cmd="$console_cmd kgdboc=ttyS1,115200"
+    fi
 else
-    console_cmd="console=hvc0 kgdboc=hvc1"
+    console_cmd="console=hvc0"
+    if [[ $kgdboc == 1 ]]; then
+        console_cmd="$console_cmd kgdboc=hvc1"
+    fi
 fi
 
 if [[ $tmux == 1 ]]; then
@@ -237,14 +248,22 @@ fi
 if [[ $virtio_serial == 0 ]]; then
     qemuFlags+=(
         -device "pci-serial,chardev=stdio"
-        -device "pci-serial,chardev=kgdb"
     )
+    if [[ $kgdboc == 1 ]]; then
+        qemuFlags+=(
+            -device "pci-serial,chardev=kgdb"
+        )
+    fi
 else
     qemuFlags+=(
         -device "virtio-serial-pci,id=virtio-serial0"
         -device "virtconsole,chardev=stdio"
-        -device "virtconsole,chardev=kgdb"
     )
+    if [[ $kgdboc == 1 ]]; then
+        qemuFlags+=(
+            -device "virtconsole,chardev=kgdb"
+        )
+    fi
 fi
 
 if [[ $tmux == 1 ]]; then
@@ -257,9 +276,13 @@ else
     )
 fi
 
-qemuFlags+=(
-    -chardev "socket,path=$PWD/kgdb.sock,server=on,wait=off,id=kgdb"
+if [[ $kgdboc == 1 ]]; then
+    qemuFlags+=(
+        -chardev "socket,path=$PWD/kgdb.sock,server=on,wait=off,id=kgdb"
+    )
+fi
 
+qemuFlags+=(
     -drive "file=$DISK,format=raw,if=virtio"
 
     -nographic
@@ -288,7 +311,9 @@ sudo chown $(id -u):$(id -g) "$DISK"
 
 {
     sleep 1;
-    sudo chown $(id -u):$(id -g) $PWD/kgdb.sock
+    if [[ $kgdboc == 1 ]]; then
+        sudo chown $(id -u):$(id -g) $PWD/kgdb.sock
+    fi
     sudo chown $(id -u):$(id -g) $PWD/.qemu.pid
 } &
 

@@ -3,13 +3,13 @@ cd $(dirname $0)
 
 extra_args=()
 
-target_cmd='target remote kgdb.sock'
+target_cmd='target remote localhost:1234'
 
 function show_help () {
     echo "Usage: kgdb.sh [OPTIONS]"
     echo "Options:"
-    echo "  -t: Enable TUI mode"
-    echo "  -s: Connect to QEMU GDB server instead of KGDB"
+    echo "  -t:     Enable TUI mode"
+    echo "  --kgdb: Connect to KGDB socket instead of QEMU gdbserver"
     echo ""
     exit 1
 }
@@ -26,8 +26,8 @@ while [ "${1:-}" != '' ]; do
                 -ex "python gdb.selected_inferior() and gdb.selected_inferior().connection and gdb.selected_inferior().connection.is_valid() and (gdb.execute('tui enable'), gdb.execute('tui window height cmd $half_height'))"
             )
             ;;
-        -s)
-            target_cmd='target remote localhost:1234'
+        --kgdb)
+            target_cmd='target remote kgdb.sock'
             ;;
         -h|--help)
             show_help
