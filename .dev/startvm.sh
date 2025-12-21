@@ -8,7 +8,7 @@ nopreempt=0
 network=1
 fs_type=9pfs
 no_user_aslr=0
-no_virtio_serial=0
+virtio_serial=0
 tmux=0
 
 exec_args=""
@@ -28,8 +28,8 @@ function show_help () {
     echo "                         vhd (Uses .dev/vda.vhd)"
     echo "                           (rm .dev/vda.vhd to repopulate the disk image)"
     echo "      --no-user-aslr   Disable user-space ASLR (default: no)"
-    echo "      --no-virtio-serial"
-    echo "                       Disable virtio-serial and use PCI serial instead (default: no)"
+    echo "      --virtio-serial"
+    echo "                       Use virtio-serial instead of PCI serial (default: no)"
     echo "      --no-preempt     Disable preemption (default: no)"
     echo ""
     exit 1
@@ -69,8 +69,8 @@ while [ "${1:-}" != '' ]; do
         --no-user-aslr )
             no_user_aslr=1
             ;;
-        --no-virtio-serial )
-            no_virtio_serial=1
+        --virtio-serial )
+            virtio_serial=1
             ;;
         --no-preempt )
             nopreempt=1
@@ -165,10 +165,10 @@ elif [[ $fs_type == "vhd" ]]; then
     root_cmd="root=/dev/vda rw"
 fi
 
-if [[ $no_virtio_serial == 0 ]]; then
-    console_cmd="console=hvc0 kgdboc=hvc1"
-else
+if [[ $virtio_serial == 0 ]]; then
     console_cmd="console=ttyS0,115200 kgdboc=ttyS1,115200"
+else
+    console_cmd="console=hvc0 kgdboc=hvc1"
 fi
 
 if [[ $tmux == 1 ]]; then
@@ -225,16 +225,16 @@ if [[ $network == 1 ]]; then
     )
 fi
 
-if [[ $no_virtio_serial == 0 ]]; then
+if [[ $virtio_serial == 0 ]]; then
+    qemuFlags+=(
+        -device "pci-serial,chardev=stdio"
+        -device "pci-serial,chardev=kgdb"
+    )
+else
     qemuFlags+=(
         -device "virtio-serial-pci,id=virtio-serial0"
         -device "virtconsole,chardev=stdio"
         -device "virtconsole,chardev=kgdb"
-    )
-else
-    qemuFlags+=(
-        -device "pci-serial,chardev=stdio"
-        -device "pci-serial,chardev=kgdb"
     )
 fi
 
