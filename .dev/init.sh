@@ -66,7 +66,7 @@ else
     /bin/bash || true
 fi
 set -ex
-umount /mnt
+umount -R /mnt
 sync
 echo o > /proc/sysrq-trigger
 sleep infinity
