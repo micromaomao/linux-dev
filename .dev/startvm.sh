@@ -4,6 +4,7 @@ cd $(dirname $0)
 
 memory=4G
 cpus=$(nproc)
+nopreempt=0
 network=1
 fs_type=9pfs
 no_user_aslr=0
@@ -29,6 +30,7 @@ function show_help () {
     echo "      --no-user-aslr   Disable user-space ASLR (default: no)"
     echo "      --no-virtio-serial"
     echo "                       Disable virtio-serial and use PCI serial instead (default: no)"
+    echo "      --no-preempt     Disable preemption (default: no)"
     echo ""
     exit 1
 }
@@ -69,6 +71,9 @@ while [ "${1:-}" != '' ]; do
             ;;
         --no-virtio-serial )
             no_virtio_serial=1
+            ;;
+        --no-preempt )
+            nopreempt=1
             ;;
         -h | --help )
             show_help
@@ -173,6 +178,11 @@ if [[ $tmux == 1 ]]; then
     exec_args="tmux -2 new '$exec_args'"
 fi
 
+preempt_cmd=""
+if [[ $nopreempt == 1 ]]; then
+    preempt_cmd="preempt=none"
+fi
+
 qemuFlags=(
     -machine q35,accel=kvm
     -enable-kvm
@@ -182,6 +192,7 @@ qemuFlags=(
 
     -kernel ../vmlinux
     -append "\
+        $preempt_cmd \
         $root_cmd \
         earlycon $console_cmd \
         nokaslr no_hash_pointers loglevel=8 \
