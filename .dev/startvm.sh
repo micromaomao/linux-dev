@@ -258,18 +258,23 @@ qemuFlags+=(
     -gdb tcp:127.0.0.1:1234
 )
 
-if [ ! -e "$DISK" ]; then
-    touch "$DISK"
-    truncate -s 10G "$DISK"
-    # on some distributions, this is in /usr/sbin even though it technically doesn't require root
-    export PATH=$PATH:/usr/sbin
-    if ! sudo mkfs.ext4 -d "$ROOTFS_DIR" -F "$DISK"; then
-        echo "Failed to mkfs.ext4 $DISK"
-        rm "$DISK"
-        exit 1
-    fi
-    sudo chown $(id -u):$(id -g) "$DISK"
+touch "$DISK"
+truncate -s 10G "$DISK"
+# on some distributions, this is in /usr/sbin even though it technically doesn't require root
+export PATH=$PATH:/usr/sbin
+if [[ $fs_type == "vhd" ]]; then
+    mkfs_opt=(
+        -d "$ROOTFS_DIR"
+    )
+else
+    mkfs_opt=()
 fi
+if ! sudo mkfs.ext4 ${mkfs_opt[@]} -F "$DISK"; then
+    echo "Failed to mkfs.ext4 $DISK"
+    rm "$DISK"
+    exit 1
+fi
+sudo chown $(id -u):$(id -g) "$DISK"
 
 {
     sleep 1;
@@ -292,7 +297,7 @@ function exit_function {
             sudo rmdir "$mnt_point"
             sudo rm "$DISK"
         else
-            echo "Failed to unmount $DISK"
+            echo "Failed to mount $DISK"
         fi
     fi
 }
