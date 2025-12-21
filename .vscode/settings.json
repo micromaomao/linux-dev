@@ -1,0 +1,7 @@
+{
+  "C_Cpp.files.exclude": {
+    "/usr/include": true,
+    "**/.vscode": true,
+    "**/.vs": true
+  }
+}
