@@ -140,7 +140,7 @@ qemuFlags=(
     -append "\
         $root_cmd \
         console=ttyS0,115200 kgdboc=ttyS1,115200 \
-        nokaslr no_hash_pointers loglevel=7 \
+        nokaslr no_hash_pointers loglevel=8 \
         trace_clock=local \
         init=/init.sh - \
         $exec_args
