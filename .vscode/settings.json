@@ -61,5 +61,7 @@
   "C_Cpp.codeAnalysis.runAutomatically": false,
   "python.analysis.extraPaths": [
     "./scripts/gdb"
-  ]
+  ],
+  "C_Cpp.clang_format_style": "file",
+  "editor.tabSize": 4
 }
