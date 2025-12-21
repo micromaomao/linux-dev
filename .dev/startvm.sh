@@ -2,8 +2,8 @@
 
 cd $(dirname $0)
 
-memory=2G
-cpus=2
+memory=4G
+cpus=$(nproc)
 network=1
 no_user_aslr=0
 
@@ -123,6 +123,7 @@ qemuFlags=(
         root=root rw rootfstype=9p rootflags=trans=virtio \
         console=ttyS0,115200 kgdboc=ttyS1,115200 \
         nokaslr no_hash_pointers loglevel=7 \
+        trace_clock=local \
         init=/init.sh - \
         $exec_args
     "
