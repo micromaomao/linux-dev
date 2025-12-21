@@ -17,8 +17,12 @@ if [ ! -e "$ROOTFS_DIR/bin" ]; then
     # isolate this filesystem from our host root, in case "security_model=passthrough" has fs-related exploits.
     sudo mount -t tmpfs tmpfs -o nodev "$ROOTFS_DIR"
 
-    docker run --rm -v "$ROOTFS_DIR":/rootfs $DOCKER_IMAGE_NAME cp -ax / /rootfs
-    sudo rmdir "$ROOTFS_DIR"/rootfs
+    # docker run --rm -v "$ROOTFS_DIR":/rootfs $DOCKER_IMAGE_NAME cp -ax / /rootfs
+    # sudo rmdir "$ROOTFS_DIR"/rootfs
+    #
+    # the above no longer works in latest debian:stable for some reason
+
+    docker run --rm -v "$ROOTFS_DIR":/rootfs $DOCKER_IMAGE_NAME bash -c 'cp -ax $(ls -A / | grep -vE "rootfs|dev|proc|sys|tmp|mnt") /rootfs'
     sudo rm "$ROOTFS_DIR"/.dockerenv
     sudo bash -c "cat /etc/resolv.conf > '$ROOTFS_DIR/etc/resolv.conf'"
 fi
