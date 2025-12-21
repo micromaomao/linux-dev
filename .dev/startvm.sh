@@ -7,6 +7,7 @@ cpus=$(nproc)
 network=1
 no_9pfs=0
 no_user_aslr=0
+no_virtio_serial=0
 
 exec_args=""
 
@@ -21,6 +22,8 @@ function show_help () {
     echo "      --no-9pfs        Disable the 9pfs-based rootfs and use /dev/vda as root (default: no)"
     echo "                       (rm .dev/vda.vhd to repopulate the disk image)"
     echo "      --no-user-aslr   Disable user-space ASLR (default: no)"
+    echo "      --no-virtio-serial"
+    echo "                       Disable virtio-serial and use PCI serial instead (default: no)"
     echo ""
     exit 1
 }
@@ -41,6 +44,9 @@ while [ "${1:-}" != '' ]; do
             ;;
         --no-user-aslr )
             no_user_aslr=1
+            ;;
+        --no-virtio-serial )
+            no_virtio_serial=1
             ;;
         -h | --help )
             show_help
@@ -129,6 +135,12 @@ if [[ $no_9pfs == 1 ]]; then
     root_cmd="root=/dev/vda rw"
 fi
 
+if [[ $no_virtio_serial == 0 ]]; then
+    console_cmd="console=hvc0 kgdboc=hvc1"
+else
+    console_cmd="console=ttyS0,115200 kgdboc=ttyS1,115200"
+fi
+
 qemuFlags=(
     -machine q35,accel=kvm
     -enable-kvm
@@ -139,7 +151,7 @@ qemuFlags=(
     -kernel ../vmlinux
     -append "\
         $root_cmd \
-        console=ttyS0,115200 kgdboc=ttyS1,115200 \
+        earlycon $console_cmd \
         nokaslr no_hash_pointers loglevel=8 \
         trace_clock=local \
         init=/init.sh - \
@@ -160,12 +172,23 @@ if [[ $network == 1 ]]; then
     )
 fi
 
-qemuFlags+=(
-    -chardev "stdio,id=stdio,signal=off"
-    -device "pci-serial,chardev=stdio"
+if [[ $no_virtio_serial == 0 ]]; then
+    qemuFlags+=(
+        -device "virtio-serial-pci,id=virtio-serial0"
+        -device "virtconsole,chardev=stdio"
+        -device "virtconsole,chardev=kgdb"
+    )
+else
+    qemuFlags+=(
+        -device "pci-serial,chardev=stdio"
+        -device "pci-serial,chardev=kgdb"
+    )
+fi
 
+qemuFlags+=(
+
+    -chardev "stdio,id=stdio,signal=off"
     -chardev "socket,path=$PWD/kgdb.sock,server=on,wait=off,id=kgdb"
-    -device "pci-serial,chardev=kgdb"
 
     -drive "file=$DISK,format=raw,if=virtio"
 
