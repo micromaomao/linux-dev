@@ -1,4 +1,5 @@
 #!/usr/bin/bash
+cd $(dirname $0)
 
 set -e
 if [ -e ".qemu.pid" ]; then
