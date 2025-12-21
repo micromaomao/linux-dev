@@ -34,8 +34,9 @@ ethName=eth0
 ip link set dev $ethName up
 ip addr add 10.0.0.2/24 dev $ethName
 ip route add default via 10.0.0.1 dev $ethName
-/usr/sbin/sshd
+/usr/sbin/sshd &
 mount /dev/vda /mnt
+wait
 /bin/bash || true
 umount /mnt
 sync
