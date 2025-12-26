@@ -2,19 +2,13 @@
 /*
  * Landlock scoped_domains variants
  *
- * See the hierarchy variants from ptrace_test.c
- *
  * Copyright © 2017-2020 Mickaël Salaün <mic@digikod.net>
  * Copyright © 2019-2020 ANSSI
  * Copyright © 2024 Tahera Fahimi <fahimitahera@gmail.com>
  */
 
-#ifndef SCOPED_DOMAINS_FIXTURE_NAME
-#error "SCOPED_DOMAINS_FIXTURE_NAME must be defined"
-#endif
-
 /* clang-format on */
-FIXTURE_VARIANT(SCOPED_DOMAINS_FIXTURE_NAME)
+FIXTURE_VARIANT(scoped_domains)
 {
 	bool domain_both;
 	bool domain_parent;
@@ -29,7 +23,7 @@ FIXTURE_VARIANT(SCOPED_DOMAINS_FIXTURE_NAME)
  *        'P2
  */
 /* clang-format off */
-FIXTURE_VARIANT_ADD(SCOPED_DOMAINS_FIXTURE_NAME, without_domain) {
+FIXTURE_VARIANT_ADD(scoped_domains, without_domain) {
 	/* clang-format on */
 	.domain_both = false,
 	.domain_parent = false,
@@ -46,7 +40,7 @@ FIXTURE_VARIANT_ADD(SCOPED_DOMAINS_FIXTURE_NAME, without_domain) {
  *        '------'
  */
 /* clang-format off */
-FIXTURE_VARIANT_ADD(SCOPED_DOMAINS_FIXTURE_NAME, child_domain) {
+FIXTURE_VARIANT_ADD(scoped_domains, child_domain) {
 	/* clang-format on */
 	.domain_both = false,
 	.domain_parent = false,
@@ -62,7 +56,7 @@ FIXTURE_VARIANT_ADD(SCOPED_DOMAINS_FIXTURE_NAME, child_domain) {
  *            P2
  */
 /* clang-format off */
-FIXTURE_VARIANT_ADD(SCOPED_DOMAINS_FIXTURE_NAME, parent_domain) {
+FIXTURE_VARIANT_ADD(scoped_domains, parent_domain) {
 	/* clang-format on */
 	.domain_both = false,
 	.domain_parent = true,
@@ -79,7 +73,7 @@ FIXTURE_VARIANT_ADD(SCOPED_DOMAINS_FIXTURE_NAME, parent_domain) {
  *         '------'
  */
 /* clang-format off */
-FIXTURE_VARIANT_ADD(SCOPED_DOMAINS_FIXTURE_NAME, sibling_domain) {
+FIXTURE_VARIANT_ADD(scoped_domains, sibling_domain) {
 	/* clang-format on */
 	.domain_both = false,
 	.domain_parent = true,
@@ -96,7 +90,7 @@ FIXTURE_VARIANT_ADD(SCOPED_DOMAINS_FIXTURE_NAME, sibling_domain) {
  * '-------------'
  */
 /* clang-format off */
-FIXTURE_VARIANT_ADD(SCOPED_DOMAINS_FIXTURE_NAME, inherited_domain) {
+FIXTURE_VARIANT_ADD(scoped_domains, inherited_domain) {
 	/* clang-format on */
 	.domain_both = true,
 	.domain_parent = false,
@@ -114,7 +108,7 @@ FIXTURE_VARIANT_ADD(SCOPED_DOMAINS_FIXTURE_NAME, inherited_domain) {
  * '-----------------'
  */
 /* clang-format off */
-FIXTURE_VARIANT_ADD(SCOPED_DOMAINS_FIXTURE_NAME, nested_domain) {
+FIXTURE_VARIANT_ADD(scoped_domains, nested_domain) {
 	/* clang-format on */
 	.domain_both = true,
 	.domain_parent = false,
@@ -132,7 +126,7 @@ FIXTURE_VARIANT_ADD(SCOPED_DOMAINS_FIXTURE_NAME, nested_domain) {
  * '-----------------'
  */
 /* clang-format off */
-FIXTURE_VARIANT_ADD(SCOPED_DOMAINS_FIXTURE_NAME, nested_and_parent_domain) {
+FIXTURE_VARIANT_ADD(scoped_domains, nested_and_parent_domain) {
 	/* clang-format on */
 	.domain_both = true,
 	.domain_parent = true,
@@ -152,7 +146,7 @@ FIXTURE_VARIANT_ADD(SCOPED_DOMAINS_FIXTURE_NAME, nested_and_parent_domain) {
  * '-----------------'
  */
 /* clang-format off */
-FIXTURE_VARIANT_ADD(SCOPED_DOMAINS_FIXTURE_NAME, forked_domains) {
+FIXTURE_VARIANT_ADD(scoped_domains, forked_domains) {
 	/* clang-format on */
 	.domain_both = true,
 	.domain_parent = true,

@@ -86,7 +86,7 @@ static int get_yama_ptrace_scope(void)
 }
 
 /* clang-format off */
-FIXTURE(hierarchy) {};
+FIXTURE(scoped_domains) {};
 /* clang-format on */
 
 /*
@@ -97,20 +97,18 @@ FIXTURE(hierarchy) {};
  * restriction is enforced in addition to any Landlock check, which means that
  * all P2 requests to trace P1 would be denied.
  */
-#define SCOPED_DOMAINS_FIXTURE_NAME hierarchy
 #include "scoped_base_variants.h"
-#undef SCOPED_DOMAINS_FIXTURE_NAME
 
-FIXTURE_SETUP(hierarchy)
+FIXTURE_SETUP(scoped_domains)
 {
 }
 
-FIXTURE_TEARDOWN(hierarchy)
+FIXTURE_TEARDOWN(scoped_domains)
 {
 }
 
 /* Test PTRACE_TRACEME and PTRACE_ATTACH for parent and child. */
-TEST_F(hierarchy, trace)
+TEST_F(scoped_domains, trace)
 {
 	pid_t child, parent;
 	int status, err_proc_read;

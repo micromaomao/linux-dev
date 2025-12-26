@@ -50,9 +50,7 @@ FIXTURE(scoped_domains)
 	struct service_fixture stream_address, dgram_address;
 };
 
-#define SCOPED_DOMAINS_FIXTURE_NAME scoped_domains
 #include "scoped_base_variants.h"
-#undef SCOPED_DOMAINS_FIXTURE_NAME
 
 FIXTURE_SETUP(scoped_domains)
 {
