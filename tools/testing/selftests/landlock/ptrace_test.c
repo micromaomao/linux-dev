@@ -89,13 +89,6 @@ static int get_yama_ptrace_scope(void)
 FIXTURE(hierarchy) {};
 /* clang-format on */
 
-FIXTURE_VARIANT(hierarchy)
-{
-	const bool domain_both;
-	const bool domain_parent;
-	const bool domain_child;
-};
-
 /*
  * Test multiple tracing combinations between a parent process P1 and a child
  * process P2.
@@ -104,144 +97,9 @@ FIXTURE_VARIANT(hierarchy)
  * restriction is enforced in addition to any Landlock check, which means that
  * all P2 requests to trace P1 would be denied.
  */
-
-/*
- *        No domain
- *
- *   P1-.               P1 -> P2 : allow
- *       \              P2 -> P1 : allow
- *        'P2
- */
-/* clang-format off */
-FIXTURE_VARIANT_ADD(hierarchy, allow_without_domain) {
-	/* clang-format on */
-	.domain_both = false,
-	.domain_parent = false,
-	.domain_child = false,
-};
-
-/*
- *        Child domain
- *
- *   P1--.              P1 -> P2 : allow
- *        \             P2 -> P1 : deny
- *        .'-----.
- *        |  P2  |
- *        '------'
- */
-/* clang-format off */
-FIXTURE_VARIANT_ADD(hierarchy, allow_with_one_domain) {
-	/* clang-format on */
-	.domain_both = false,
-	.domain_parent = false,
-	.domain_child = true,
-};
-
-/*
- *        Parent domain
- * .------.
- * |  P1  --.           P1 -> P2 : deny
- * '------'  \          P2 -> P1 : allow
- *            '
- *            P2
- */
-/* clang-format off */
-FIXTURE_VARIANT_ADD(hierarchy, deny_with_parent_domain) {
-	/* clang-format on */
-	.domain_both = false,
-	.domain_parent = true,
-	.domain_child = false,
-};
-
-/*
- *        Parent + child domain (siblings)
- * .------.
- * |  P1  ---.          P1 -> P2 : deny
- * '------'   \         P2 -> P1 : deny
- *         .---'--.
- *         |  P2  |
- *         '------'
- */
-/* clang-format off */
-FIXTURE_VARIANT_ADD(hierarchy, deny_with_sibling_domain) {
-	/* clang-format on */
-	.domain_both = false,
-	.domain_parent = true,
-	.domain_child = true,
-};
-
-/*
- *         Same domain (inherited)
- * .-------------.
- * | P1----.     |      P1 -> P2 : allow
- * |        \    |      P2 -> P1 : allow
- * |         '   |
- * |         P2  |
- * '-------------'
- */
-/* clang-format off */
-FIXTURE_VARIANT_ADD(hierarchy, allow_sibling_domain) {
-	/* clang-format on */
-	.domain_both = true,
-	.domain_parent = false,
-	.domain_child = false,
-};
-
-/*
- *         Inherited + child domain
- * .-----------------.
- * |  P1----.        |  P1 -> P2 : allow
- * |         \       |  P2 -> P1 : deny
- * |        .-'----. |
- * |        |  P2  | |
- * |        '------' |
- * '-----------------'
- */
-/* clang-format off */
-FIXTURE_VARIANT_ADD(hierarchy, allow_with_nested_domain) {
-	/* clang-format on */
-	.domain_both = true,
-	.domain_parent = false,
-	.domain_child = true,
-};
-
-/*
- *         Inherited + parent domain
- * .-----------------.
- * |.------.         |  P1 -> P2 : deny
- * ||  P1  ----.     |  P2 -> P1 : allow
- * |'------'    \    |
- * |             '   |
- * |             P2  |
- * '-----------------'
- */
-/* clang-format off */
-FIXTURE_VARIANT_ADD(hierarchy, deny_with_nested_and_parent_domain) {
-	/* clang-format on */
-	.domain_both = true,
-	.domain_parent = true,
-	.domain_child = false,
-};
-
-/*
- *         Inherited + parent and child domain (siblings)
- * .-----------------.
- * | .------.        |  P1 -> P2 : deny
- * | |  P1  .        |  P2 -> P1 : deny
- * | '------'\       |
- * |          \      |
- * |        .--'---. |
- * |        |  P2  | |
- * |        '------' |
- * '-----------------'
- */
-/* clang-format off */
-FIXTURE_VARIANT_ADD(hierarchy, deny_with_forked_domain) {
-	/* clang-format on */
-	.domain_both = true,
-	.domain_parent = true,
-	.domain_child = true,
-};
+#define SCOPED_DOMAINS_FIXTURE_NAME hierarchy
+#include "scoped_base_variants.h"
+#undef SCOPED_DOMAINS_FIXTURE_NAME
 
 FIXTURE_SETUP(hierarchy)
 {
