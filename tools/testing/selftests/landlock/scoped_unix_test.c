@@ -56,6 +56,9 @@ FIXTURE_SETUP(scoped_domains)
 {
 	drop_caps(_metadata);
 
+	umask(0077);
+	ASSERT_EQ(0, mkdir(PATHNAME_UNIX_SOCK_DIR, 0700));
+
 	memset(&self->stream_address, 0, sizeof(self->stream_address));
 	memset(&self->dgram_address, 0, sizeof(self->dgram_address));
 	set_unix_address(&self->stream_address, 0, true);
@@ -64,17 +67,20 @@ FIXTURE_SETUP(scoped_domains)
 
 FIXTURE_TEARDOWN(scoped_domains)
 {
+	unlink(self->stream_address.unix_addr.sun_path);
+	unlink(self->dgram_address.unix_addr.sun_path);
+	rmdir(PATHNAME_UNIX_SOCK_DIR);
 }
 
 /*
  * Helper for connect_to_parent test. Tests unix_stream_connect() and
  * unix_may_send() for a child connecting to its parent.
  */
-static void test_connect_to_parent_impl(
-	struct __test_metadata *const _metadata,
-	FIXTURE_DATA(scoped_domains) *self,
-	const FIXTURE_VARIANT(scoped_domains) *variant,
-	const bool abstract)
+static void test_connect_to_parent(struct __test_metadata *const _metadata,
+				   FIXTURE_DATA(scoped_domains) * self,
+				   const FIXTURE_VARIANT(scoped_domains) *
+					   variant,
+				   const bool abstract)
 {
 	pid_t child;
 	bool can_connect_to_parent;
@@ -169,11 +175,11 @@ static void test_connect_to_parent_impl(
  * Helper for connect_to_child test. Tests unix_stream_connect() and
  * unix_may_send() for a parent connecting to its child.
  */
-static void test_connect_to_child_impl(
-	struct __test_metadata *const _metadata,
-	FIXTURE_DATA(scoped_domains) *self,
-	const FIXTURE_VARIANT(scoped_domains) *variant,
-	const bool abstract)
+static void test_connect_to_child(struct __test_metadata *const _metadata,
+				  FIXTURE_DATA(scoped_domains) * self,
+				  const FIXTURE_VARIANT(scoped_domains) *
+					  variant,
+				  const bool abstract)
 {
 	pid_t child;
 	bool can_connect_to_child;
@@ -278,74 +284,40 @@ static void test_connect_to_child_impl(
  * Test unix_stream_connect() and unix_may_send() for a child connecting to its
  * parent, when they have scoped domain or no domain.
  */
-TEST_F(scoped_domains, connect_to_parent)
+TEST_F(scoped_domains, abstract_connect_to_parent)
 {
-	test_connect_to_parent_impl(_metadata, self, variant, true);
+	test_connect_to_parent(_metadata, self, variant, true);
 }
 
 /*
  * Test unix_stream_connect() and unix_may_send() for a parent connecting to
  * its child, when they have scoped domain or no domain.
  */
-TEST_F(scoped_domains, connect_to_child)
+TEST_F(scoped_domains, abstract_connect_to_child)
 {
-	test_connect_to_child_impl(_metadata, self, variant, true);
-}
-
-/* Pathname socket tests using a separate fixture. */
-FIXTURE(scoped_domains_pathname)
-{
-	struct service_fixture stream_address, dgram_address;
-};
-
-#define SCOPED_DOMAINS_FIXTURE_NAME scoped_domains_pathname
-#include "scoped_base_variants.h"
-#undef SCOPED_DOMAINS_FIXTURE_NAME
-
-FIXTURE_SETUP(scoped_domains_pathname)
-{
-	drop_caps(_metadata);
-
-	umask(0077);
-	ASSERT_EQ(0, mkdir(PATHNAME_UNIX_SOCK_DIR, 0700));
-
-	memset(&self->stream_address, 0, sizeof(self->stream_address));
-	memset(&self->dgram_address, 0, sizeof(self->dgram_address));
-	set_unix_address(&self->stream_address, 0, false);
-	set_unix_address(&self->dgram_address, 1, false);
-}
-
-FIXTURE_TEARDOWN(scoped_domains_pathname)
-{
-	unlink(self->stream_address.unix_addr.sun_path);
-	unlink(self->dgram_address.unix_addr.sun_path);
-	rmdir(PATHNAME_UNIX_SOCK_DIR);
+	test_connect_to_child(_metadata, self, variant, true);
 }
 
 /*
  * Test unix_stream_connect() and unix_may_send() for a child connecting to its
  * parent with pathname sockets.
  */
-TEST_F(scoped_domains_pathname, connect_to_parent)
+TEST_F(scoped_domains, pathname_connect_to_parent)
 {
-	test_connect_to_parent_impl(
-		_metadata,
-		(FIXTURE_DATA(scoped_domains) *)self,
-		(const FIXTURE_VARIANT(scoped_domains) *)variant,
-		false);
+	test_connect_to_parent(_metadata, (FIXTURE_DATA(scoped_domains) *)self,
+			       (const FIXTURE_VARIANT(scoped_domains) *)variant,
+			       false);
 }
 
 /*
  * Test unix_stream_connect() and unix_may_send() for a parent connecting to
  * its child with pathname sockets.
  */
-TEST_F(scoped_domains_pathname, connect_to_child)
+TEST_F(scoped_domains, pathname_connect_to_child)
 {
-	test_connect_to_child_impl(
-		_metadata,
-		(FIXTURE_DATA(scoped_domains) *)self,
-		(const FIXTURE_VARIANT(scoped_domains) *)variant,
-		false);
+	test_connect_to_child(_metadata, (FIXTURE_DATA(scoped_domains) *)self,
+			      (const FIXTURE_VARIANT(scoped_domains) *)variant,
+			      false);
 }
 
 FIXTURE(scoped_audit)
