@@ -21,6 +21,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "audit.h"
 #include "common.h"
 #include "scoped_common.h"
 
@@ -45,23 +46,6 @@ static void create_fs_domain(struct __test_metadata *const _metadata)
 	EXPECT_EQ(0, close(ruleset_fd));
 }
 
-static void create_named_scoped_domain(struct __test_metadata *const _metadata)
-{
-	int ruleset_fd;
-	const struct landlock_ruleset_attr ruleset_attr = {
-		.scoped = LANDLOCK_SCOPE_NAMED_UNIX_SOCKET,
-	};
-
-	ruleset_fd =
-		landlock_create_ruleset(&ruleset_attr, sizeof(ruleset_attr), 0);
-	ASSERT_LE(0, ruleset_fd)
-	{
-		TH_LOG("Failed to create a ruleset: %s", strerror(errno));
-	}
-	enforce_ruleset(_metadata, ruleset_fd);
-	EXPECT_EQ(0, close(ruleset_fd));
-}
-
 #define NAMED_TMP_DIR TMP_DIR "/named_unix"
 
 static const char stream_path[] = NAMED_TMP_DIR "/stream.sock";
@@ -72,92 +56,24 @@ struct named_service_fixture {
 	socklen_t unix_addr_len;
 };
 
-static void set_named_address(struct named_service_fixture *const srv,
-			      const char *const path)
+static void set_named_unix_address(struct named_service_fixture *const srv,
+				   const unsigned short index)
 {
 	srv->unix_addr.sun_family = AF_UNIX;
 	snprintf(srv->unix_addr.sun_path, sizeof(srv->unix_addr.sun_path),
-		 "%s", path);
+		 NAMED_TMP_DIR "/named-unix-tid%d-index%d.sock", sys_gettid(),
+		 index);
 	srv->unix_addr_len = sizeof(srv->unix_addr);
 }
 
-FIXTURE(scoped_named_domains)
+FIXTURE(scoped_domains)
 {
 	struct named_service_fixture stream_address, dgram_address;
 };
 
-FIXTURE_VARIANT(scoped_named_domains)
-{
-	bool domain_both;
-	bool domain_parent;
-	bool domain_child;
-};
+#include "scoped_base_variants.h"
 
-/* clang-format off */
-FIXTURE_VARIANT_ADD(scoped_named_domains, without_domain) {
-	/* clang-format on */
-	.domain_both = false,
-	.domain_parent = false,
-	.domain_child = false,
-};
-
-/* clang-format off */
-FIXTURE_VARIANT_ADD(scoped_named_domains, child_domain) {
-	/* clang-format on */
-	.domain_both = false,
-	.domain_parent = false,
-	.domain_child = true,
-};
-
-/* clang-format off */
-FIXTURE_VARIANT_ADD(scoped_named_domains, parent_domain) {
-	/* clang-format on */
-	.domain_both = false,
-	.domain_parent = true,
-	.domain_child = false,
-};
-
-/* clang-format off */
-FIXTURE_VARIANT_ADD(scoped_named_domains, sibling_domain) {
-	/* clang-format on */
-	.domain_both = false,
-	.domain_parent = true,
-	.domain_child = true,
-};
-
-/* clang-format off */
-FIXTURE_VARIANT_ADD(scoped_named_domains, inherited_domain) {
-	/* clang-format on */
-	.domain_both = true,
-	.domain_parent = false,
-	.domain_child = false,
-};
-
-/* clang-format off */
-FIXTURE_VARIANT_ADD(scoped_named_domains, nested_domain) {
-	/* clang-format on */
-	.domain_both = true,
-	.domain_parent = false,
-	.domain_child = true,
-};
-
-/* clang-format off */
-FIXTURE_VARIANT_ADD(scoped_named_domains, nested_and_parent_domain) {
-	/* clang-format on */
-	.domain_both = true,
-	.domain_parent = true,
-	.domain_child = false,
-};
-
-/* clang-format off */
-FIXTURE_VARIANT_ADD(scoped_named_domains, forked_domains) {
-	/* clang-format on */
-	.domain_both = true,
-	.domain_parent = true,
-	.domain_child = true,
-};
-
-FIXTURE_SETUP(scoped_named_domains)
+FIXTURE_SETUP(scoped_domains)
 {
 	drop_caps(_metadata);
 
@@ -166,14 +82,14 @@ FIXTURE_SETUP(scoped_named_domains)
 
 	memset(&self->stream_address, 0, sizeof(self->stream_address));
 	memset(&self->dgram_address, 0, sizeof(self->dgram_address));
-	set_named_address(&self->stream_address, stream_path);
-	set_named_address(&self->dgram_address, dgram_path);
+	set_named_unix_address(&self->stream_address, 0);
+	set_named_unix_address(&self->dgram_address, 1);
 }
 
-FIXTURE_TEARDOWN(scoped_named_domains)
+FIXTURE_TEARDOWN(scoped_domains)
 {
-	unlink(stream_path);
-	unlink(dgram_path);
+	unlink(self->stream_address.unix_addr.sun_path);
+	unlink(self->dgram_address.unix_addr.sun_path);
 	rmdir(NAMED_TMP_DIR);
 }
 
@@ -181,7 +97,7 @@ FIXTURE_TEARDOWN(scoped_named_domains)
  * Test unix_stream_connect() and unix_may_send() for a child connecting to its
  * parent, when they have scoped domain or no domain.
  */
-TEST_F(scoped_named_domains, connect_to_parent)
+TEST_F(scoped_domains, connect_to_parent)
 {
 	pid_t child;
 	bool can_connect_to_parent;
@@ -198,7 +114,8 @@ TEST_F(scoped_named_domains, connect_to_parent)
 
 	ASSERT_EQ(0, pipe2(pipe_parent, O_CLOEXEC));
 	if (variant->domain_both) {
-		create_named_scoped_domain(_metadata);
+		create_scoped_domain(_metadata,
+				     LANDLOCK_SCOPE_NAMED_UNIX_SOCKET);
 		if (!__test_passed(_metadata))
 			return;
 	}
@@ -212,7 +129,8 @@ TEST_F(scoped_named_domains, connect_to_parent)
 
 		EXPECT_EQ(0, close(pipe_parent[1]));
 		if (variant->domain_child)
-			create_named_scoped_domain(_metadata);
+			create_scoped_domain(
+				_metadata, LANDLOCK_SCOPE_NAMED_UNIX_SOCKET);
 
 		stream_client = socket(AF_UNIX, SOCK_STREAM, 0);
 		ASSERT_LE(0, stream_client);
@@ -248,7 +166,8 @@ TEST_F(scoped_named_domains, connect_to_parent)
 	}
 	EXPECT_EQ(0, close(pipe_parent[0]));
 	if (variant->domain_parent)
-		create_named_scoped_domain(_metadata);
+		create_scoped_domain(_metadata,
+				     LANDLOCK_SCOPE_NAMED_UNIX_SOCKET);
 
 	stream_server = socket(AF_UNIX, SOCK_STREAM, 0);
 	ASSERT_LE(0, stream_server);
@@ -278,7 +197,7 @@ TEST_F(scoped_named_domains, connect_to_parent)
  * Test unix_stream_connect() and unix_may_send() for a parent connecting to
  * its child, when they have scoped domain or no domain.
  */
-TEST_F(scoped_named_domains, connect_to_child)
+TEST_F(scoped_domains, connect_to_child)
 {
 	pid_t child;
 	bool can_connect_to_child;
@@ -297,7 +216,8 @@ TEST_F(scoped_named_domains, connect_to_child)
 	ASSERT_EQ(0, pipe2(pipe_child, O_CLOEXEC));
 	ASSERT_EQ(0, pipe2(pipe_parent, O_CLOEXEC));
 	if (variant->domain_both) {
-		create_named_scoped_domain(_metadata);
+		create_scoped_domain(_metadata,
+				     LANDLOCK_SCOPE_NAMED_UNIX_SOCKET);
 		if (!__test_passed(_metadata))
 			return;
 	}
@@ -310,7 +230,8 @@ TEST_F(scoped_named_domains, connect_to_child)
 		EXPECT_EQ(0, close(pipe_parent[1]));
 		EXPECT_EQ(0, close(pipe_child[0]));
 		if (variant->domain_child)
-			create_named_scoped_domain(_metadata);
+			create_scoped_domain(
+				_metadata, LANDLOCK_SCOPE_NAMED_UNIX_SOCKET);
 
 		/* Waits for the parent to be in a domain, if any. */
 		ASSERT_EQ(1, read(pipe_parent[0], &buf, 1));
@@ -342,7 +263,8 @@ TEST_F(scoped_named_domains, connect_to_child)
 	EXPECT_EQ(0, close(pipe_parent[0]));
 
 	if (variant->domain_parent)
-		create_named_scoped_domain(_metadata);
+		create_scoped_domain(_metadata,
+				     LANDLOCK_SCOPE_NAMED_UNIX_SOCKET);
 
 	/* Signals that the parent is in a domain, if any. */
 	ASSERT_EQ(1, write(pipe_parent[1], ".", 1));
@@ -381,103 +303,15 @@ TEST_F(scoped_named_domains, connect_to_child)
 		_metadata->exit_code = KSFT_FAIL;
 }
 
-enum named_sandbox_type {
-	NAMED_NO_SANDBOX,
-	NAMED_SCOPE_SANDBOX,
-	NAMED_OTHER_SANDBOX,
-};
-
-FIXTURE(scoped_named_vs_unscoped)
+FIXTURE(scoped_vs_unscoped)
 {
 	struct named_service_fixture parent_stream_address, parent_dgram_address,
 		child_stream_address, child_dgram_address;
 };
 
-FIXTURE_VARIANT(scoped_named_vs_unscoped)
-{
-	const int domain_all;
-	const int domain_parent;
-	const int domain_children;
-	const int domain_child;
-	const int domain_grand_child;
-};
+#include "scoped_multiple_domain_variants.h"
 
-/* clang-format off */
-FIXTURE_VARIANT_ADD(scoped_named_vs_unscoped, deny_scoped) {
-	.domain_all = NAMED_OTHER_SANDBOX,
-	.domain_parent = NAMED_NO_SANDBOX,
-	.domain_children = NAMED_SCOPE_SANDBOX,
-	.domain_child = NAMED_NO_SANDBOX,
-	.domain_grand_child = NAMED_NO_SANDBOX,
-	/* clang-format on */
-};
-
-/* clang-format off */
-FIXTURE_VARIANT_ADD(scoped_named_vs_unscoped, all_scoped) {
-	.domain_all = NAMED_SCOPE_SANDBOX,
-	.domain_parent = NAMED_NO_SANDBOX,
-	.domain_children = NAMED_SCOPE_SANDBOX,
-	.domain_child = NAMED_NO_SANDBOX,
-	.domain_grand_child = NAMED_NO_SANDBOX,
-	/* clang-format on */
-};
-
-/* clang-format off */
-FIXTURE_VARIANT_ADD(scoped_named_vs_unscoped, allow_with_other_domain) {
-	.domain_all = NAMED_OTHER_SANDBOX,
-	.domain_parent = NAMED_NO_SANDBOX,
-	.domain_children = NAMED_OTHER_SANDBOX,
-	.domain_child = NAMED_NO_SANDBOX,
-	.domain_grand_child = NAMED_NO_SANDBOX,
-	/* clang-format on */
-};
-
-/* clang-format off */
-FIXTURE_VARIANT_ADD(scoped_named_vs_unscoped, allow_with_one_domain) {
-	.domain_all = NAMED_NO_SANDBOX,
-	.domain_parent = NAMED_OTHER_SANDBOX,
-	.domain_children = NAMED_NO_SANDBOX,
-	.domain_child = NAMED_SCOPE_SANDBOX,
-	.domain_grand_child = NAMED_NO_SANDBOX,
-	/* clang-format on */
-};
-
-/* clang-format off */
-FIXTURE_VARIANT_ADD(scoped_named_vs_unscoped, allow_with_grand_parent_scoped) {
-	.domain_all = NAMED_NO_SANDBOX,
-	.domain_parent = NAMED_SCOPE_SANDBOX,
-	.domain_children = NAMED_NO_SANDBOX,
-	.domain_child = NAMED_OTHER_SANDBOX,
-	.domain_grand_child = NAMED_NO_SANDBOX,
-	/* clang-format on */
-};
-
-/* clang-format off */
-FIXTURE_VARIANT_ADD(scoped_named_vs_unscoped, allow_with_parents_domain) {
-	.domain_all = NAMED_NO_SANDBOX,
-	.domain_parent = NAMED_SCOPE_SANDBOX,
-	.domain_children = NAMED_NO_SANDBOX,
-	.domain_child = NAMED_SCOPE_SANDBOX,
-	.domain_grand_child = NAMED_NO_SANDBOX,
-	/* clang-format on */
-};
-
-/* clang-format off */
-FIXTURE_VARIANT_ADD(scoped_named_vs_unscoped, deny_with_self_and_grandparent_domain) {
-	.domain_all = NAMED_NO_SANDBOX,
-	.domain_parent = NAMED_SCOPE_SANDBOX,
-	.domain_children = NAMED_NO_SANDBOX,
-	.domain_child = NAMED_NO_SANDBOX,
-	.domain_grand_child = NAMED_SCOPE_SANDBOX,
-	/* clang-format on */
-};
-
-#define NAMED_PARENT_STREAM_PATH NAMED_TMP_DIR "/parent_stream.sock"
-#define NAMED_PARENT_DGRAM_PATH NAMED_TMP_DIR "/parent_dgram.sock"
-#define NAMED_CHILD_STREAM_PATH NAMED_TMP_DIR "/child_stream.sock"
-#define NAMED_CHILD_DGRAM_PATH NAMED_TMP_DIR "/child_dgram.sock"
-
-FIXTURE_SETUP(scoped_named_vs_unscoped)
+FIXTURE_SETUP(scoped_vs_unscoped)
 {
 	drop_caps(_metadata);
 
@@ -486,24 +320,24 @@ FIXTURE_SETUP(scoped_named_vs_unscoped)
 
 	memset(&self->parent_stream_address, 0,
 	       sizeof(self->parent_stream_address));
-	set_named_address(&self->parent_stream_address, NAMED_PARENT_STREAM_PATH);
+	set_named_unix_address(&self->parent_stream_address, 0);
 	memset(&self->parent_dgram_address, 0,
 	       sizeof(self->parent_dgram_address));
-	set_named_address(&self->parent_dgram_address, NAMED_PARENT_DGRAM_PATH);
+	set_named_unix_address(&self->parent_dgram_address, 1);
 	memset(&self->child_stream_address, 0,
 	       sizeof(self->child_stream_address));
-	set_named_address(&self->child_stream_address, NAMED_CHILD_STREAM_PATH);
+	set_named_unix_address(&self->child_stream_address, 2);
 	memset(&self->child_dgram_address, 0,
 	       sizeof(self->child_dgram_address));
-	set_named_address(&self->child_dgram_address, NAMED_CHILD_DGRAM_PATH);
+	set_named_unix_address(&self->child_dgram_address, 3);
 }
 
-FIXTURE_TEARDOWN(scoped_named_vs_unscoped)
+FIXTURE_TEARDOWN(scoped_vs_unscoped)
 {
-	unlink(NAMED_PARENT_STREAM_PATH);
-	unlink(NAMED_PARENT_DGRAM_PATH);
-	unlink(NAMED_CHILD_STREAM_PATH);
-	unlink(NAMED_CHILD_DGRAM_PATH);
+	unlink(self->parent_stream_address.unix_addr.sun_path);
+	unlink(self->parent_dgram_address.unix_addr.sun_path);
+	unlink(self->child_stream_address.unix_addr.sun_path);
+	unlink(self->child_dgram_address.unix_addr.sun_path);
 	rmdir(NAMED_TMP_DIR);
 }
 
@@ -511,7 +345,7 @@ FIXTURE_TEARDOWN(scoped_named_vs_unscoped)
  * Test unix_stream_connect and unix_may_send for parent, child and
  * grand child processes when they can have scoped or non-scoped domains.
  */
-TEST_F(scoped_named_vs_unscoped, named_unix_scoping)
+TEST_F(scoped_vs_unscoped, unix_scoping)
 {
 	pid_t child;
 	int status;
@@ -519,16 +353,17 @@ TEST_F(scoped_named_vs_unscoped, named_unix_scoping)
 	int pipe_parent[2];
 	int stream_server_parent, dgram_server_parent;
 
-	can_connect_to_child = (variant->domain_grand_child != NAMED_SCOPE_SANDBOX);
+	can_connect_to_child = (variant->domain_grand_child != SCOPE_SANDBOX);
 	can_connect_to_parent = (can_connect_to_child &&
-				 (variant->domain_children != NAMED_SCOPE_SANDBOX));
+				 (variant->domain_children != SCOPE_SANDBOX));
 
 	ASSERT_EQ(0, pipe2(pipe_parent, O_CLOEXEC));
 
-	if (variant->domain_all == NAMED_OTHER_SANDBOX)
+	if (variant->domain_all == OTHER_SANDBOX)
 		create_fs_domain(_metadata);
-	else if (variant->domain_all == NAMED_SCOPE_SANDBOX)
-		create_named_scoped_domain(_metadata);
+	else if (variant->domain_all == SCOPE_SANDBOX)
+		create_scoped_domain(_metadata,
+				     LANDLOCK_SCOPE_NAMED_UNIX_SOCKET);
 
 	child = fork();
 	ASSERT_LE(0, child);
@@ -539,10 +374,11 @@ TEST_F(scoped_named_vs_unscoped, named_unix_scoping)
 
 		ASSERT_EQ(0, pipe2(pipe_child, O_CLOEXEC));
 
-		if (variant->domain_children == NAMED_OTHER_SANDBOX)
+		if (variant->domain_children == OTHER_SANDBOX)
 			create_fs_domain(_metadata);
-		else if (variant->domain_children == NAMED_SCOPE_SANDBOX)
-			create_named_scoped_domain(_metadata);
+		else if (variant->domain_children == SCOPE_SANDBOX)
+			create_scoped_domain(
+				_metadata, LANDLOCK_SCOPE_NAMED_UNIX_SOCKET);
 
 		grand_child = fork();
 		ASSERT_LE(0, grand_child);
@@ -554,10 +390,12 @@ TEST_F(scoped_named_vs_unscoped, named_unix_scoping)
 			EXPECT_EQ(0, close(pipe_parent[1]));
 			EXPECT_EQ(0, close(pipe_child[1]));
 
-			if (variant->domain_grand_child == NAMED_OTHER_SANDBOX)
+			if (variant->domain_grand_child == OTHER_SANDBOX)
 				create_fs_domain(_metadata);
-			else if (variant->domain_grand_child == NAMED_SCOPE_SANDBOX)
-				create_named_scoped_domain(_metadata);
+			else if (variant->domain_grand_child == SCOPE_SANDBOX)
+				create_scoped_domain(
+					_metadata,
+					LANDLOCK_SCOPE_NAMED_UNIX_SOCKET);
 
 			stream_client = socket(AF_UNIX, SOCK_STREAM, 0);
 			ASSERT_LE(0, stream_client);
@@ -617,10 +455,11 @@ TEST_F(scoped_named_vs_unscoped, named_unix_scoping)
 			return;
 		}
 		EXPECT_EQ(0, close(pipe_child[0]));
-		if (variant->domain_child == NAMED_OTHER_SANDBOX)
+		if (variant->domain_child == OTHER_SANDBOX)
 			create_fs_domain(_metadata);
-		else if (variant->domain_child == NAMED_SCOPE_SANDBOX)
-			create_named_scoped_domain(_metadata);
+		else if (variant->domain_child == SCOPE_SANDBOX)
+			create_scoped_domain(
+				_metadata, LANDLOCK_SCOPE_NAMED_UNIX_SOCKET);
 
 		stream_server_child = socket(AF_UNIX, SOCK_STREAM, 0);
 		ASSERT_LE(0, stream_server_child);
@@ -643,10 +482,11 @@ TEST_F(scoped_named_vs_unscoped, named_unix_scoping)
 	}
 	EXPECT_EQ(0, close(pipe_parent[0]));
 
-	if (variant->domain_parent == NAMED_OTHER_SANDBOX)
+	if (variant->domain_parent == OTHER_SANDBOX)
 		create_fs_domain(_metadata);
-	else if (variant->domain_parent == NAMED_SCOPE_SANDBOX)
-		create_named_scoped_domain(_metadata);
+	else if (variant->domain_parent == SCOPE_SANDBOX)
+		create_scoped_domain(_metadata,
+				     LANDLOCK_SCOPE_NAMED_UNIX_SOCKET);
 
 	stream_server_parent = socket(AF_UNIX, SOCK_STREAM, 0);
 	ASSERT_LE(0, stream_server_parent);
@@ -671,7 +511,415 @@ TEST_F(scoped_named_vs_unscoped, named_unix_scoping)
 		_metadata->exit_code = KSFT_FAIL;
 }
 
-TEST(named_datagram_sockets)
+FIXTURE(outside_socket)
+{
+	struct named_service_fixture address, transit_address;
+};
+
+FIXTURE_VARIANT(outside_socket)
+{
+	const bool child_socket;
+	const int type;
+};
+
+/* clang-format off */
+FIXTURE_VARIANT_ADD(outside_socket, allow_dgram_child) {
+	/* clang-format on */
+	.child_socket = true,
+	.type = SOCK_DGRAM,
+};
+
+/* clang-format off */
+FIXTURE_VARIANT_ADD(outside_socket, deny_dgram_server) {
+	/* clang-format on */
+	.child_socket = false,
+	.type = SOCK_DGRAM,
+};
+
+/* clang-format off */
+FIXTURE_VARIANT_ADD(outside_socket, allow_stream_child) {
+	/* clang-format on */
+	.child_socket = true,
+	.type = SOCK_STREAM,
+};
+
+/* clang-format off */
+FIXTURE_VARIANT_ADD(outside_socket, deny_stream_server) {
+	/* clang-format on */
+	.child_socket = false,
+	.type = SOCK_STREAM,
+};
+
+FIXTURE_SETUP(outside_socket)
+{
+	drop_caps(_metadata);
+
+	umask(0077);
+	ASSERT_EQ(0, mkdir(NAMED_TMP_DIR, 0700));
+
+	memset(&self->transit_address, 0, sizeof(self->transit_address));
+	set_named_unix_address(&self->transit_address, 0);
+	memset(&self->address, 0, sizeof(self->address));
+	set_named_unix_address(&self->address, 1);
+}
+
+FIXTURE_TEARDOWN(outside_socket)
+{
+	unlink(self->transit_address.unix_addr.sun_path);
+	unlink(self->address.unix_addr.sun_path);
+	rmdir(NAMED_TMP_DIR);
+}
+
+/*
+ * Test unix_stream_connect and unix_may_send for parent and child processes
+ * when connecting socket has different domain than the process using it.
+ */
+TEST_F(outside_socket, socket_with_different_domain)
+{
+	pid_t child;
+	int err, status;
+	int pipe_child[2], pipe_parent[2];
+	char buf_parent;
+	int server_socket;
+
+	ASSERT_EQ(0, pipe2(pipe_child, O_CLOEXEC));
+	ASSERT_EQ(0, pipe2(pipe_parent, O_CLOEXEC));
+
+	child = fork();
+	ASSERT_LE(0, child);
+	if (child == 0) {
+		int client_socket;
+		char buf_child;
+
+		EXPECT_EQ(0, close(pipe_parent[1]));
+		EXPECT_EQ(0, close(pipe_child[0]));
+
+		/* Client always has a domain. */
+		create_scoped_domain(_metadata,
+				     LANDLOCK_SCOPE_NAMED_UNIX_SOCKET);
+
+		if (variant->child_socket) {
+			int data_socket, passed_socket, stream_server;
+
+			passed_socket = socket(AF_UNIX, variant->type, 0);
+			ASSERT_LE(0, passed_socket);
+			stream_server = socket(AF_UNIX, SOCK_STREAM, 0);
+			ASSERT_LE(0, stream_server);
+			ASSERT_EQ(0, bind(stream_server,
+					  (struct sockaddr *)&self->transit_address.unix_addr,
+					  self->transit_address.unix_addr_len));
+			ASSERT_EQ(0, listen(stream_server, backlog));
+			ASSERT_EQ(1, write(pipe_child[1], ".", 1));
+			data_socket = accept(stream_server, NULL, NULL);
+			ASSERT_LE(0, data_socket);
+			ASSERT_EQ(0, send_fd(data_socket, passed_socket));
+			EXPECT_EQ(0, close(passed_socket));
+			EXPECT_EQ(0, close(stream_server));
+		}
+
+		client_socket = socket(AF_UNIX, variant->type, 0);
+		ASSERT_LE(0, client_socket);
+
+		/* Waits for parent signal for connection. */
+		ASSERT_EQ(1, read(pipe_parent[0], &buf_child, 1));
+		err = connect(client_socket,
+			      (struct sockaddr *)&self->address.unix_addr,
+			      self->address.unix_addr_len);
+		if (variant->child_socket) {
+			EXPECT_EQ(0, err);
+		} else {
+			EXPECT_EQ(-1, err);
+			EXPECT_EQ(EPERM, errno);
+		}
+		EXPECT_EQ(0, close(client_socket));
+		_exit(_metadata->exit_code);
+		return;
+	}
+	EXPECT_EQ(0, close(pipe_child[1]));
+	EXPECT_EQ(0, close(pipe_parent[0]));
+
+	if (variant->child_socket) {
+		int client_child = socket(AF_UNIX, SOCK_STREAM, 0);
+
+		ASSERT_LE(0, client_child);
+		ASSERT_EQ(1, read(pipe_child[0], &buf_parent, 1));
+		ASSERT_EQ(0, connect(client_child,
+				     (struct sockaddr *)&self->transit_address.unix_addr,
+				     self->transit_address.unix_addr_len));
+		server_socket = recv_fd(client_child);
+		EXPECT_EQ(0, close(client_child));
+	} else {
+		server_socket = socket(AF_UNIX, variant->type, 0);
+	}
+	ASSERT_LE(0, server_socket);
+
+	/* Server always has a domain. */
+	create_scoped_domain(_metadata, LANDLOCK_SCOPE_NAMED_UNIX_SOCKET);
+
+	ASSERT_EQ(0, bind(server_socket,
+			  (struct sockaddr *)&self->address.unix_addr,
+			  self->address.unix_addr_len));
+	if (variant->type == SOCK_STREAM)
+		ASSERT_EQ(0, listen(server_socket, backlog));
+
+	/* Signals to child that the parent is listening. */
+	ASSERT_EQ(1, write(pipe_parent[1], ".", 1));
+
+	ASSERT_EQ(child, waitpid(child, &status, 0));
+	EXPECT_EQ(0, close(server_socket));
+
+	if (WIFSIGNALED(status) || !WIFEXITED(status) ||
+	    WEXITSTATUS(status) != EXIT_SUCCESS)
+		_metadata->exit_code = KSFT_FAIL;
+}
+
+/* clang-format off */
+FIXTURE(various_address_sockets) {};
+/* clang-format on */
+
+FIXTURE_VARIANT(various_address_sockets)
+{
+	const int domain;
+};
+
+/* clang-format off */
+FIXTURE_VARIANT_ADD(various_address_sockets, pathname_socket_scoped_domain) {
+	/* clang-format on */
+	.domain = SCOPE_SANDBOX,
+};
+
+/* clang-format off */
+FIXTURE_VARIANT_ADD(various_address_sockets, pathname_socket_other_domain) {
+	/* clang-format on */
+	.domain = OTHER_SANDBOX,
+};
+
+/* clang-format off */
+FIXTURE_VARIANT_ADD(various_address_sockets, pathname_socket_no_domain) {
+	/* clang-format on */
+	.domain = NO_SANDBOX,
+};
+
+FIXTURE_SETUP(various_address_sockets)
+{
+	drop_caps(_metadata);
+
+	umask(0077);
+	ASSERT_EQ(0, mkdir(NAMED_TMP_DIR, 0700));
+}
+
+FIXTURE_TEARDOWN(various_address_sockets)
+{
+	EXPECT_EQ(0, unlink(stream_path));
+	EXPECT_EQ(0, unlink(dgram_path));
+	EXPECT_EQ(0, rmdir(NAMED_TMP_DIR));
+}
+
+TEST_F(various_address_sockets, scoped_pathname_sockets)
+{
+	pid_t child;
+	int status;
+	char buf_child, buf_parent;
+	int pipe_parent[2];
+	int unnamed_sockets[2];
+	int stream_pathname_socket, dgram_pathname_socket,
+		stream_abstract_socket, dgram_abstract_socket, data_socket;
+	struct service_fixture stream_abstract_addr, dgram_abstract_addr;
+	struct sockaddr_un stream_pathname_addr = {
+		.sun_family = AF_UNIX,
+	};
+	struct sockaddr_un dgram_pathname_addr = {
+		.sun_family = AF_UNIX,
+	};
+
+	/* Pathname address. */
+	snprintf(stream_pathname_addr.sun_path,
+		 sizeof(stream_pathname_addr.sun_path), "%s", stream_path);
+	snprintf(dgram_pathname_addr.sun_path,
+		 sizeof(dgram_pathname_addr.sun_path), "%s", dgram_path);
+
+	/* Abstract address. */
+	memset(&stream_abstract_addr, 0, sizeof(stream_abstract_addr));
+	set_unix_address(&stream_abstract_addr, 0);
+	memset(&dgram_abstract_addr, 0, sizeof(dgram_abstract_addr));
+	set_unix_address(&dgram_abstract_addr, 1);
+
+	/* Unnamed address for datagram socket. */
+	ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_DGRAM, 0, unnamed_sockets));
+
+	ASSERT_EQ(0, pipe2(pipe_parent, O_CLOEXEC));
+
+	child = fork();
+	ASSERT_LE(0, child);
+	if (child == 0) {
+		int err;
+
+		EXPECT_EQ(0, close(pipe_parent[1]));
+		EXPECT_EQ(0, close(unnamed_sockets[1]));
+
+		if (variant->domain == SCOPE_SANDBOX)
+			create_scoped_domain(
+				_metadata, LANDLOCK_SCOPE_NAMED_UNIX_SOCKET);
+		else if (variant->domain == OTHER_SANDBOX)
+			create_fs_domain(_metadata);
+
+		/* Waits for parent to listen. */
+		ASSERT_EQ(1, read(pipe_parent[0], &buf_child, 1));
+		EXPECT_EQ(0, close(pipe_parent[0]));
+
+		/* Checks that we can send data through a datagram socket. */
+		ASSERT_EQ(1, write(unnamed_sockets[0], "a", 1));
+		EXPECT_EQ(0, close(unnamed_sockets[0]));
+
+		/* Connects with pathname sockets. */
+		stream_pathname_socket = socket(AF_UNIX, SOCK_STREAM, 0);
+		ASSERT_LE(0, stream_pathname_socket);
+		err = connect(stream_pathname_socket,
+			      (struct sockaddr *)&stream_pathname_addr,
+			      sizeof(stream_pathname_addr));
+		if (variant->domain == SCOPE_SANDBOX) {
+			EXPECT_EQ(-1, err);
+			EXPECT_EQ(EPERM, errno);
+		} else {
+			EXPECT_EQ(0, err);
+			ASSERT_EQ(1, write(stream_pathname_socket, "b", 1));
+		}
+		EXPECT_EQ(0, close(stream_pathname_socket));
+
+		/* Sends without connection. */
+		dgram_pathname_socket = socket(AF_UNIX, SOCK_DGRAM, 0);
+		ASSERT_LE(0, dgram_pathname_socket);
+		err = sendto(dgram_pathname_socket, "c", 1, 0,
+			     (struct sockaddr *)&dgram_pathname_addr,
+			     sizeof(dgram_pathname_addr));
+		if (variant->domain == SCOPE_SANDBOX) {
+			EXPECT_EQ(-1, err);
+			EXPECT_EQ(EPERM, errno);
+		} else {
+			EXPECT_EQ(1, err);
+		}
+
+		/* Sends with connection. */
+		err = connect(dgram_pathname_socket,
+			      (struct sockaddr *)&dgram_pathname_addr,
+			      sizeof(dgram_pathname_addr));
+		if (variant->domain == SCOPE_SANDBOX) {
+			EXPECT_EQ(-1, err);
+			EXPECT_EQ(EPERM, errno);
+		} else {
+			EXPECT_EQ(0, err);
+			ASSERT_EQ(1, write(dgram_pathname_socket, "d", 1));
+		}
+		EXPECT_EQ(0, close(dgram_pathname_socket));
+
+		/* Connects with abstract sockets. */
+		stream_abstract_socket = socket(AF_UNIX, SOCK_STREAM, 0);
+		ASSERT_LE(0, stream_abstract_socket);
+		ASSERT_EQ(0, connect(stream_abstract_socket,
+				     &stream_abstract_addr.unix_addr,
+				     stream_abstract_addr.unix_addr_len));
+		ASSERT_EQ(1, write(stream_abstract_socket, "e", 1));
+		EXPECT_EQ(0, close(stream_abstract_socket));
+
+		/* Sends without connection. */
+		dgram_abstract_socket = socket(AF_UNIX, SOCK_DGRAM, 0);
+		ASSERT_LE(0, dgram_abstract_socket);
+		ASSERT_EQ(1, sendto(dgram_abstract_socket, "f", 1, 0,
+				    &dgram_abstract_addr.unix_addr,
+				    dgram_abstract_addr.unix_addr_len));
+
+		/* Sends with connection. */
+		ASSERT_EQ(0, connect(dgram_abstract_socket,
+				     &dgram_abstract_addr.unix_addr,
+				     dgram_abstract_addr.unix_addr_len));
+		ASSERT_EQ(1, write(dgram_abstract_socket, "g", 1));
+		EXPECT_EQ(0, close(dgram_abstract_socket));
+
+		_exit(_metadata->exit_code);
+		return;
+	}
+	EXPECT_EQ(0, close(pipe_parent[0]));
+	EXPECT_EQ(0, close(unnamed_sockets[0]));
+
+	/* Sets up pathname servers. */
+	stream_pathname_socket = socket(AF_UNIX, SOCK_STREAM, 0);
+	ASSERT_LE(0, stream_pathname_socket);
+	ASSERT_EQ(0, bind(stream_pathname_socket,
+			  (struct sockaddr *)&stream_pathname_addr,
+			  sizeof(stream_pathname_addr)));
+	ASSERT_EQ(0, listen(stream_pathname_socket, backlog));
+
+	dgram_pathname_socket = socket(AF_UNIX, SOCK_DGRAM, 0);
+	ASSERT_LE(0, dgram_pathname_socket);
+	ASSERT_EQ(0, bind(dgram_pathname_socket,
+			  (struct sockaddr *)&dgram_pathname_addr,
+			  sizeof(dgram_pathname_addr)));
+
+	/* Sets up abstract servers. */
+	stream_abstract_socket = socket(AF_UNIX, SOCK_STREAM, 0);
+	ASSERT_LE(0, stream_abstract_socket);
+	ASSERT_EQ(0,
+		  bind(stream_abstract_socket, &stream_abstract_addr.unix_addr,
+		       stream_abstract_addr.unix_addr_len));
+
+	dgram_abstract_socket = socket(AF_UNIX, SOCK_DGRAM, 0);
+	ASSERT_LE(0, dgram_abstract_socket);
+	ASSERT_EQ(0, bind(dgram_abstract_socket, &dgram_abstract_addr.unix_addr,
+			  dgram_abstract_addr.unix_addr_len));
+	ASSERT_EQ(0, listen(stream_abstract_socket, backlog));
+
+	ASSERT_EQ(1, write(pipe_parent[1], ".", 1));
+	EXPECT_EQ(0, close(pipe_parent[1]));
+
+	/* Reads from unnamed socket. */
+	ASSERT_EQ(1, read(unnamed_sockets[1], &buf_parent, sizeof(buf_parent)));
+	ASSERT_EQ('a', buf_parent);
+	EXPECT_LE(0, close(unnamed_sockets[1]));
+
+	if (variant->domain != SCOPE_SANDBOX) {
+		/* Reads from pathname sockets if allowed to send. */
+		data_socket = accept(stream_pathname_socket, NULL, NULL);
+		ASSERT_LE(0, data_socket);
+		ASSERT_EQ(1,
+			  read(data_socket, &buf_parent, sizeof(buf_parent)));
+		ASSERT_EQ('b', buf_parent);
+		EXPECT_EQ(0, close(data_socket));
+
+		ASSERT_EQ(1, read(dgram_pathname_socket, &buf_parent,
+				  sizeof(buf_parent)));
+		ASSERT_EQ('c', buf_parent);
+		ASSERT_EQ(1, read(dgram_pathname_socket, &buf_parent,
+				  sizeof(buf_parent)));
+		ASSERT_EQ('d', buf_parent);
+	}
+	EXPECT_EQ(0, close(stream_pathname_socket));
+	EXPECT_EQ(0, close(dgram_pathname_socket));
+
+	/* Reads from abstract sockets (always allowed). */
+	data_socket = accept(stream_abstract_socket, NULL, NULL);
+	ASSERT_LE(0, data_socket);
+	ASSERT_EQ(1, read(data_socket, &buf_parent, sizeof(buf_parent)));
+	ASSERT_EQ('e', buf_parent);
+	EXPECT_EQ(0, close(data_socket));
+
+	ASSERT_EQ(1,
+		  read(dgram_abstract_socket, &buf_parent, sizeof(buf_parent)));
+	ASSERT_EQ('f', buf_parent);
+	ASSERT_EQ(1,
+		  read(dgram_abstract_socket, &buf_parent, sizeof(buf_parent)));
+	ASSERT_EQ('g', buf_parent);
+
+	/* Waits for all abstract socket tests. */
+	ASSERT_EQ(child, waitpid(child, &status, 0));
+	EXPECT_EQ(0, close(stream_abstract_socket));
+	EXPECT_EQ(0, close(dgram_abstract_socket));
+
+	if (WIFSIGNALED(status) || !WIFEXITED(status) ||
+	    WEXITSTATUS(status) != EXIT_SUCCESS)
+		_metadata->exit_code = KSFT_FAIL;
+}
+
+TEST(datagram_sockets)
 {
 	struct named_service_fixture connected_addr, non_connected_addr;
 	int server_conn_socket, server_unconn_socket;
@@ -686,9 +934,9 @@ TEST(named_datagram_sockets)
 	ASSERT_EQ(0, mkdir(NAMED_TMP_DIR, 0700));
 
 	memset(&connected_addr, 0, sizeof(connected_addr));
-	set_named_address(&connected_addr, NAMED_TMP_DIR "/conn_dgram.sock");
+	set_named_unix_address(&connected_addr, 0);
 	memset(&non_connected_addr, 0, sizeof(non_connected_addr));
-	set_named_address(&non_connected_addr, NAMED_TMP_DIR "/non_conn_dgram.sock");
+	set_named_unix_address(&non_connected_addr, 1);
 
 	ASSERT_EQ(0, pipe2(pipe_parent, O_CLOEXEC));
 	ASSERT_EQ(0, pipe2(pipe_child, O_CLOEXEC));
@@ -724,7 +972,8 @@ TEST(named_datagram_sockets)
 		ASSERT_EQ(1, write(pipe_child[1], ".", 1));
 
 		/* Scopes the domain. */
-		create_named_scoped_domain(_metadata);
+		create_scoped_domain(_metadata,
+				     LANDLOCK_SCOPE_NAMED_UNIX_SOCKET);
 
 		/*
 		 * Connected socket sends data to the receiver, but the
@@ -776,8 +1025,8 @@ TEST(named_datagram_sockets)
 	EXPECT_EQ(0, close(server_unconn_socket));
 
 	/* Cleanup */
-	unlink(NAMED_TMP_DIR "/conn_dgram.sock");
-	unlink(NAMED_TMP_DIR "/non_conn_dgram.sock");
+	unlink(connected_addr.unix_addr.sun_path);
+	unlink(non_connected_addr.unix_addr.sun_path);
 	rmdir(NAMED_TMP_DIR);
 
 	if (WIFSIGNALED(status) || !WIFEXITED(status) ||
@@ -785,7 +1034,7 @@ TEST(named_datagram_sockets)
 		_metadata->exit_code = KSFT_FAIL;
 }
 
-TEST(named_self_connect)
+TEST(self_connect)
 {
 	struct named_service_fixture connected_addr, non_connected_addr;
 	int connected_socket, non_connected_socket, status;
@@ -797,9 +1046,9 @@ TEST(named_self_connect)
 	ASSERT_EQ(0, mkdir(NAMED_TMP_DIR, 0700));
 
 	memset(&connected_addr, 0, sizeof(connected_addr));
-	set_named_address(&connected_addr, NAMED_TMP_DIR "/self_conn.sock");
+	set_named_unix_address(&connected_addr, 0);
 	memset(&non_connected_addr, 0, sizeof(non_connected_addr));
-	set_named_address(&non_connected_addr, NAMED_TMP_DIR "/self_non_conn.sock");
+	set_named_unix_address(&non_connected_addr, 1);
 
 	connected_socket = socket(AF_UNIX, SOCK_DGRAM, 0);
 	non_connected_socket = socket(AF_UNIX, SOCK_DGRAM, 0);
@@ -817,7 +1066,8 @@ TEST(named_self_connect)
 	ASSERT_LE(0, child);
 	if (child == 0) {
 		/* Child's domain is scoped. */
-		create_named_scoped_domain(_metadata);
+		create_scoped_domain(_metadata,
+				     LANDLOCK_SCOPE_NAMED_UNIX_SOCKET);
 
 		/*
 		 * The child inherits the sockets, and cannot connect or
@@ -851,8 +1101,8 @@ TEST(named_self_connect)
 	EXPECT_EQ(0, close(non_connected_socket));
 
 	/* Cleanup */
-	unlink(NAMED_TMP_DIR "/self_conn.sock");
-	unlink(NAMED_TMP_DIR "/self_non_conn.sock");
+	unlink(connected_addr.unix_addr.sun_path);
+	unlink(non_connected_addr.unix_addr.sun_path);
 	rmdir(NAMED_TMP_DIR);
 
 	if (WIFSIGNALED(status) || !WIFEXITED(status) ||

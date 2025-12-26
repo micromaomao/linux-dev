@@ -282,6 +282,8 @@ static int hook_unix_stream_connect(struct sock *const sock,
 				    struct sock *const newsk)
 {
 	size_t handle_layer;
+	access_mask_t scope;
+	enum landlock_request_type request_type;
 	const struct landlock_cred_security *const subject =
 		landlock_get_applicable_subject(current_cred(), unix_scope,
 						&handle_layer);
@@ -291,48 +293,37 @@ static int hook_unix_stream_connect(struct sock *const sock,
 		return 0;
 
 	if (is_abstract_socket(other)) {
-		if (!sock_is_scoped(other, subject->domain,
-				    LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET))
-			return 0;
-
-		landlock_log_denial(subject, &(struct landlock_request) {
-			.type = LANDLOCK_REQUEST_SCOPE_ABSTRACT_UNIX_SOCKET,
-			.audit = {
-				.type = LSM_AUDIT_DATA_NET,
-				.u.net = &(struct lsm_network_audit) {
-					.sk = other,
-				},
-			},
-			.layer_plus_one = handle_layer + 1,
-		});
-		return -EPERM;
+		scope = LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET;
+		request_type = LANDLOCK_REQUEST_SCOPE_ABSTRACT_UNIX_SOCKET;
+	} else if (is_named_socket(other)) {
+		scope = LANDLOCK_SCOPE_NAMED_UNIX_SOCKET;
+		request_type = LANDLOCK_REQUEST_SCOPE_NAMED_UNIX_SOCKET;
+	} else {
+		return 0;
 	}
 
-	if (is_named_socket(other)) {
-		if (!sock_is_scoped(other, subject->domain,
-				    LANDLOCK_SCOPE_NAMED_UNIX_SOCKET))
-			return 0;
+	if (!sock_is_scoped(other, subject->domain, scope))
+		return 0;
 
-		landlock_log_denial(subject, &(struct landlock_request) {
-			.type = LANDLOCK_REQUEST_SCOPE_NAMED_UNIX_SOCKET,
-			.audit = {
-				.type = LSM_AUDIT_DATA_NET,
-				.u.net = &(struct lsm_network_audit) {
-					.sk = other,
-				},
+	landlock_log_denial(subject, &(struct landlock_request) {
+		.type = request_type,
+		.audit = {
+			.type = LSM_AUDIT_DATA_NET,
+			.u.net = &(struct lsm_network_audit) {
+				.sk = other,
 			},
-			.layer_plus_one = handle_layer + 1,
-		});
-		return -EPERM;
-	}
-
-	return 0;
+		},
+		.layer_plus_one = handle_layer + 1,
+	});
+	return -EPERM;
 }
 
 static int hook_unix_may_send(struct socket *const sock,
 			      struct socket *const other)
 {
 	size_t handle_layer;
+	access_mask_t scope;
+	enum landlock_request_type request_type;
 	const struct landlock_cred_security *const subject =
 		landlock_get_applicable_subject(current_cred(), unix_scope,
 						&handle_layer);
@@ -348,42 +339,29 @@ static int hook_unix_may_send(struct socket *const sock,
 		return 0;
 
 	if (is_abstract_socket(other->sk)) {
-		if (!sock_is_scoped(other->sk, subject->domain,
-				    LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET))
-			return 0;
-
-		landlock_log_denial(subject, &(struct landlock_request) {
-			.type = LANDLOCK_REQUEST_SCOPE_ABSTRACT_UNIX_SOCKET,
-			.audit = {
-				.type = LSM_AUDIT_DATA_NET,
-				.u.net = &(struct lsm_network_audit) {
-					.sk = other->sk,
-				},
-			},
-			.layer_plus_one = handle_layer + 1,
-		});
-		return -EPERM;
+		scope = LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET;
+		request_type = LANDLOCK_REQUEST_SCOPE_ABSTRACT_UNIX_SOCKET;
+	} else if (is_named_socket(other->sk)) {
+		scope = LANDLOCK_SCOPE_NAMED_UNIX_SOCKET;
+		request_type = LANDLOCK_REQUEST_SCOPE_NAMED_UNIX_SOCKET;
+	} else {
+		return 0;
 	}
 
-	if (is_named_socket(other->sk)) {
-		if (!sock_is_scoped(other->sk, subject->domain,
-				    LANDLOCK_SCOPE_NAMED_UNIX_SOCKET))
-			return 0;
+	if (!sock_is_scoped(other->sk, subject->domain, scope))
+		return 0;
 
-		landlock_log_denial(subject, &(struct landlock_request) {
-			.type = LANDLOCK_REQUEST_SCOPE_NAMED_UNIX_SOCKET,
-			.audit = {
-				.type = LSM_AUDIT_DATA_NET,
-				.u.net = &(struct lsm_network_audit) {
-					.sk = other->sk,
-				},
+	landlock_log_denial(subject, &(struct landlock_request) {
+		.type = request_type,
+		.audit = {
+			.type = LSM_AUDIT_DATA_NET,
+			.u.net = &(struct lsm_network_audit) {
+				.sk = other->sk,
 			},
-			.layer_plus_one = handle_layer + 1,
-		});
-		return -EPERM;
-	}
-
-	return 0;
+		},
+		.layer_plus_one = handle_layer + 1,
+	});
+	return -EPERM;
 }
 
 static const struct access_masks signal_scope = {
