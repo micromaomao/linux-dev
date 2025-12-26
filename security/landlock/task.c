@@ -233,15 +233,15 @@ static bool domain_is_scoped(const struct landlock_ruleset *const client,
 }
 
 static bool sock_is_scoped(struct sock *const other,
-			   const struct landlock_ruleset *const domain)
+			   const struct landlock_ruleset *const domain,
+			   access_mask_t scope)
 {
 	const struct landlock_ruleset *dom_other;
 
 	/* The credentials will not change. */
 	lockdep_assert_held(&unix_sk(other)->lock);
 	dom_other = landlock_cred(other->sk_socket->file->f_cred)->domain;
-	return domain_is_scoped(domain, dom_other,
-				LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET);
+	return domain_is_scoped(domain, dom_other, scope);
 }
 
 static bool is_abstract_socket(struct sock *const sock)
@@ -258,8 +258,23 @@ static bool is_abstract_socket(struct sock *const sock)
 	return false;
 }
 
+static bool is_named_socket(struct sock *const sock)
+{
+	struct unix_address *addr = unix_sk(sock)->addr;
+
+	if (!addr)
+		return false;
+
+	if (addr->len >= offsetof(struct sockaddr_un, sun_path) + 1 &&
+	    addr->name->sun_path[0] != '\0')
+		return true;
+
+	return false;
+}
+
 static const struct access_masks unix_scope = {
-	.scope = LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET,
+	.scope = LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET |
+		 LANDLOCK_SCOPE_NAMED_UNIX_SOCKET,
 };
 
 static int hook_unix_stream_connect(struct sock *const sock,
@@ -275,23 +290,43 @@ static int hook_unix_stream_connect(struct sock *const sock,
 	if (!subject)
 		return 0;
 
-	if (!is_abstract_socket(other))
-		return 0;
+	if (is_abstract_socket(other)) {
+		if (!sock_is_scoped(other, subject->domain,
+				    LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET))
+			return 0;
 
-	if (!sock_is_scoped(other, subject->domain))
-		return 0;
-
-	landlock_log_denial(subject, &(struct landlock_request) {
-		.type = LANDLOCK_REQUEST_SCOPE_ABSTRACT_UNIX_SOCKET,
-		.audit = {
-			.type = LSM_AUDIT_DATA_NET,
-			.u.net = &(struct lsm_network_audit) {
-				.sk = other,
+		landlock_log_denial(subject, &(struct landlock_request) {
+			.type = LANDLOCK_REQUEST_SCOPE_ABSTRACT_UNIX_SOCKET,
+			.audit = {
+				.type = LSM_AUDIT_DATA_NET,
+				.u.net = &(struct lsm_network_audit) {
+					.sk = other,
+				},
 			},
-		},
-		.layer_plus_one = handle_layer + 1,
-	});
-	return -EPERM;
+			.layer_plus_one = handle_layer + 1,
+		});
+		return -EPERM;
+	}
+
+	if (is_named_socket(other)) {
+		if (!sock_is_scoped(other, subject->domain,
+				    LANDLOCK_SCOPE_NAMED_UNIX_SOCKET))
+			return 0;
+
+		landlock_log_denial(subject, &(struct landlock_request) {
+			.type = LANDLOCK_REQUEST_SCOPE_NAMED_UNIX_SOCKET,
+			.audit = {
+				.type = LSM_AUDIT_DATA_NET,
+				.u.net = &(struct lsm_network_audit) {
+					.sk = other,
+				},
+			},
+			.layer_plus_one = handle_layer + 1,
+		});
+		return -EPERM;
+	}
+
+	return 0;
 }
 
 static int hook_unix_may_send(struct socket *const sock,
@@ -312,23 +347,43 @@ static int hook_unix_may_send(struct socket *const sock,
 	if (unix_peer(sock->sk) == other->sk)
 		return 0;
 
-	if (!is_abstract_socket(other->sk))
-		return 0;
+	if (is_abstract_socket(other->sk)) {
+		if (!sock_is_scoped(other->sk, subject->domain,
+				    LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET))
+			return 0;
 
-	if (!sock_is_scoped(other->sk, subject->domain))
-		return 0;
-
-	landlock_log_denial(subject, &(struct landlock_request) {
-		.type = LANDLOCK_REQUEST_SCOPE_ABSTRACT_UNIX_SOCKET,
-		.audit = {
-			.type = LSM_AUDIT_DATA_NET,
-			.u.net = &(struct lsm_network_audit) {
-				.sk = other->sk,
+		landlock_log_denial(subject, &(struct landlock_request) {
+			.type = LANDLOCK_REQUEST_SCOPE_ABSTRACT_UNIX_SOCKET,
+			.audit = {
+				.type = LSM_AUDIT_DATA_NET,
+				.u.net = &(struct lsm_network_audit) {
+					.sk = other->sk,
+				},
 			},
-		},
-		.layer_plus_one = handle_layer + 1,
-	});
-	return -EPERM;
+			.layer_plus_one = handle_layer + 1,
+		});
+		return -EPERM;
+	}
+
+	if (is_named_socket(other->sk)) {
+		if (!sock_is_scoped(other->sk, subject->domain,
+				    LANDLOCK_SCOPE_NAMED_UNIX_SOCKET))
+			return 0;
+
+		landlock_log_denial(subject, &(struct landlock_request) {
+			.type = LANDLOCK_REQUEST_SCOPE_NAMED_UNIX_SOCKET,
+			.audit = {
+				.type = LSM_AUDIT_DATA_NET,
+				.u.net = &(struct lsm_network_audit) {
+					.sk = other->sk,
+				},
+			},
+			.layer_plus_one = handle_layer + 1,
+		});
+		return -EPERM;
+	}
+
+	return 0;
 }
 
 static const struct access_masks signal_scope = {
