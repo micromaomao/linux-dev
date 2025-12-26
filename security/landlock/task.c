@@ -281,7 +281,7 @@ static int hook_unix_stream_connect(struct sock *const sock,
 		return 0;
 
 	addr = unix_sk(other)->addr;
-	/* Unnamed sockets have no address; nothing to control. */
+	/* Unnamed sockets are not restricted. */
 	if (!addr)
 		return 0;
 
@@ -332,7 +332,7 @@ static int hook_unix_may_send(struct socket *const sock,
 		return 0;
 
 	addr = unix_sk(other->sk)->addr;
-	/* Unnamed sockets have no address; nothing to control. */
+	/* Unnamed sockets are not restricted. */
 	if (!addr)
 		return 0;
 
@@ -340,7 +340,6 @@ static int hook_unix_may_send(struct socket *const sock,
 		scope = LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET;
 		request_type = LANDLOCK_REQUEST_SCOPE_ABSTRACT_UNIX_SOCKET;
 	} else {
-		/* Pathname socket. */
 		scope = LANDLOCK_SCOPE_PATHNAME_UNIX_SOCKET;
 		request_type = LANDLOCK_REQUEST_SCOPE_PATHNAME_UNIX_SOCKET;
 	}
