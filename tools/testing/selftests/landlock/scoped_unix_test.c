@@ -27,22 +27,6 @@
 /* Number of pending connections queue to be hold. */
 const short backlog = 10;
 
-/*
- * Socket type variants for parameterizing tests to cover both
- * abstract sockets (sun_path[0] == '\0') and pathname sockets.
- */
-enum socket_type {
-	SOCKET_TYPE_ABSTRACT,
-	SOCKET_TYPE_PATHNAME,
-};
-
-static __u16 get_scope(enum socket_type type)
-{
-	return type == SOCKET_TYPE_ABSTRACT ?
-		       LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET :
-		       LANDLOCK_SCOPE_PATHNAME_UNIX_SOCKET;
-}
-
 static void create_fs_domain(struct __test_metadata *const _metadata)
 {
 	int ruleset_fd;
@@ -66,58 +50,39 @@ FIXTURE(scoped_domains)
 	struct service_fixture stream_address, dgram_address;
 };
 
-#define SCOPED_DOMAINS_EXTRA_FIELDS enum socket_type socket_type;
-
-/* Abstract socket variants */
-#define SCOPED_DOMAINS_VARIANT_PREFIX abstract_
-#define SCOPED_DOMAINS_EXTRA_INIT .socket_type = SOCKET_TYPE_ABSTRACT,
-#include "scoped_base_variants.h"
-
-/* Pathname socket variants */
-#define SCOPED_DOMAINS_SKIP_FIXTURE_VARIANT
-#define SCOPED_DOMAINS_EXTRA_FIELDS enum socket_type socket_type;
-#define SCOPED_DOMAINS_VARIANT_PREFIX pathname_
-#define SCOPED_DOMAINS_EXTRA_INIT .socket_type = SOCKET_TYPE_PATHNAME,
 #include "scoped_base_variants.h"
 
 FIXTURE_SETUP(scoped_domains)
 {
 	drop_caps(_metadata);
 
-	if (variant->socket_type == SOCKET_TYPE_PATHNAME) {
-		umask(0077);
-		ASSERT_EQ(0, mkdir(PATHNAME_UNIX_SOCK_DIR, 0700));
-	}
-
 	memset(&self->stream_address, 0, sizeof(self->stream_address));
 	memset(&self->dgram_address, 0, sizeof(self->dgram_address));
-	set_unix_address(&self->stream_address, 0,
-			 variant->socket_type == SOCKET_TYPE_ABSTRACT);
-	set_unix_address(&self->dgram_address, 1,
-			 variant->socket_type == SOCKET_TYPE_ABSTRACT);
+	set_unix_address(&self->stream_address, 0, true);
+	set_unix_address(&self->dgram_address, 1, true);
 }
 
 FIXTURE_TEARDOWN(scoped_domains)
 {
-	if (variant->socket_type == SOCKET_TYPE_PATHNAME) {
-		unlink(self->stream_address.unix_addr.sun_path);
-		unlink(self->dgram_address.unix_addr.sun_path);
-		rmdir(PATHNAME_UNIX_SOCK_DIR);
-	}
 }
 
 /*
- * Test unix_stream_connect() and unix_may_send() for a child connecting to its
- * parent, when they have scoped domain or no domain.
+ * Helper for connect_to_parent test. Tests unix_stream_connect() and
+ * unix_may_send() for a child connecting to its parent.
  */
-TEST_F(scoped_domains, connect_to_parent)
+static void test_connect_to_parent_impl(
+	struct __test_metadata *const _metadata,
+	FIXTURE_DATA(scoped_domains) *self,
+	const FIXTURE_VARIANT(scoped_domains) *variant,
+	const bool abstract)
 {
 	pid_t child;
 	bool can_connect_to_parent;
 	int status;
 	int pipe_parent[2];
 	int stream_server, dgram_server;
-	const __u16 scope = get_scope(variant->socket_type);
+	const __u16 scope = abstract ? LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET :
+				       LANDLOCK_SCOPE_PATHNAME_UNIX_SOCKET;
 
 	/*
 	 * can_connect_to_parent is true if a child process can connect to its
@@ -201,10 +166,14 @@ TEST_F(scoped_domains, connect_to_parent)
 }
 
 /*
- * Test unix_stream_connect() and unix_may_send() for a parent connecting to
- * its child, when they have scoped domain or no domain.
+ * Helper for connect_to_child test. Tests unix_stream_connect() and
+ * unix_may_send() for a parent connecting to its child.
  */
-TEST_F(scoped_domains, connect_to_child)
+static void test_connect_to_child_impl(
+	struct __test_metadata *const _metadata,
+	FIXTURE_DATA(scoped_domains) *self,
+	const FIXTURE_VARIANT(scoped_domains) *variant,
+	const bool abstract)
 {
 	pid_t child;
 	bool can_connect_to_child;
@@ -212,7 +181,8 @@ TEST_F(scoped_domains, connect_to_child)
 	int pipe_child[2], pipe_parent[2];
 	char buf;
 	int stream_client, dgram_client;
-	const __u16 scope = get_scope(variant->socket_type);
+	const __u16 scope = abstract ? LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET :
+				       LANDLOCK_SCOPE_PATHNAME_UNIX_SOCKET;
 
 	/*
 	 * can_connect_to_child is true if a parent process can connect to its
@@ -302,6 +272,80 @@ TEST_F(scoped_domains, connect_to_child)
 	if (WIFSIGNALED(status) || !WIFEXITED(status) ||
 	    WEXITSTATUS(status) != EXIT_SUCCESS)
 		_metadata->exit_code = KSFT_FAIL;
+}
+
+/*
+ * Test unix_stream_connect() and unix_may_send() for a child connecting to its
+ * parent, when they have scoped domain or no domain.
+ */
+TEST_F(scoped_domains, connect_to_parent)
+{
+	test_connect_to_parent_impl(_metadata, self, variant, true);
+}
+
+/*
+ * Test unix_stream_connect() and unix_may_send() for a parent connecting to
+ * its child, when they have scoped domain or no domain.
+ */
+TEST_F(scoped_domains, connect_to_child)
+{
+	test_connect_to_child_impl(_metadata, self, variant, true);
+}
+
+/* Pathname socket tests using a separate fixture. */
+FIXTURE(scoped_domains_pathname)
+{
+	struct service_fixture stream_address, dgram_address;
+};
+
+#define SCOPED_DOMAINS_FIXTURE_NAME scoped_domains_pathname
+#include "scoped_base_variants.h"
+#undef SCOPED_DOMAINS_FIXTURE_NAME
+
+FIXTURE_SETUP(scoped_domains_pathname)
+{
+	drop_caps(_metadata);
+
+	umask(0077);
+	ASSERT_EQ(0, mkdir(PATHNAME_UNIX_SOCK_DIR, 0700));
+
+	memset(&self->stream_address, 0, sizeof(self->stream_address));
+	memset(&self->dgram_address, 0, sizeof(self->dgram_address));
+	set_unix_address(&self->stream_address, 0, false);
+	set_unix_address(&self->dgram_address, 1, false);
+}
+
+FIXTURE_TEARDOWN(scoped_domains_pathname)
+{
+	unlink(self->stream_address.unix_addr.sun_path);
+	unlink(self->dgram_address.unix_addr.sun_path);
+	rmdir(PATHNAME_UNIX_SOCK_DIR);
+}
+
+/*
+ * Test unix_stream_connect() and unix_may_send() for a child connecting to its
+ * parent with pathname sockets.
+ */
+TEST_F(scoped_domains_pathname, connect_to_parent)
+{
+	test_connect_to_parent_impl(
+		_metadata,
+		(FIXTURE_DATA(scoped_domains) *)self,
+		(const FIXTURE_VARIANT(scoped_domains) *)variant,
+		false);
+}
+
+/*
+ * Test unix_stream_connect() and unix_may_send() for a parent connecting to
+ * its child with pathname sockets.
+ */
+TEST_F(scoped_domains_pathname, connect_to_child)
+{
+	test_connect_to_child_impl(
+		_metadata,
+		(FIXTURE_DATA(scoped_domains) *)self,
+		(const FIXTURE_VARIANT(scoped_domains) *)variant,
+		false);
 }
 
 FIXTURE(scoped_audit)

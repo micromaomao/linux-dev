@@ -248,7 +248,8 @@ static bool is_abstract_socket(struct sock *const sock)
 {
 	struct unix_address *addr = unix_sk(sock)->addr;
 
-	if (addr->len >= offsetof(struct sockaddr_un, sun_path) + 1 &&
+	WARN_ONCE(!addr, "landlock: null addr in is_abstract_socket");
+	if (addr && addr->len >= offsetof(struct sockaddr_un, sun_path) + 1 &&
 	    addr->name->sun_path[0] == '\0')
 		return true;
 
