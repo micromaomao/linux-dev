@@ -244,11 +244,8 @@ static bool sock_is_scoped(struct sock *const other,
 	return domain_is_scoped(domain, dom_other, scope);
 }
 
-static bool is_abstract_socket(struct sock *const sock)
+static bool addr_is_abstract_socket(const struct unix_address *const addr)
 {
-	struct unix_address *addr = unix_sk(sock)->addr;
-
-	WARN_ONCE(!addr, "landlock: null addr in is_abstract_socket");
 	if (addr && addr->len >= offsetof(struct sockaddr_un, sun_path) + 1 &&
 	    addr->name->sun_path[0] == '\0')
 		return true;
@@ -277,16 +274,18 @@ static int hook_unix_stream_connect(struct sock *const sock,
 	const struct landlock_cred_security *const subject =
 		landlock_get_applicable_subject(current_cred(), unix_scope,
 						&handle_layer);
+	const struct unix_address *addr;
 
 	/* Quick return for non-landlocked tasks. */
 	if (!subject)
 		return 0;
 
+	addr = unix_sk(other)->addr;
 	/* Unnamed sockets have no address; nothing to control. */
-	if (!unix_sk(other)->addr)
+	if (!addr)
 		return 0;
 
-	if (is_abstract_socket(other)) {
+	if (addr_is_abstract_socket(addr)) {
 		scope = LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET;
 		request_type = LANDLOCK_REQUEST_SCOPE_ABSTRACT_UNIX_SOCKET;
 	} else {
@@ -320,6 +319,7 @@ static int hook_unix_may_send(struct socket *const sock,
 	const struct landlock_cred_security *const subject =
 		landlock_get_applicable_subject(current_cred(), unix_scope,
 						&handle_layer);
+	const struct unix_address *addr;
 
 	if (!subject)
 		return 0;
@@ -331,11 +331,12 @@ static int hook_unix_may_send(struct socket *const sock,
 	if (unix_peer(sock->sk) == other->sk)
 		return 0;
 
+	addr = unix_sk(other->sk)->addr;
 	/* Unnamed sockets have no address; nothing to control. */
-	if (!unix_sk(other->sk)->addr)
+	if (!addr)
 		return 0;
 
-	if (is_abstract_socket(other->sk)) {
+	if (addr_is_abstract_socket(addr)) {
 		scope = LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET;
 		request_type = LANDLOCK_REQUEST_SCOPE_ABSTRACT_UNIX_SOCKET;
 	} else {
