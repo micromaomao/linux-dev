@@ -258,8 +258,8 @@ static void __maybe_unused set_named_unix_address(struct service_fixture *const 
 						  const unsigned short index)
 {
 	srv->unix_addr.sun_family = AF_UNIX;
-	sprintf(srv->unix_addr.sun_path,
-		NAMED_UNIX_SOCK_DIR "/named-unix-tid%d-index%d.sock",
-		sys_gettid(), index);
+	snprintf(srv->unix_addr.sun_path, sizeof(srv->unix_addr.sun_path),
+		 NAMED_UNIX_SOCK_DIR "/named-unix-tid%d-index%d.sock",
+		 sys_gettid(), index);
 	srv->unix_addr_len = sizeof(srv->unix_addr);
 }
