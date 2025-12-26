@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Landlock tests - Abstract UNIX socket
+ * Landlock tests - Scoped UNIX socket (abstract and pathname)
  *
  * Copyright © 2024 Tahera Fahimi <fahimitahera@gmail.com>
+ * Copyright © 2025 Microsoft Corporation
  */
 
 #define _GNU_SOURCE
@@ -27,6 +28,31 @@
 /* Number of pending connections queue to be hold. */
 const short backlog = 10;
 
+/*
+ * Socket type variants for parameterizing tests to cover both
+ * abstract sockets (sun_path[0] == '\0') and pathname sockets.
+ */
+enum socket_type {
+	SOCKET_TYPE_ABSTRACT,
+	SOCKET_TYPE_PATHNAME,
+};
+
+static __u16 get_scope(enum socket_type type)
+{
+	return type == SOCKET_TYPE_ABSTRACT ?
+		       LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET :
+		       LANDLOCK_SCOPE_NAMED_UNIX_SOCKET;
+}
+
+static void setup_address(struct service_fixture *const srv,
+			  const unsigned short index, enum socket_type type)
+{
+	if (type == SOCKET_TYPE_ABSTRACT)
+		set_unix_address(srv, index);
+	else
+		set_named_unix_address(srv, index);
+}
+
 static void create_fs_domain(struct __test_metadata *const _metadata)
 {
 	int ruleset_fd;
@@ -50,20 +76,30 @@ FIXTURE(scoped_domains)
 	struct service_fixture stream_address, dgram_address;
 };
 
-#include "scoped_base_variants.h"
+#include "scoped_socket_variants.h"
 
 FIXTURE_SETUP(scoped_domains)
 {
 	drop_caps(_metadata);
 
+	if (variant->socket_type == SOCKET_TYPE_PATHNAME) {
+		umask(0077);
+		ASSERT_EQ(0, mkdir(NAMED_UNIX_SOCK_DIR, 0700));
+	}
+
 	memset(&self->stream_address, 0, sizeof(self->stream_address));
 	memset(&self->dgram_address, 0, sizeof(self->dgram_address));
-	set_unix_address(&self->stream_address, 0);
-	set_unix_address(&self->dgram_address, 1);
+	setup_address(&self->stream_address, 0, variant->socket_type);
+	setup_address(&self->dgram_address, 1, variant->socket_type);
 }
 
 FIXTURE_TEARDOWN(scoped_domains)
 {
+	if (variant->socket_type == SOCKET_TYPE_PATHNAME) {
+		unlink(self->stream_address.unix_addr.sun_path);
+		unlink(self->dgram_address.unix_addr.sun_path);
+		rmdir(NAMED_UNIX_SOCK_DIR);
+	}
 }
 
 /*
@@ -77,6 +113,7 @@ TEST_F(scoped_domains, connect_to_parent)
 	int status;
 	int pipe_parent[2];
 	int stream_server, dgram_server;
+	const __u16 scope = get_scope(variant->socket_type);
 
 	/*
 	 * can_connect_to_parent is true if a child process can connect to its
@@ -87,8 +124,7 @@ TEST_F(scoped_domains, connect_to_parent)
 
 	ASSERT_EQ(0, pipe2(pipe_parent, O_CLOEXEC));
 	if (variant->domain_both) {
-		create_scoped_domain(_metadata,
-				     LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET);
+		create_scoped_domain(_metadata, scope);
 		if (!__test_passed(_metadata))
 			return;
 	}
@@ -102,8 +138,7 @@ TEST_F(scoped_domains, connect_to_parent)
 
 		EXPECT_EQ(0, close(pipe_parent[1]));
 		if (variant->domain_child)
-			create_scoped_domain(
-				_metadata, LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET);
+			create_scoped_domain(_metadata, scope);
 
 		stream_client = socket(AF_UNIX, SOCK_STREAM, 0);
 		ASSERT_LE(0, stream_client);
@@ -137,8 +172,7 @@ TEST_F(scoped_domains, connect_to_parent)
 	}
 	EXPECT_EQ(0, close(pipe_parent[0]));
 	if (variant->domain_parent)
-		create_scoped_domain(_metadata,
-				     LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET);
+		create_scoped_domain(_metadata, scope);
 
 	stream_server = socket(AF_UNIX, SOCK_STREAM, 0);
 	ASSERT_LE(0, stream_server);
@@ -174,6 +208,7 @@ TEST_F(scoped_domains, connect_to_child)
 	int pipe_child[2], pipe_parent[2];
 	char buf;
 	int stream_client, dgram_client;
+	const __u16 scope = get_scope(variant->socket_type);
 
 	/*
 	 * can_connect_to_child is true if a parent process can connect to its
@@ -185,8 +220,7 @@ TEST_F(scoped_domains, connect_to_child)
 	ASSERT_EQ(0, pipe2(pipe_child, O_CLOEXEC));
 	ASSERT_EQ(0, pipe2(pipe_parent, O_CLOEXEC));
 	if (variant->domain_both) {
-		create_scoped_domain(_metadata,
-				     LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET);
+		create_scoped_domain(_metadata, scope);
 		if (!__test_passed(_metadata))
 			return;
 	}
@@ -199,8 +233,7 @@ TEST_F(scoped_domains, connect_to_child)
 		EXPECT_EQ(0, close(pipe_parent[1]));
 		EXPECT_EQ(0, close(pipe_child[0]));
 		if (variant->domain_child)
-			create_scoped_domain(
-				_metadata, LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET);
+			create_scoped_domain(_metadata, scope);
 
 		/* Waits for the parent to be in a domain, if any. */
 		ASSERT_EQ(1, read(pipe_parent[0], &buf, 1));
@@ -230,8 +263,7 @@ TEST_F(scoped_domains, connect_to_child)
 	EXPECT_EQ(0, close(pipe_parent[0]));
 
 	if (variant->domain_parent)
-		create_scoped_domain(_metadata,
-				     LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET);
+		create_scoped_domain(_metadata, scope);
 
 	/* Signals that the parent is in a domain, if any. */
 	ASSERT_EQ(1, write(pipe_parent[1], ".", 1));

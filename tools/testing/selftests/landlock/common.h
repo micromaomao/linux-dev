@@ -251,3 +251,15 @@ static void __maybe_unused set_unix_address(struct service_fixture *const srv,
 	srv->unix_addr_len = SUN_LEN(&srv->unix_addr);
 	srv->unix_addr.sun_path[0] = '\0';
 }
+
+#define NAMED_UNIX_SOCK_DIR TMP_DIR "/named_unix"
+
+static void __maybe_unused set_named_unix_address(struct service_fixture *const srv,
+						  const unsigned short index)
+{
+	srv->unix_addr.sun_family = AF_UNIX;
+	sprintf(srv->unix_addr.sun_path,
+		NAMED_UNIX_SOCK_DIR "/named-unix-tid%d-index%d.sock",
+		sys_gettid(), index);
+	srv->unix_addr_len = sizeof(srv->unix_addr);
+}

@@ -248,25 +248,8 @@ static bool is_abstract_socket(struct sock *const sock)
 {
 	struct unix_address *addr = unix_sk(sock)->addr;
 
-	if (!addr)
-		return false;
-
 	if (addr->len >= offsetof(struct sockaddr_un, sun_path) + 1 &&
 	    addr->name->sun_path[0] == '\0')
-		return true;
-
-	return false;
-}
-
-static bool is_named_socket(struct sock *const sock)
-{
-	struct unix_address *addr = unix_sk(sock)->addr;
-
-	if (!addr)
-		return false;
-
-	if (addr->len >= offsetof(struct sockaddr_un, sun_path) + 1 &&
-	    addr->name->sun_path[0] != '\0')
 		return true;
 
 	return false;
@@ -277,6 +260,12 @@ static const struct access_masks unix_scope = {
 		 LANDLOCK_SCOPE_NAMED_UNIX_SOCKET,
 };
 
+/*
+ * UNIX sockets can have three types of addresses: pathname (a filesystem path),
+ * unnamed (no address, e.g., socketpair), and abstract (sun_path[0] is '\0').
+ * We do not control unnamed sockets since they are already connected at
+ * creation time.
+ */
 static int hook_unix_stream_connect(struct sock *const sock,
 				    struct sock *const other,
 				    struct sock *const newsk)
@@ -292,14 +281,17 @@ static int hook_unix_stream_connect(struct sock *const sock,
 	if (!subject)
 		return 0;
 
+	/* Unnamed sockets have no address; nothing to control. */
+	if (!unix_sk(other)->addr)
+		return 0;
+
 	if (is_abstract_socket(other)) {
 		scope = LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET;
 		request_type = LANDLOCK_REQUEST_SCOPE_ABSTRACT_UNIX_SOCKET;
-	} else if (is_named_socket(other)) {
+	} else {
+		/* Pathname socket. */
 		scope = LANDLOCK_SCOPE_NAMED_UNIX_SOCKET;
 		request_type = LANDLOCK_REQUEST_SCOPE_NAMED_UNIX_SOCKET;
-	} else {
-		return 0;
 	}
 
 	if (!sock_is_scoped(other, subject->domain, scope))
@@ -338,14 +330,17 @@ static int hook_unix_may_send(struct socket *const sock,
 	if (unix_peer(sock->sk) == other->sk)
 		return 0;
 
+	/* Unnamed sockets have no address; nothing to control. */
+	if (!unix_sk(other->sk)->addr)
+		return 0;
+
 	if (is_abstract_socket(other->sk)) {
 		scope = LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET;
 		request_type = LANDLOCK_REQUEST_SCOPE_ABSTRACT_UNIX_SOCKET;
-	} else if (is_named_socket(other->sk)) {
+	} else {
+		/* Pathname socket. */
 		scope = LANDLOCK_SCOPE_NAMED_UNIX_SOCKET;
 		request_type = LANDLOCK_REQUEST_SCOPE_NAMED_UNIX_SOCKET;
-	} else {
-		return 0;
 	}
 
 	if (!sock_is_scoped(other->sk, subject->domain, scope))
