@@ -154,7 +154,9 @@ TEST_F(scoping_signals, send_sig_to_parent)
 FIXTURE(scoped_domains) {};
 /* clang-format on */
 
+#define SCOPED_DOMAINS_FIXTURE_NAME scoped_domains
 #include "scoped_base_variants.h"
+#undef SCOPED_DOMAINS_FIXTURE_NAME
 
 FIXTURE_SETUP(scoped_domains)
 {

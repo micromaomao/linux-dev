@@ -10,7 +10,7 @@
  */
 
 #ifndef SCOPED_DOMAINS_FIXTURE_NAME
-#define SCOPED_DOMAINS_FIXTURE_NAME scoped_domains
+#error "SCOPED_DOMAINS_FIXTURE_NAME must be defined"
 #endif
 
 /* clang-format on */
@@ -158,5 +158,3 @@ FIXTURE_VARIANT_ADD(SCOPED_DOMAINS_FIXTURE_NAME, forked_domains) {
 	.domain_parent = true,
 	.domain_child = true,
 };
-
-#undef SCOPED_DOMAINS_FIXTURE_NAME
