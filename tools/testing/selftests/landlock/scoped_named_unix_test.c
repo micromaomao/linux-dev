@@ -637,7 +637,7 @@ TEST_F(scoped_named_vs_unscoped, named_unix_scoping)
 
 		ASSERT_EQ(1, write(pipe_child[1], ".", 1));
 		ASSERT_EQ(grand_child, waitpid(grand_child, &status, 0));
-		EXPECT_EQ(0, close(stream_server_child))
+		EXPECT_EQ(0, close(stream_server_child));
 		EXPECT_EQ(0, close(dgram_server_child));
 		return;
 	}
