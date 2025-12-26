@@ -244,11 +244,12 @@ struct service_fixture {
 #define PATHNAME_UNIX_SOCK_DIR TMP_DIR "/pathname_unix"
 
 /**
- * set_unix_address - Set up a UNIX socket address
+ * set_unix_address - Set up srv->unix_addr and srv->unix_addr_len
  * @srv: Service fixture containing the socket address to initialize
- * @index: Unique index for generating distinct socket names
- * @abstract: If true, creates an abstract socket address (sun_path[0] == '\0').
- *            If false, creates a pathname socket address (filesystem path).
+ * @index: Index to include in socket names
+ * @abstract: If true, creates an abstract socket address (sun_path[0] ==
+ *     '\0') with the given name.  If false, creates a pathname socket
+ *     address with the given path.
  */
 static void __maybe_unused set_unix_address(struct service_fixture *const srv,
 					    const unsigned short index,
