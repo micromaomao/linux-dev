@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Landlock tests - Scoped UNIX socket (abstract and pathname)
+ * Landlock tests - Scoped access checks for UNIX socket (abstract and
+ * pathname)
  *
  * Copyright © 2024 Tahera Fahimi <fahimitahera@gmail.com>
  */
