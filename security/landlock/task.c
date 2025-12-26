@@ -257,7 +257,7 @@ static bool is_abstract_socket(struct sock *const sock)
 
 static const struct access_masks unix_scope = {
 	.scope = LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET |
-		 LANDLOCK_SCOPE_PATHNAME_SOCKET,
+		 LANDLOCK_SCOPE_PATHNAME_UNIX_SOCKET,
 };
 
 /*
@@ -290,8 +290,8 @@ static int hook_unix_stream_connect(struct sock *const sock,
 		request_type = LANDLOCK_REQUEST_SCOPE_ABSTRACT_UNIX_SOCKET;
 	} else {
 		/* Pathname socket. */
-		scope = LANDLOCK_SCOPE_PATHNAME_SOCKET;
-		request_type = LANDLOCK_REQUEST_SCOPE_PATHNAME_SOCKET;
+		scope = LANDLOCK_SCOPE_PATHNAME_UNIX_SOCKET;
+		request_type = LANDLOCK_REQUEST_SCOPE_PATHNAME_UNIX_SOCKET;
 	}
 
 	if (!sock_is_scoped(other, subject->domain, scope))
@@ -339,8 +339,8 @@ static int hook_unix_may_send(struct socket *const sock,
 		request_type = LANDLOCK_REQUEST_SCOPE_ABSTRACT_UNIX_SOCKET;
 	} else {
 		/* Pathname socket. */
-		scope = LANDLOCK_SCOPE_PATHNAME_SOCKET;
-		request_type = LANDLOCK_REQUEST_SCOPE_PATHNAME_SOCKET;
+		scope = LANDLOCK_SCOPE_PATHNAME_UNIX_SOCKET;
+		request_type = LANDLOCK_REQUEST_SCOPE_PATHNAME_UNIX_SOCKET;
 	}
 
 	if (!sock_is_scoped(other->sk, subject->domain, scope))

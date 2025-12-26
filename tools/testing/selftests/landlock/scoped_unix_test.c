@@ -40,7 +40,7 @@ static __u16 get_scope(enum socket_type type)
 {
 	return type == SOCKET_TYPE_ABSTRACT ?
 		       LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET :
-		       LANDLOCK_SCOPE_PATHNAME_SOCKET;
+		       LANDLOCK_SCOPE_PATHNAME_UNIX_SOCKET;
 }
 
 static void create_fs_domain(struct __test_metadata *const _metadata)

@@ -239,7 +239,7 @@ static bool check_ruleset_scope(const char *const env_var,
 	/* Scoping is not supported by Landlock ABI */
 	if (!(ruleset_attr->scoped &
 	      (LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET | LANDLOCK_SCOPE_SIGNAL |
-	       LANDLOCK_SCOPE_PATHNAME_SOCKET)))
+	       LANDLOCK_SCOPE_PATHNAME_UNIX_SOCKET)))
 		goto out_unset;
 
 	env_type_scope = getenv(env_var);
@@ -276,7 +276,7 @@ out_unset:
 	if (!signal_scoping)
 		ruleset_attr->scoped &= ~LANDLOCK_SCOPE_SIGNAL;
 	if (!named_scoping)
-		ruleset_attr->scoped &= ~LANDLOCK_SCOPE_PATHNAME_SOCKET;
+		ruleset_attr->scoped &= ~LANDLOCK_SCOPE_PATHNAME_UNIX_SOCKET;
 
 	unsetenv(env_var);
 	return error;
@@ -365,7 +365,7 @@ int main(const int argc, char *const argv[], char *const *const envp)
 				      LANDLOCK_ACCESS_NET_CONNECT_TCP,
 		.scoped = LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET |
 			  LANDLOCK_SCOPE_SIGNAL |
-			  LANDLOCK_SCOPE_PATHNAME_SOCKET,
+			  LANDLOCK_SCOPE_PATHNAME_UNIX_SOCKET,
 	};
 	int supported_restrict_flags = LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON;
 	int set_restrict_flags = 0;
@@ -447,8 +447,8 @@ int main(const int argc, char *const argv[], char *const *const envp)
 			~LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON;
 		__attribute__((fallthrough));
 	case 7:
-		/* Removes LANDLOCK_SCOPE_PATHNAME_SOCKET for ABI < 8 */
-		ruleset_attr.scoped &= ~LANDLOCK_SCOPE_PATHNAME_SOCKET;
+		/* Removes LANDLOCK_SCOPE_PATHNAME_UNIX_SOCKET for ABI < 8 */
+		ruleset_attr.scoped &= ~LANDLOCK_SCOPE_PATHNAME_UNIX_SOCKET;
 
 		/* Must be printed for any ABI < LANDLOCK_ABI_LAST. */
 		fprintf(stderr,
