@@ -8,6 +8,7 @@
  */
 
 #include <arpa/inet.h>
+#include <dirent.h>
 #include <errno.h>
 #include <linux/securebits.h>
 #include <sys/capability.h>
@@ -242,6 +243,33 @@ struct service_fixture {
 };
 
 #define PATHNAME_UNIX_SOCK_DIR TMP_DIR "/pathname_unix"
+
+/**
+ * cleanup_socket_dir - Remove PATHNAME_UNIX_SOCK_DIR and any files in it
+ *
+ * This function removes any leftover socket files from previous test runs
+ * and then removes the directory itself. It ignores errors since the
+ * directory or files may not exist.
+ */
+static void __maybe_unused cleanup_socket_dir(void)
+{
+	DIR *dir;
+	struct dirent *entry;
+	char path[sizeof(((struct sockaddr_un *)0)->sun_path)];
+
+	dir = opendir(PATHNAME_UNIX_SOCK_DIR);
+	if (dir) {
+		while ((entry = readdir(dir)) != NULL) {
+			if (entry->d_name[0] == '.')
+				continue;
+			snprintf(path, sizeof(path), PATHNAME_UNIX_SOCK_DIR "/%s",
+				 entry->d_name);
+			unlink(path);
+		}
+		closedir(dir);
+	}
+	rmdir(PATHNAME_UNIX_SOCK_DIR);
+}
 
 /**
  * set_unix_address - Set up srv->unix_addr and srv->unix_addr_len

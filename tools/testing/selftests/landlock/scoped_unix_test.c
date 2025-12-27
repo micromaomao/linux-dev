@@ -59,8 +59,8 @@ FIXTURE_SETUP(scoped_domains)
 	drop_caps(_metadata);
 
 	umask(0077);
-	/* Clean up any leftover directory from previous tests. */
-	rmdir(PATHNAME_UNIX_SOCK_DIR);
+	/* Clean up any leftover directory and files from previous tests. */
+	cleanup_socket_dir();
 	ASSERT_EQ(0, mkdir(PATHNAME_UNIX_SOCK_DIR, 0700));
 
 	memset(&self->stream_address_abstract, 0, sizeof(self->stream_address_abstract));
@@ -497,9 +497,9 @@ FIXTURE_SETUP(scoped_vs_unscoped)
 	drop_caps(_metadata);
 
 	umask(0077);
-	/* Clean up any leftover directory from previous tests. */
-	rmdir(TMP_DIR);
-	ASSERT_EQ(0, mkdir(TMP_DIR, 0700));
+	/* Clean up any leftover directory and files from previous tests. */
+	cleanup_socket_dir();
+	ASSERT_EQ(0, mkdir(PATHNAME_UNIX_SOCK_DIR, 0700));
 
 	/* Abstract addresses. */
 	memset(&self->parent_stream_address_abstract, 0,
@@ -536,7 +536,7 @@ FIXTURE_TEARDOWN(scoped_vs_unscoped)
 	unlink(self->parent_dgram_address_pathname.unix_addr.sun_path);
 	unlink(self->child_stream_address_pathname.unix_addr.sun_path);
 	unlink(self->child_dgram_address_pathname.unix_addr.sun_path);
-	rmdir(TMP_DIR);
+	rmdir(PATHNAME_UNIX_SOCK_DIR);
 }
 
 /*
@@ -810,9 +810,9 @@ FIXTURE_SETUP(outside_socket)
 	drop_caps(_metadata);
 
 	umask(0077);
-	/* Clean up any leftover directory from previous tests. */
-	rmdir(TMP_DIR);
-	ASSERT_EQ(0, mkdir(TMP_DIR, 0700));
+	/* Clean up any leftover directory and files from previous tests. */
+	cleanup_socket_dir();
+	ASSERT_EQ(0, mkdir(PATHNAME_UNIX_SOCK_DIR, 0700));
 
 	/* Abstract addresses. */
 	memset(&self->transit_address_abstract, 0,
@@ -833,7 +833,7 @@ FIXTURE_TEARDOWN(outside_socket)
 {
 	unlink(self->transit_address_pathname.unix_addr.sun_path);
 	unlink(self->address_pathname.unix_addr.sun_path);
-	rmdir(TMP_DIR);
+	rmdir(PATHNAME_UNIX_SOCK_DIR);
 }
 
 /*
@@ -1000,9 +1000,9 @@ FIXTURE_SETUP(various_address_sockets)
 	drop_caps(_metadata);
 
 	umask(0077);
-	/* Clean up any leftover directory from previous tests. */
-	rmdir(TMP_DIR);
-	ASSERT_EQ(0, mkdir(TMP_DIR, 0700));
+	/* Clean up any leftover directory and files from previous tests. */
+	cleanup_socket_dir();
+	ASSERT_EQ(0, mkdir(PATHNAME_UNIX_SOCK_DIR, 0700));
 
 	/* Set up pathname addresses. */
 	memset(&self->stream_pathname_addr, 0, sizeof(self->stream_pathname_addr));
@@ -1021,7 +1021,7 @@ FIXTURE_TEARDOWN(various_address_sockets)
 {
 	unlink(self->stream_pathname_addr.unix_addr.sun_path);
 	unlink(self->dgram_pathname_addr.unix_addr.sun_path);
-	rmdir(TMP_DIR);
+	rmdir(PATHNAME_UNIX_SOCK_DIR);
 }
 
 /*
@@ -1249,9 +1249,9 @@ FIXTURE_SETUP(socket_type_test)
 
 	if (!variant->abstract) {
 		umask(0077);
-		/* Clean up any leftover directory from previous tests. */
-		rmdir(TMP_DIR);
-		ASSERT_EQ(0, mkdir(TMP_DIR, 0700));
+		/* Clean up any leftover directory and files from previous tests. */
+		cleanup_socket_dir();
+		ASSERT_EQ(0, mkdir(PATHNAME_UNIX_SOCK_DIR, 0700));
 	}
 
 	memset(&self->connected_addr, 0, sizeof(self->connected_addr));
@@ -1265,7 +1265,7 @@ FIXTURE_TEARDOWN(socket_type_test)
 	if (!variant->abstract) {
 		unlink(self->connected_addr.unix_addr.sun_path);
 		unlink(self->non_connected_addr.unix_addr.sun_path);
-		rmdir(TMP_DIR);
+		rmdir(PATHNAME_UNIX_SOCK_DIR);
 	}
 }
 
