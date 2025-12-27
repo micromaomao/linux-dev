@@ -127,6 +127,12 @@ version, and only use the available subset of access rights:
         /* Removes LANDLOCK_SCOPE_* for ABI < 6 */
         ruleset_attr.scoped &= ~(LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET |
                                  LANDLOCK_SCOPE_SIGNAL);
+        __attribute__((fallthrough));
+    case 6:
+        /* Removes LANDLOCK_RESTRICT_SELF_LOG_* for ABI < 7 */
+        supported_restrict_flags &= ~(LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON |
+                                      LANDLOCK_RESTRICT_SELF_LOG_SAME_EXEC_OFF |
+                                      LANDLOCK_RESTRICT_SELF_LOG_SUBDOMAINS_OFF);
     }
 
 This enables the creation of an inclusive ruleset that will contain our rules.
