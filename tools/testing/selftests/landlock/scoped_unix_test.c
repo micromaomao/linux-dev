@@ -305,9 +305,7 @@ TEST_F(scoped_domains, abstract_connect_to_child)
  */
 TEST_F(scoped_domains, pathname_connect_to_parent)
 {
-	test_connect_to_parent(_metadata, (FIXTURE_DATA(scoped_domains) *)self,
-			       (const FIXTURE_VARIANT(scoped_domains) *)variant,
-			       false);
+	test_connect_to_parent(_metadata, self, variant, false);
 }
 
 /*
@@ -316,9 +314,7 @@ TEST_F(scoped_domains, pathname_connect_to_parent)
  */
 TEST_F(scoped_domains, pathname_connect_to_child)
 {
-	test_connect_to_child(_metadata, (FIXTURE_DATA(scoped_domains) *)self,
-			      (const FIXTURE_VARIANT(scoped_domains) *)variant,
-			      false);
+	test_connect_to_child(_metadata, self, variant, false);
 }
 
 FIXTURE(scoped_audit)
