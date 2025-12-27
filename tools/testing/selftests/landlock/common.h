@@ -257,14 +257,16 @@ static void __maybe_unused set_unix_address(struct service_fixture *const srv,
 {
 	srv->unix_addr.sun_family = AF_UNIX;
 	if (abstract) {
-		sprintf(srv->unix_addr.sun_path,
-			"_selftests-landlock-abstract-unix-tid%d-index%d",
-			sys_gettid(), index);
+		snprintf(srv->unix_addr.sun_path,
+			 "_selftests-landlock-abstract-unix-tid%d-index%d",
+			 sizeof(srv->unix_addr.sun_path), sys_gettid(), index);
 		srv->unix_addr_len = SUN_LEN(&srv->unix_addr);
 		srv->unix_addr.sun_path[0] = '\0';
 	} else {
-		snprintf(srv->unix_addr.sun_path, sizeof(srv->unix_addr.sun_path),
-			 PATHNAME_UNIX_SOCK_DIR "/pathname-unix-tid%d-index%d.sock",
+		snprintf(srv->unix_addr.sun_path,
+			 sizeof(srv->unix_addr.sun_path),
+			 PATHNAME_UNIX_SOCK_DIR
+			 "/pathname-unix-tid%d-index%d.sock",
 			 sys_gettid(), index);
 		srv->unix_addr_len = sizeof(srv->unix_addr);
 	}
