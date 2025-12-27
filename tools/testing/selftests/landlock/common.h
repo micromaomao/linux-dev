@@ -10,6 +10,7 @@
 #include <arpa/inet.h>
 #include <dirent.h>
 #include <errno.h>
+#include <limits.h>
 #include <linux/securebits.h>
 #include <sys/capability.h>
 #include <sys/prctl.h>
@@ -255,7 +256,8 @@ static void __maybe_unused cleanup_socket_dir(void)
 {
 	DIR *dir;
 	struct dirent *entry;
-	char path[sizeof(((struct sockaddr_un *)0)->sun_path)];
+	/* Use PATH_MAX to avoid truncation warnings with long filenames */
+	char path[PATH_MAX];
 
 	dir = opendir(PATHNAME_UNIX_SOCK_DIR);
 	if (dir) {
