@@ -256,7 +256,7 @@ static bool check_ruleset_scope(const char *const env_var,
 		} else if (strcmp("s", ipc_scoping_name) == 0 &&
 			   !signal_scoping) {
 			signal_scoping = true;
-		} else if (strcmp("n", ipc_scoping_name) == 0 &&
+		} else if (strcmp("u", ipc_scoping_name) == 0 &&
 			   !named_scoping) {
 			named_scoping = true;
 		} else {
@@ -342,7 +342,7 @@ static const char help[] =
 	ENV_FS_RW_NAME "=\"/dev/null:/dev/full:/dev/zero:/dev/pts:/tmp\" "
 	ENV_TCP_BIND_NAME "=\"9418\" "
 	ENV_TCP_CONNECT_NAME "=\"80:443\" "
-	ENV_SCOPED_NAME "=\"a:s:n\" "
+	ENV_SCOPED_NAME "=\"a:s:u\" "
 	"%1$s bash -i\n"
 	"\n"
 	"This sandboxer can use Landlock features up to ABI version "

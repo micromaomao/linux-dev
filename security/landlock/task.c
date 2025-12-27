@@ -260,9 +260,9 @@ static const struct access_masks unix_scope = {
 
 /*
  * UNIX sockets can have three types of addresses: pathname (a filesystem path),
- * unnamed (no address, e.g., socketpair), and abstract (sun_path[0] is '\0').
- * We do not control unnamed sockets since they are already connected at
- * creation time.
+ * unnamed (not bound to an address), and abstract (sun_path[0] is '\0').
+ * Unnamed sockets include those created with socketpair() and unbound sockets.
+ * We do not restrict unnamed sockets since they have no address to identify.
  */
 static int hook_unix_stream_connect(struct sock *const sock,
 				    struct sock *const other,
