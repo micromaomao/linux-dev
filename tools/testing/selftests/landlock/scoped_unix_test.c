@@ -440,7 +440,7 @@ TEST_F(scoped_audit, connect_to_child)
 	EXPECT_EQ(-1, err_dgram);
 	EXPECT_EQ(EPERM, errno);
 
-	if (self->abstract_socket)
+	if (variant->abstract_socket)
 		audit_match_str = REGEX_LANDLOCK_PREFIX
 			" blockers=scope\\.abstract_unix_socket path=" ABSTRACT_SOCKET_PATH_PREFIX
 			"[0-9A-F]\\+$";
