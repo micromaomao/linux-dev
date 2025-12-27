@@ -323,17 +323,38 @@ TEST_F(scoped_domains, pathname_connect_to_child)
 
 FIXTURE(scoped_audit)
 {
-	struct service_fixture dgram_address;
+	struct service_fixture dgram_address_abstract, dgram_address_pathname;
 	struct audit_filter audit_filter;
 	int audit_fd;
+};
+
+FIXTURE_VARIANT(scoped_audit)
+{
+	const bool abstract_socket;
+};
+
+// clang-format off
+FIXTURE_VARIANT_ADD(scoped_audit, abstract_socket)
+{
+	// clang-format on
+	.abstract_socket = true,
+};
+
+// clang-format off
+FIXTURE_VARIANT_ADD(scoped_audit, pathname_socket)
+{
+	// clang-format on
+	.abstract_socket = false,
 };
 
 FIXTURE_SETUP(scoped_audit)
 {
 	disable_caps(_metadata);
 
-	memset(&self->dgram_address, 0, sizeof(self->dgram_address));
-	set_unix_address(&self->dgram_address, 1, true);
+	memset(&self->dgram_address_abstract, 0, sizeof(self->dgram_address_abstract));
+	memset(&self->dgram_address_pathname, 0, sizeof(self->dgram_address_pathname));
+	set_unix_address(&self->dgram_address_abstract, 1, true);
+	set_unix_address(&self->dgram_address_pathname, 1, false);
 
 	set_cap(_metadata, CAP_AUDIT_CONTROL);
 	self->audit_fd = audit_init_with_exe_filter(&self->audit_filter);
@@ -361,6 +382,10 @@ TEST_F(scoped_audit, connect_to_child)
 	char buf;
 	int dgram_client;
 	struct audit_records records;
+	struct service_fixture *const dgram_address =
+		variant->abstract_socket ? &self->dgram_address_abstract :
+					   &self->dgram_address_pathname;
+	const char *audit_match_str;
 
 	/* Makes sure there is no superfluous logged records. */
 	EXPECT_EQ(0, audit_count_records(self->audit_fd, &records));
@@ -383,8 +408,8 @@ TEST_F(scoped_audit, connect_to_child)
 
 		dgram_server = socket(AF_UNIX, SOCK_DGRAM, 0);
 		ASSERT_LE(0, dgram_server);
-		ASSERT_EQ(0, bind(dgram_server, &self->dgram_address.unix_addr,
-				  self->dgram_address.unix_addr_len));
+		ASSERT_EQ(0, bind(dgram_server, &dgram_address->unix_addr,
+				  dgram_address->unix_addr_len));
 
 		/* Signals to the parent that child is listening. */
 		ASSERT_EQ(1, write(pipe_child[1], ".", 1));
@@ -398,7 +423,9 @@ TEST_F(scoped_audit, connect_to_child)
 	EXPECT_EQ(0, close(pipe_child[1]));
 	EXPECT_EQ(0, close(pipe_parent[0]));
 
-	create_scoped_domain(_metadata, LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET);
+	create_scoped_domain(_metadata,
+			     LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET |
+				     LANDLOCK_SCOPE_PATHNAME_UNIX_SOCKET);
 
 	/* Signals that the parent is in a domain, if any. */
 	ASSERT_EQ(1, write(pipe_parent[1], ".", 1));
@@ -408,18 +435,25 @@ TEST_F(scoped_audit, connect_to_child)
 
 	/* Waits for the child to listen */
 	ASSERT_EQ(1, read(pipe_child[0], &buf, 1));
-	err_dgram = connect(dgram_client, &self->dgram_address.unix_addr,
-			    self->dgram_address.unix_addr_len);
+	err_dgram = connect(dgram_client, &dgram_address->unix_addr,
+			    dgram_address->unix_addr_len);
 	EXPECT_EQ(-1, err_dgram);
 	EXPECT_EQ(EPERM, errno);
+
+	if (self->abstract_socket)
+		audit_match_str = REGEX_LANDLOCK_PREFIX
+			" blockers=scope\\.abstract_unix_socket path=" ABSTRACT_SOCKET_PATH_PREFIX
+			"[0-9A-F]\\+$";
+	else
+		audit_match_str = REGEX_LANDLOCK_PREFIX
+			" blockers=scope\\.pathname_unix_socket path=" ABSTRACT_SOCKET_PATH_PREFIX
+			"[0-9A-F]\\+$";
 
 	EXPECT_EQ(
 		0,
 		audit_match_record(
 			self->audit_fd, AUDIT_LANDLOCK_ACCESS,
-			REGEX_LANDLOCK_PREFIX
-			" blockers=scope\\.abstract_unix_socket path=" ABSTRACT_SOCKET_PATH_PREFIX
-			"[0-9A-F]\\+$",
+			audit_match_str,
 			NULL));
 
 	ASSERT_EQ(1, write(pipe_parent[1], ".", 1));
