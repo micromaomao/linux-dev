@@ -1016,6 +1016,10 @@ FIXTURE_TEARDOWN(various_address_sockets)
 	rmdir(TMP_DIR);
 }
 
+/*
+ * Test interaction of various scope flags (controlled by variant->domain)
+ * with pathname and abstract sockets in a parent-child setup.
+ */
 TEST_F(various_address_sockets, scoped_sockets)
 {
 	pid_t child;
