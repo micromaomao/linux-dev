@@ -83,7 +83,8 @@ to be explicit about the denied-by-default access rights.
             LANDLOCK_ACCESS_NET_CONNECT_TCP,
         .scoped =
             LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET |
-            LANDLOCK_SCOPE_SIGNAL,
+            LANDLOCK_SCOPE_SIGNAL |
+            LANDLOCK_SCOPE_PATHNAME_UNIX_SOCKET,
     };
 
 Because we may not know which kernel version an application will be executed
@@ -127,6 +128,12 @@ version, and only use the available subset of access rights:
         /* Removes LANDLOCK_SCOPE_* for ABI < 6 */
         ruleset_attr.scoped &= ~(LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET |
                                  LANDLOCK_SCOPE_SIGNAL);
+        __attribute__((fallthrough));
+    case 6:
+        __attribute__((fallthrough));
+    case 7:
+        /* Removes LANDLOCK_SCOPE_PATHNAME_UNIX_SOCKET for ABI < 8 */
+        ruleset_attr.scoped &= ~LANDLOCK_SCOPE_PATHNAME_UNIX_SOCKET;
     }
 
 This enables the creation of an inclusive ruleset that will contain our rules.
@@ -332,6 +339,18 @@ The operations which can be scoped are:
     This limits the set of abstract :manpage:`unix(7)` sockets to which we can
     :manpage:`connect(2)` to socket addresses which were created by a process in
     the same or a nested Landlock domain.
+
+    A :manpage:`sendto(2)` on a non-connected datagram socket is treated as if
+    it were doing an implicit :manpage:`connect(2)` and will be blocked if the
+    remote end does not stem from the same or a nested Landlock domain.
+
+    A :manpage:`sendto(2)` on a socket which was previously connected will not
+    be restricted.  This works for both datagram and stream sockets.
+
+``LANDLOCK_SCOPE_PATHNAME_UNIX_SOCKET``
+    This limits the set of pathname (filesystem path) :manpage:`unix(7)` sockets to
+    which we can :manpage:`connect(2)` to socket addresses which were created by
+    a process in the same or a nested Landlock domain.
 
     A :manpage:`sendto(2)` on a non-connected datagram socket is treated as if
     it were doing an implicit :manpage:`connect(2)` and will be blocked if the
@@ -603,6 +622,13 @@ Landlock audit events with the ``LANDLOCK_RESTRICT_SELF_LOG_SAME_EXEC_OFF``,
 ``LANDLOCK_RESTRICT_SELF_LOG_SUBDOMAINS_OFF`` flags passed to
 sys_landlock_restrict_self().  See Documentation/admin-guide/LSM/landlock.rst
 for more details on audit.
+
+Pathname UNIX socket (ABI < 8)
+------------------------------
+
+Starting with the Landlock ABI version 8, it is possible to restrict
+connections to a pathname (filesystem path) :manpage:`unix(7)` socket by setting
+``LANDLOCK_SCOPE_PATHNAME_UNIX_SOCKET`` to the ``scoped`` ruleset attribute.
 
 .. _kernel_support:
 
