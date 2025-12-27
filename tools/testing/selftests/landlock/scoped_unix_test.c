@@ -59,6 +59,8 @@ FIXTURE_SETUP(scoped_domains)
 	drop_caps(_metadata);
 
 	umask(0077);
+	/* Clean up any leftover directory from previous tests. */
+	rmdir(PATHNAME_UNIX_SOCK_DIR);
 	ASSERT_EQ(0, mkdir(PATHNAME_UNIX_SOCK_DIR, 0700));
 
 	memset(&self->stream_address_abstract, 0, sizeof(self->stream_address_abstract));
@@ -495,6 +497,8 @@ FIXTURE_SETUP(scoped_vs_unscoped)
 	drop_caps(_metadata);
 
 	umask(0077);
+	/* Clean up any leftover directory from previous tests. */
+	rmdir(TMP_DIR);
 	ASSERT_EQ(0, mkdir(TMP_DIR, 0700));
 
 	/* Abstract addresses. */
@@ -806,6 +810,8 @@ FIXTURE_SETUP(outside_socket)
 	drop_caps(_metadata);
 
 	umask(0077);
+	/* Clean up any leftover directory from previous tests. */
+	rmdir(TMP_DIR);
 	ASSERT_EQ(0, mkdir(TMP_DIR, 0700));
 
 	/* Abstract addresses. */
@@ -994,6 +1000,8 @@ FIXTURE_SETUP(various_address_sockets)
 	drop_caps(_metadata);
 
 	umask(0077);
+	/* Clean up any leftover directory from previous tests. */
+	rmdir(TMP_DIR);
 	ASSERT_EQ(0, mkdir(TMP_DIR, 0700));
 
 	/* Set up pathname addresses. */
@@ -1241,6 +1249,8 @@ FIXTURE_SETUP(socket_type_test)
 
 	if (!variant->abstract) {
 		umask(0077);
+		/* Clean up any leftover directory from previous tests. */
+		rmdir(TMP_DIR);
 		ASSERT_EQ(0, mkdir(TMP_DIR, 0700));
 	}
 
