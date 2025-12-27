@@ -48,7 +48,8 @@ static void create_fs_domain(struct __test_metadata *const _metadata)
 
 FIXTURE(scoped_domains)
 {
-	struct service_fixture stream_address, dgram_address;
+	struct service_fixture stream_address_abstract, dgram_address_abstract,
+		stream_address_pathname, dgram_address_pathname;
 };
 
 #include "scoped_base_variants.h"
@@ -60,16 +61,20 @@ FIXTURE_SETUP(scoped_domains)
 	umask(0077);
 	ASSERT_EQ(0, mkdir(PATHNAME_UNIX_SOCK_DIR, 0700));
 
-	memset(&self->stream_address, 0, sizeof(self->stream_address));
-	memset(&self->dgram_address, 0, sizeof(self->dgram_address));
-	set_unix_address(&self->stream_address, 0, true);
-	set_unix_address(&self->dgram_address, 1, true);
+	memset(&self->stream_address_abstract, 0, sizeof(self->stream_address_abstract));
+	memset(&self->dgram_address_abstract, 0, sizeof(self->dgram_address_abstract));
+	memset(&self->stream_address_pathname, 0, sizeof(self->stream_address_pathname));
+	memset(&self->dgram_address_pathname, 0, sizeof(self->dgram_address_pathname));
+	set_unix_address(&self->stream_address_abstract, 0, true);
+	set_unix_address(&self->dgram_address_abstract, 1, true);
+	set_unix_address(&self->stream_address_pathname, 0, false);
+	set_unix_address(&self->dgram_address_pathname, 1, false);
 }
 
 FIXTURE_TEARDOWN(scoped_domains)
 {
-	unlink(self->stream_address.unix_addr.sun_path);
-	unlink(self->dgram_address.unix_addr.sun_path);
+	unlink(self->stream_address_pathname.unix_addr.sun_path);
+	unlink(self->dgram_address_pathname.unix_addr.sun_path);
 	rmdir(PATHNAME_UNIX_SOCK_DIR);
 }
 
@@ -90,6 +95,12 @@ static void test_connect_to_parent(struct __test_metadata *const _metadata,
 	int stream_server, dgram_server;
 	const __u16 scope = abstract ? LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET :
 				       LANDLOCK_SCOPE_PATHNAME_UNIX_SOCKET;
+	const struct service_fixture *stream_address =
+		abstract ? &self->stream_address_abstract :
+			   &self->stream_address_pathname;
+	const struct service_fixture *dgram_address =
+		abstract ? &self->dgram_address_abstract :
+			   &self->dgram_address_pathname;
 
 	/*
 	 * can_connect_to_parent is true if a child process can connect to its
@@ -124,8 +135,8 @@ static void test_connect_to_parent(struct __test_metadata *const _metadata,
 		/* Waits for the server. */
 		ASSERT_EQ(1, read(pipe_parent[0], &buf_child, 1));
 
-		err = connect(stream_client, &self->stream_address.unix_addr,
-			      self->stream_address.unix_addr_len);
+		err = connect(stream_client, &stream_address->unix_addr,
+			      stream_address->unix_addr_len);
 		if (can_connect_to_parent) {
 			EXPECT_EQ(0, err);
 		} else {
@@ -134,8 +145,8 @@ static void test_connect_to_parent(struct __test_metadata *const _metadata,
 		}
 		EXPECT_EQ(0, close(stream_client));
 
-		err = connect(dgram_client, &self->dgram_address.unix_addr,
-			      self->dgram_address.unix_addr_len);
+		err = connect(dgram_client, &dgram_address->unix_addr,
+			      dgram_address->unix_addr_len);
 		if (can_connect_to_parent) {
 			EXPECT_EQ(0, err);
 		} else {
@@ -154,10 +165,10 @@ static void test_connect_to_parent(struct __test_metadata *const _metadata,
 	ASSERT_LE(0, stream_server);
 	dgram_server = socket(AF_UNIX, SOCK_DGRAM, 0);
 	ASSERT_LE(0, dgram_server);
-	ASSERT_EQ(0, bind(stream_server, &self->stream_address.unix_addr,
-			  self->stream_address.unix_addr_len));
-	ASSERT_EQ(0, bind(dgram_server, &self->dgram_address.unix_addr,
-			  self->dgram_address.unix_addr_len));
+	ASSERT_EQ(0, bind(stream_server, &stream_address->unix_addr,
+			  stream_address->unix_addr_len));
+	ASSERT_EQ(0, bind(dgram_server, &dgram_address->unix_addr,
+			  dgram_address->unix_addr_len));
 	ASSERT_EQ(0, listen(stream_server, backlog));
 
 	/* Signals to child that the parent is listening. */
@@ -190,6 +201,12 @@ static void test_connect_to_child(struct __test_metadata *const _metadata,
 	int stream_client, dgram_client;
 	const __u16 scope = abstract ? LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET :
 				       LANDLOCK_SCOPE_PATHNAME_UNIX_SOCKET;
+	const struct service_fixture *stream_address =
+		abstract ? &self->stream_address_abstract :
+			   &self->stream_address_pathname;
+	const struct service_fixture *dgram_address =
+		abstract ? &self->dgram_address_abstract :
+			   &self->dgram_address_pathname;
 
 	/*
 	 * can_connect_to_child is true if a parent process can connect to its
@@ -224,10 +241,10 @@ static void test_connect_to_child(struct __test_metadata *const _metadata,
 		dgram_server = socket(AF_UNIX, SOCK_DGRAM, 0);
 		ASSERT_LE(0, dgram_server);
 		ASSERT_EQ(0,
-			  bind(stream_server, &self->stream_address.unix_addr,
-			       self->stream_address.unix_addr_len));
-		ASSERT_EQ(0, bind(dgram_server, &self->dgram_address.unix_addr,
-				  self->dgram_address.unix_addr_len));
+			  bind(stream_server, &stream_address->unix_addr,
+			       stream_address->unix_addr_len));
+		ASSERT_EQ(0, bind(dgram_server, &dgram_address->unix_addr,
+				  dgram_address->unix_addr_len));
 		ASSERT_EQ(0, listen(stream_server, backlog));
 
 		/* Signals to the parent that child is listening. */
@@ -256,11 +273,11 @@ static void test_connect_to_child(struct __test_metadata *const _metadata,
 
 	/* Waits for the child to listen */
 	ASSERT_EQ(1, read(pipe_child[0], &buf, 1));
-	err_stream = connect(stream_client, &self->stream_address.unix_addr,
-			     self->stream_address.unix_addr_len);
+	err_stream = connect(stream_client, &stream_address->unix_addr,
+			     stream_address->unix_addr_len);
 	errno_stream = errno;
-	err_dgram = connect(dgram_client, &self->dgram_address.unix_addr,
-			    self->dgram_address.unix_addr_len);
+	err_dgram = connect(dgram_client, &dgram_address->unix_addr,
+			    dgram_address->unix_addr_len);
 	errno_dgram = errno;
 	if (can_connect_to_child) {
 		EXPECT_EQ(0, err_stream);
