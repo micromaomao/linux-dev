@@ -1226,6 +1226,18 @@ static struct sock *unix_find_bsd(struct sockaddr_un *sunaddr, int addr_len,
 	if (!S_ISSOCK(inode->i_mode))
 		goto path_put;
 
+	/*
+	 * We call the hook because we know that the inode is a socket
+	 * and we hold a valid reference to it via the path.
+	 * We intentionally forgo the ability to restrict SOCK_COREDUMP.
+	 */
+	if (!(flags & SOCK_COREDUMP)) {
+		err = security_unix_path_connect(&path);
+		if (err)
+			goto path_put;
+		err = -ECONNREFUSED;
+	}
+
 	sk = unix_find_socket_byinode(inode);
 	if (!sk)
 		goto path_put;
