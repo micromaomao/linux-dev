@@ -295,11 +295,12 @@ out_unset:
 	LANDLOCK_ACCESS_FS_MAKE_SYM | \
 	LANDLOCK_ACCESS_FS_REFER | \
 	LANDLOCK_ACCESS_FS_TRUNCATE | \
-	LANDLOCK_ACCESS_FS_IOCTL_DEV)
+	LANDLOCK_ACCESS_FS_IOCTL_DEV | \
+	LANDLOCK_ACCESS_FS_CONNECT_UNIX)
 
 /* clang-format on */
 
-#define LANDLOCK_ABI_LAST 7
+#define LANDLOCK_ABI_LAST 8
 
 #define XSTR(s) #s
 #define STR(s) XSTR(s)
@@ -443,6 +444,12 @@ int main(const int argc, char *const argv[], char *const *const envp)
 			"to leverage Landlock features "
 			"provided by ABI version %d (instead of %d).\n",
 			LANDLOCK_ABI_LAST, abi);
+		__attribute__((fallthrough));
+	case 7:
+		/* Removes LANDLOCK_ACCESS_FS_CONNECT_UNIX for ABI < 8 */
+		ruleset_attr.handled_access_fs &=
+			~LANDLOCK_ACCESS_FS_CONNECT_UNIX;
+
 		__attribute__((fallthrough));
 	case LANDLOCK_ABI_LAST:
 		break;
