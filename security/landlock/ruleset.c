@@ -28,6 +28,7 @@
 #include "limits.h"
 #include "object.h"
 #include "ruleset.h"
+#include "supervisor.h"
 
 static struct landlock_ruleset *create_ruleset(const u32 num_layers)
 {
@@ -501,6 +502,7 @@ static void free_ruleset(struct landlock_ruleset *const ruleset)
 #endif /* IS_ENABLED(CONFIG_INET) */
 
 	landlock_put_hierarchy(ruleset->hierarchy);
+	landlock_put_supervisor(ruleset->supervisor);
 	kfree(ruleset);
 }
 
@@ -571,6 +573,12 @@ landlock_merge_ruleset(struct landlock_ruleset *const parent,
 		return ERR_PTR(-ENOMEM);
 
 	refcount_set(&new_dom->hierarchy->usage, 1);
+
+	/* Copy the supervisor reference from the ruleset to the hierarchy */
+	if (ruleset->supervisor) {
+		landlock_get_supervisor(ruleset->supervisor);
+		new_dom->hierarchy->supervisor = ruleset->supervisor;
+	}
 
 	/* ...as a child of @parent... */
 	err = inherit_ruleset(parent, new_dom);
