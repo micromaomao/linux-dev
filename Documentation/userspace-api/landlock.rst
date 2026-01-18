@@ -229,14 +229,61 @@ The current thread is now ready to sandbox itself with the ruleset.
     }
     close(ruleset_fd);
 
-If the ``landlock_restrict_self`` system call succeeds, the current thread is
-now restricted and this policy will be enforced on all its subsequently created
-children as well.  Once a thread is landlocked, there is no way to remove its
-security policy; only adding more restrictions is allowed.  These threads are
-now in a new Landlock domain, which is a merger of their parent one (if any)
-with the new ruleset.
+If the ``landlock_restrict_self`` system call succeeds, the current thread
+is now restricted and this policy will be enforced on all its subsequently
+created children as well.  Once a thread is landlocked, there is no way to
+remove its security policy; only adding more restrictions is allowed
+(unless the supervisor feature is used, see `Supervisor rulesets`_).
+These threads are now in a new Landlock domain, which is a merger of their
+parent one (if any) with the new ruleset.
 
 Full working code can be found in `samples/landlock/sandboxer.c`_.
+
+Supervisor rulesets
+-------------------
+
+Starting with ABI version 10, Landlock supports supervisor rulesets, which
+allow a trusted supervisor process to dynamically modify the rules
+affecting sandboxed processes.  This is useful for implementing dynamic
+sandboxing where the sandbox policy can be updated at runtime (e.g., to
+grant additional access based on user interaction).
+
+A supervisor ruleset is created with the
+``LANDLOCK_CREATE_RULESET_SUPERVISOR`` flag:
+
+.. code-block:: c
+
+    supervisor_fd = landlock_create_ruleset(&ruleset_attr, sizeof(ruleset_attr),
+                                            LANDLOCK_CREATE_RULESET_SUPERVISOR);
+
+Rules are added to the supervisor ruleset using ``landlock_add_rule()``,
+and must be explicitly committed using the
+``LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR`` flag.  When committing,
+``rule_type`` may be set to 0 to commit without adding a new rule:
+
+.. code-block:: c
+
+    /* Add a rule and commit in one call */
+    landlock_add_rule(supervisor_fd, LANDLOCK_RULE_PATH_BENEATH,
+                      &path_beneath, LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR);
+
+    /* Or commit without adding a rule (rule_type = 0) */
+    landlock_add_rule(supervisor_fd, 0, NULL, LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR);
+
+A supervisee ruleset can be obtained from a supervisor ruleset using the
+``LANDLOCK_IOCTL_GET_SUPERVISEE_RULESET`` ioctl:
+
+.. code-block:: c
+
+    supervisee_fd = ioctl(supervisor_fd, LANDLOCK_IOCTL_GET_SUPERVISEE_RULESET, 0);
+
+The supervisee ruleset is then enforced in the sandboxed process using
+``landlock_restrict_self()``.  After enforcement, the supervisor process
+can update the rules by adding new rules to the supervisor ruleset and
+committing them.  The committed rules will automatically apply to all
+domains using that supervisor.
+
+Full working code can be found in `samples/landlock/supervisor_sandboxer.c`_.
 
 Good practices
 --------------
@@ -685,6 +732,14 @@ enforce Landlock rulesets across all threads of the calling process
 using the ``LANDLOCK_RESTRICT_SELF_TSYNC`` flag passed to
 sys_landlock_restrict_self().
 
+Supervisor rulesets (ABI < 10)
+-----------------------------
+
+Starting with the Landlock ABI version 10, it is possible to create supervisor
+rulesets using the ``LANDLOCK_CREATE_RULESET_SUPERVISOR`` flag.  Supervisor
+rulesets enable dynamic modification of sandbox rules after enforcement.  See
+`Supervisor rulesets`_ for more details.
+
 .. _kernel_support:
 
 Kernel support
@@ -789,3 +844,5 @@ Additional documentation
 .. Links
 .. _samples/landlock/sandboxer.c:
    https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/samples/landlock/sandboxer.c
+.. _samples/landlock/supervisor_sandboxer.c:
+   https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/samples/landlock/supervisor_sandboxer.c
