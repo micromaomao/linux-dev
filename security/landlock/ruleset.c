@@ -824,7 +824,7 @@ bool landlock_check_supervisor_access(
 			return false;
 		}
 
-		/* TODO: remove */
+		/* TODO: remove on submission */
 		trace_printk("committed = %p\n", committed);
 
 		rule = landlock_find_rule(committed, id);

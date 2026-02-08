@@ -213,7 +213,7 @@ int landlock_commit_supervisor(struct landlock_ruleset *ruleset)
 					  lockdep_is_held(&supervisor->lock));
 	rcu_assign_pointer(supervisor->committed_ruleset, new_committed);
 
-	/* TODO: remove */
+	/* TODO: remove on submission */
 	trace_printk("committed = %p\n", new_committed);
 	{
 		struct rb_node *node;
