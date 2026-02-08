@@ -15,11 +15,13 @@ RUN dpkg --add-architecture i386 && apt update && apt install -y \
     git \
     htop \
     iproute2 \
+    jq \
     kitty-terminfo \
     libcap-dev \
     libcapstone-dev \
     libpfm4-dev \
     linux-perf \
+    llvm \
     ltrace \
     make \
     net-tools \
