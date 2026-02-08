@@ -894,19 +894,22 @@ static bool is_access_to_paths_allowed(
 		 * may exist on parent directories (e.g., /bin) that should
 		 * apply when accessing child paths (e.g., /bin/sh).
 		 */
-		if (!allowed_parent1 || (unlikely(layer_masks_parent2) && !allowed_parent2)) {
+		if (!allowed_parent1 ||
+		    (unlikely(layer_masks_parent2) && !allowed_parent2)) {
 			struct landlock_object *object;
 
-			object = landlock_inode(d_backing_inode(walker_path.dentry))->object;
+			object = landlock_inode(
+					 d_backing_inode(walker_path.dentry))
+					 ->object;
 			if (object) {
-				struct landlock_id walker_id = {
-					.type = LANDLOCK_KEY_INODE,
-					.key = {
-						.object = object,
-					}
-				};
+				struct landlock_id
+					walker_id = { .type = LANDLOCK_KEY_INODE,
+						      .key = {
+							      .object = object,
+						      } };
 
-				scoped_guard(rcu) {
+				scoped_guard(rcu)
+				{
 					if (!allowed_parent1 &&
 					    landlock_check_supervisor_access(
 						    domain, walker_id,
@@ -1784,8 +1787,9 @@ static int hook_file_open(struct file *const file)
  *
  * Returns: true if supervisor rulesets now allow the access, false otherwise.
  */
-static bool check_supervisor_optional_access_recheck(
-	const struct file *const file, const access_mask_t access_request)
+static bool
+check_supervisor_optional_access_recheck(const struct file *const file,
+					 const access_mask_t access_request)
 {
 	const struct landlock_ruleset *domain =
 		landlock_cred(file->f_cred)->domain;
@@ -1795,7 +1799,8 @@ static bool check_supervisor_optional_access_recheck(
 	if (!domain)
 		return false;
 
-	scoped_guard(rcu) {
+	scoped_guard(rcu)
+	{
 		struct landlock_object *object =
 			rcu_dereference(landlock_inode(inode)->object);
 		if (object) {
@@ -1831,8 +1836,8 @@ static int hook_file_truncate(struct file *const file)
 	 * now allows it - this enables dynamic rule updates to take effect
 	 * for already-opened files.
 	 */
-	if (check_supervisor_optional_access_recheck(file,
-						     LANDLOCK_ACCESS_FS_TRUNCATE))
+	if (check_supervisor_optional_access_recheck(
+		    file, LANDLOCK_ACCESS_FS_TRUNCATE))
 		return 0;
 
 	landlock_log_denial(landlock_cred(file->f_cred), &(struct landlock_request) {
@@ -1877,8 +1882,8 @@ static int hook_file_ioctl_common(const struct file *const file,
 	 * now allows it - this enables dynamic rule updates to take effect
 	 * for already-opened files.
 	 */
-	if (check_supervisor_optional_access_recheck(file,
-						     LANDLOCK_ACCESS_FS_IOCTL_DEV))
+	if (check_supervisor_optional_access_recheck(
+		    file, LANDLOCK_ACCESS_FS_IOCTL_DEV))
 		return 0;
 
 	landlock_log_denial(landlock_cred(file->f_cred), &(struct landlock_request) {

@@ -836,8 +836,8 @@ bool landlock_check_supervisor_access(
 		}
 		/* TODO: remove */
 		trace_printk("yes rule: %p, num_layers = %u, access = %x\n",
-			rule, rule->num_layers,
-			rule->num_layers > 0 ? rule->layers[0].access : 0);
+			     rule, rule->num_layers,
+			     rule->num_layers > 0 ? rule->layers[0].access : 0);
 
 		/*
 		 * Check if the supervisor rule grants all the unfulfilled
@@ -886,8 +886,7 @@ bool landlock_check_supervisor_access(
  */
 bool landlock_check_supervisor_optional_access(
 	const struct landlock_ruleset *const domain,
-	const struct landlock_id id,
-	const access_mask_t access_request)
+	const struct landlock_id id, const access_mask_t access_request)
 {
 	struct landlock_hierarchy *hierarchy;
 	size_t layer_level;

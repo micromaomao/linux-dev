@@ -203,7 +203,8 @@ static int current_check_access_socket(struct socket *const sock,
 	 * Supervisee ruleset denied access.  Check if supervisor rulesets
 	 * for the denying layers allow this access.
 	 */
-	scoped_guard(rcu) {
+	scoped_guard(rcu)
+	{
 		if (landlock_check_supervisor_access(subject->domain, id,
 						     &layer_masks))
 			return 0;

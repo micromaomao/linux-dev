@@ -208,7 +208,8 @@ static long fop_supervisor_ioctl(struct file *filp, unsigned int cmd,
 
 	/* Create a file descriptor for the supervisee ruleset */
 	supervisee_fd = anon_inode_getfd("[landlock-ruleset]", &ruleset_fops,
-					 supervisee_ruleset, O_RDWR | O_CLOEXEC);
+					 supervisee_ruleset,
+					 O_RDWR | O_CLOEXEC);
 	if (supervisee_fd < 0)
 		landlock_put_ruleset(supervisee_ruleset);
 
@@ -364,8 +365,8 @@ SYSCALL_DEFINE3(landlock_create_ruleset,
 	}
 
 	/* Creates anonymous FD referring to the ruleset. */
-	ruleset_fd = anon_inode_getfd("[landlock-ruleset]", fops,
-				      ruleset, O_RDWR | O_CLOEXEC);
+	ruleset_fd = anon_inode_getfd("[landlock-ruleset]", fops, ruleset,
+				      O_RDWR | O_CLOEXEC);
 	if (ruleset_fd < 0)
 		landlock_put_ruleset(ruleset);
 	return ruleset_fd;
@@ -380,9 +381,9 @@ SYSCALL_DEFINE3(landlock_create_ruleset,
  *                     landlock_restrict_self() - use the supervisee FD
  *                     obtained via LANDLOCK_IOCTL_GET_SUPERVISEE_RULESET.
  */
-static struct landlock_ruleset *get_ruleset_from_fd(const int fd,
-						    const fmode_t mode,
-						    const bool reject_supervisor)
+static struct landlock_ruleset *
+get_ruleset_from_fd(const int fd, const fmode_t mode,
+		    const bool reject_supervisor)
 {
 	CLASS(fd, ruleset_f)(fd);
 	struct landlock_ruleset *ruleset;
@@ -562,7 +563,7 @@ static int add_rule_net_port(struct landlock_ruleset *ruleset,
  *     :identifiers: landlock_add_rule_flags
  */
 
-#define LANDLOCK_ADD_RULE_VALID_FLAGS \
+#define LANDLOCK_ADD_RULE_VALID_FLAGS                                    \
 	(LANDLOCK_ADD_RULE_QUIET | LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR | \
 	 LANDLOCK_ADD_RULE_INTERSECT)
 

@@ -83,9 +83,9 @@ TEST(supervisor_create_ruleset)
 	};
 	int supervisor_fd;
 
-	supervisor_fd = landlock_create_ruleset(&ruleset_attr,
-						sizeof(ruleset_attr),
-						LANDLOCK_CREATE_RULESET_SUPERVISOR);
+	supervisor_fd =
+		landlock_create_ruleset(&ruleset_attr, sizeof(ruleset_attr),
+					LANDLOCK_CREATE_RULESET_SUPERVISOR);
 	ASSERT_LE(0, supervisor_fd)
 	{
 		TH_LOG("Failed to create supervisor ruleset: %s",
@@ -103,13 +103,14 @@ TEST(supervisor_get_supervisee)
 	};
 	int supervisor_fd, supervisee_fd;
 
-	supervisor_fd = landlock_create_ruleset(&ruleset_attr,
-						sizeof(ruleset_attr),
-						LANDLOCK_CREATE_RULESET_SUPERVISOR);
+	supervisor_fd =
+		landlock_create_ruleset(&ruleset_attr, sizeof(ruleset_attr),
+					LANDLOCK_CREATE_RULESET_SUPERVISOR);
 	ASSERT_LE(0, supervisor_fd);
 
 	/* Get supervisee ruleset via ioctl */
-	supervisee_fd = ioctl(supervisor_fd, LANDLOCK_IOCTL_GET_SUPERVISEE_RULESET, 0);
+	supervisee_fd =
+		ioctl(supervisor_fd, LANDLOCK_IOCTL_GET_SUPERVISEE_RULESET, 0);
 	ASSERT_LE(0, supervisee_fd)
 	{
 		TH_LOG("Failed to get supervisee ruleset: %s", strerror(errno));
@@ -126,13 +127,14 @@ TEST(supervisor_get_supervisee_invalid_flags)
 	};
 	int supervisor_fd;
 
-	supervisor_fd = landlock_create_ruleset(&ruleset_attr,
-						sizeof(ruleset_attr),
-						LANDLOCK_CREATE_RULESET_SUPERVISOR);
+	supervisor_fd =
+		landlock_create_ruleset(&ruleset_attr, sizeof(ruleset_attr),
+					LANDLOCK_CREATE_RULESET_SUPERVISOR);
 	ASSERT_LE(0, supervisor_fd);
 
 	/* Invalid flags should return EINVAL */
-	ASSERT_EQ(-1, ioctl(supervisor_fd, LANDLOCK_IOCTL_GET_SUPERVISEE_RULESET, 1));
+	ASSERT_EQ(-1, ioctl(supervisor_fd,
+			    LANDLOCK_IOCTL_GET_SUPERVISEE_RULESET, 1));
 	ASSERT_EQ(EINVAL, errno);
 
 	ASSERT_EQ(0, close(supervisor_fd));
@@ -146,12 +148,13 @@ TEST(supervisor_ioctl_on_regular_ruleset)
 	int ruleset_fd;
 
 	/* Create a regular (non-supervisor) ruleset */
-	ruleset_fd = landlock_create_ruleset(&ruleset_attr,
-					     sizeof(ruleset_attr), 0);
+	ruleset_fd =
+		landlock_create_ruleset(&ruleset_attr, sizeof(ruleset_attr), 0);
 	ASSERT_LE(0, ruleset_fd);
 
 	/* ioctl should fail on regular rulesets */
-	ASSERT_EQ(-1, ioctl(ruleset_fd, LANDLOCK_IOCTL_GET_SUPERVISEE_RULESET, 0));
+	ASSERT_EQ(-1,
+		  ioctl(ruleset_fd, LANDLOCK_IOCTL_GET_SUPERVISEE_RULESET, 0));
 	ASSERT_EQ(ENOTTY, errno);
 
 	ASSERT_EQ(0, close(ruleset_fd));
@@ -164,9 +167,9 @@ TEST(supervisor_restrict_self_fails)
 	};
 	int supervisor_fd;
 
-	supervisor_fd = landlock_create_ruleset(&ruleset_attr,
-						sizeof(ruleset_attr),
-						LANDLOCK_CREATE_RULESET_SUPERVISOR);
+	supervisor_fd =
+		landlock_create_ruleset(&ruleset_attr, sizeof(ruleset_attr),
+					LANDLOCK_CREATE_RULESET_SUPERVISOR);
 	ASSERT_LE(0, supervisor_fd);
 
 	/* Trying to use supervisor fd with restrict_self should fail */
@@ -184,9 +187,9 @@ TEST(supervisor_commit_empty)
 	};
 	int supervisor_fd;
 
-	supervisor_fd = landlock_create_ruleset(&ruleset_attr,
-						sizeof(ruleset_attr),
-						LANDLOCK_CREATE_RULESET_SUPERVISOR);
+	supervisor_fd =
+		landlock_create_ruleset(&ruleset_attr, sizeof(ruleset_attr),
+					LANDLOCK_CREATE_RULESET_SUPERVISOR);
 	ASSERT_LE(0, supervisor_fd);
 
 	/* Commit with rule_type=0 means commit only without adding a rule */
@@ -204,7 +207,8 @@ TEST(supervisor_commit_on_regular_ruleset)
 	int ruleset_fd;
 
 	/* Create a regular ruleset */
-	ruleset_fd = landlock_create_ruleset(&ruleset_attr, sizeof(ruleset_attr), 0);
+	ruleset_fd =
+		landlock_create_ruleset(&ruleset_attr, sizeof(ruleset_attr), 0);
 	ASSERT_LE(0, ruleset_fd);
 
 	/* Commit flag should fail on regular rulesets */
@@ -223,7 +227,8 @@ TEST(rule_type_zero_without_commit)
 	int ruleset_fd;
 
 	/* Create a regular ruleset */
-	ruleset_fd = landlock_create_ruleset(&ruleset_attr, sizeof(ruleset_attr), 0);
+	ruleset_fd =
+		landlock_create_ruleset(&ruleset_attr, sizeof(ruleset_attr), 0);
 	ASSERT_LE(0, ruleset_fd);
 
 	/* rule_type=0 is only valid with LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR */
@@ -243,25 +248,27 @@ TEST(supervisor_multiple_commits)
 	};
 	int supervisor_fd;
 
-	supervisor_fd = landlock_create_ruleset(&ruleset_attr,
-						sizeof(ruleset_attr),
-						LANDLOCK_CREATE_RULESET_SUPERVISOR);
+	supervisor_fd =
+		landlock_create_ruleset(&ruleset_attr, sizeof(ruleset_attr),
+					LANDLOCK_CREATE_RULESET_SUPERVISOR);
 	ASSERT_LE(0, supervisor_fd);
 
 	/* First rule and commit */
 	path_beneath.parent_fd = open("/tmp", O_PATH | O_DIRECTORY | O_CLOEXEC);
 	ASSERT_LE(0, path_beneath.parent_fd);
-	ASSERT_EQ(0, landlock_add_rule(supervisor_fd, LANDLOCK_RULE_PATH_BENEATH,
-				       &path_beneath,
-				       LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR));
+	ASSERT_EQ(0,
+		  landlock_add_rule(supervisor_fd, LANDLOCK_RULE_PATH_BENEATH,
+				    &path_beneath,
+				    LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR));
 	ASSERT_EQ(0, close(path_beneath.parent_fd));
 
 	/* Second rule and commit */
 	path_beneath.parent_fd = open("/", O_PATH | O_DIRECTORY | O_CLOEXEC);
 	ASSERT_LE(0, path_beneath.parent_fd);
-	ASSERT_EQ(0, landlock_add_rule(supervisor_fd, LANDLOCK_RULE_PATH_BENEATH,
-				       &path_beneath,
-				       LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR));
+	ASSERT_EQ(0,
+		  landlock_add_rule(supervisor_fd, LANDLOCK_RULE_PATH_BENEATH,
+				    &path_beneath,
+				    LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR));
 	ASSERT_EQ(0, close(path_beneath.parent_fd));
 
 	ASSERT_EQ(0, close(supervisor_fd));
@@ -274,16 +281,18 @@ TEST(supervisor_multiple_supervisees)
 	};
 	int supervisor_fd, supervisee_fd1, supervisee_fd2;
 
-	supervisor_fd = landlock_create_ruleset(&ruleset_attr,
-						sizeof(ruleset_attr),
-						LANDLOCK_CREATE_RULESET_SUPERVISOR);
+	supervisor_fd =
+		landlock_create_ruleset(&ruleset_attr, sizeof(ruleset_attr),
+					LANDLOCK_CREATE_RULESET_SUPERVISOR);
 	ASSERT_LE(0, supervisor_fd);
 
 	/* Get multiple supervisee rulesets from the same supervisor */
-	supervisee_fd1 = ioctl(supervisor_fd, LANDLOCK_IOCTL_GET_SUPERVISEE_RULESET, 0);
+	supervisee_fd1 =
+		ioctl(supervisor_fd, LANDLOCK_IOCTL_GET_SUPERVISEE_RULESET, 0);
 	ASSERT_LE(0, supervisee_fd1);
 
-	supervisee_fd2 = ioctl(supervisor_fd, LANDLOCK_IOCTL_GET_SUPERVISEE_RULESET, 0);
+	supervisee_fd2 =
+		ioctl(supervisor_fd, LANDLOCK_IOCTL_GET_SUPERVISEE_RULESET, 0);
 	ASSERT_LE(0, supervisee_fd2);
 
 	/* They should be different fds */
@@ -312,21 +321,24 @@ TEST_F_FORK(supervisor, access_check_basic)
 	int supervisor_fd, supervisee_fd;
 
 	/* Create supervisor ruleset */
-	supervisor_fd = landlock_create_ruleset(&ruleset_attr,
-						sizeof(ruleset_attr),
-						LANDLOCK_CREATE_RULESET_SUPERVISOR);
+	supervisor_fd =
+		landlock_create_ruleset(&ruleset_attr, sizeof(ruleset_attr),
+					LANDLOCK_CREATE_RULESET_SUPERVISOR);
 	ASSERT_LE(0, supervisor_fd);
 
 	/* Allow access to dir_s1d2 only */
-	path_beneath.parent_fd = open(dir_s1d2, O_PATH | O_DIRECTORY | O_CLOEXEC);
+	path_beneath.parent_fd =
+		open(dir_s1d2, O_PATH | O_DIRECTORY | O_CLOEXEC);
 	ASSERT_LE(0, path_beneath.parent_fd);
-	ASSERT_EQ(0, landlock_add_rule(supervisor_fd, LANDLOCK_RULE_PATH_BENEATH,
-				       &path_beneath,
-				       LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR));
+	ASSERT_EQ(0,
+		  landlock_add_rule(supervisor_fd, LANDLOCK_RULE_PATH_BENEATH,
+				    &path_beneath,
+				    LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR));
 	ASSERT_EQ(0, close(path_beneath.parent_fd));
 
 	/* Get supervisee ruleset */
-	supervisee_fd = ioctl(supervisor_fd, LANDLOCK_IOCTL_GET_SUPERVISEE_RULESET, 0);
+	supervisee_fd =
+		ioctl(supervisor_fd, LANDLOCK_IOCTL_GET_SUPERVISEE_RULESET, 0);
 	ASSERT_LE(0, supervisee_fd);
 
 	/* Enforce supervisee ruleset */
@@ -367,21 +379,24 @@ TEST_F_FORK(supervisor, dynamic_rule_update)
 	ASSERT_EQ(0, pipe(pipe_child_to_parent));
 
 	/* Create supervisor ruleset with no initial rules */
-	supervisor_fd = landlock_create_ruleset(&ruleset_attr,
-						sizeof(ruleset_attr),
-						LANDLOCK_CREATE_RULESET_SUPERVISOR);
+	supervisor_fd =
+		landlock_create_ruleset(&ruleset_attr, sizeof(ruleset_attr),
+					LANDLOCK_CREATE_RULESET_SUPERVISOR);
 	ASSERT_LE(0, supervisor_fd);
 
 	/* Initial commit with just dir_s1d2 allowed */
-	path_beneath.parent_fd = open(dir_s1d2, O_PATH | O_DIRECTORY | O_CLOEXEC);
+	path_beneath.parent_fd =
+		open(dir_s1d2, O_PATH | O_DIRECTORY | O_CLOEXEC);
 	ASSERT_LE(0, path_beneath.parent_fd);
-	ASSERT_EQ(0, landlock_add_rule(supervisor_fd, LANDLOCK_RULE_PATH_BENEATH,
-				       &path_beneath,
-				       LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR));
+	ASSERT_EQ(0,
+		  landlock_add_rule(supervisor_fd, LANDLOCK_RULE_PATH_BENEATH,
+				    &path_beneath,
+				    LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR));
 	ASSERT_EQ(0, close(path_beneath.parent_fd));
 
 	/* Get supervisee ruleset */
-	supervisee_fd = ioctl(supervisor_fd, LANDLOCK_IOCTL_GET_SUPERVISEE_RULESET, 0);
+	supervisee_fd =
+		ioctl(supervisor_fd, LANDLOCK_IOCTL_GET_SUPERVISEE_RULESET, 0);
 	ASSERT_LE(0, supervisee_fd);
 
 	child = fork();
@@ -427,11 +442,13 @@ TEST_F_FORK(supervisor, dynamic_rule_update)
 	ASSERT_EQ(1, read(pipe_child_to_parent[0], &buf, 1));
 
 	/* Add rule for dir_s1d1 and commit */
-	path_beneath.parent_fd = open(dir_s1d1, O_PATH | O_DIRECTORY | O_CLOEXEC);
+	path_beneath.parent_fd =
+		open(dir_s1d1, O_PATH | O_DIRECTORY | O_CLOEXEC);
 	ASSERT_LE(0, path_beneath.parent_fd);
-	ASSERT_EQ(0, landlock_add_rule(supervisor_fd, LANDLOCK_RULE_PATH_BENEATH,
-				       &path_beneath,
-				       LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR));
+	ASSERT_EQ(0,
+		  landlock_add_rule(supervisor_fd, LANDLOCK_RULE_PATH_BENEATH,
+				    &path_beneath,
+				    LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR));
 	ASSERT_EQ(0, close(path_beneath.parent_fd));
 
 	/* Signal child to proceed to phase 2 */
