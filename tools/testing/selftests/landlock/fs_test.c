@@ -7912,10 +7912,11 @@ void audit_quiet_layout1_test_body(struct __test_metadata *const _metadata,
 							    "fs\\.truncate",
 							    target->target));
 
-			if (target->expect_ioctl_allowed || target->expect_ioctl_denied) {
+			if (target->expect_ioctl_allowed ||
+			    target->expect_ioctl_denied) {
 				if (debug_quiet_tests)
 					TH_LOG("Try ioctl FIONREAD on \"%s\"",
-						target->target);
+					       target->target);
 
 				ret = ioctl_error(_metadata, fd, FIONREAD);
 				if (target->expect_ioctl_allowed) {
@@ -7926,12 +7927,11 @@ void audit_quiet_layout1_test_body(struct __test_metadata *const _metadata,
 			}
 
 			if (target->audit_ioctl)
-				ASSERT_EQ(0,
-					  matches_log_fs_extra(
-						  _metadata, self->audit_fd,
-						  "fs\\.ioctl_dev",
-						  target->target,
-						  " ioctlcmd=0x541b\\+"));
+				ASSERT_EQ(0, matches_log_fs_extra(
+						     _metadata, self->audit_fd,
+						     "fs\\.ioctl_dev",
+						     target->target,
+						     " ioctlcmd=0x541b\\+"));
 
 			/* No other logs. records.domain not checked per reasoning above. */
 			audit_count_records(self->audit_fd, &records);
@@ -9598,7 +9598,8 @@ TEST_F(audit_quiet_rename, quiet_flag_on_file_ignored)
 				    "fs\\.remove_file,fs\\.refer", dir_s1d1));
 	/* We didn't unlink destination file */
 	ASSERT_EQ(0, matches_log_fs(_metadata, self->audit_fd,
-				    "fs\\.remove_file,fs\\.make_reg,fs\\.refer", dir_s2d1));
+				    "fs\\.remove_file,fs\\.make_reg,fs\\.refer",
+				    dir_s2d1));
 
 	/* No other logs */
 	audit_count_records(self->audit_fd, &records);
@@ -9810,7 +9811,8 @@ TEST_F(audit_quiet_rename, two_layers_different_quiet3)
 	ASSERT_EQ(0, records.access);
 }
 
-TEST_F(audit_quiet_rename, first_layer_quiet_deny_all_second_layer_not_quiet_deny_all)
+TEST_F(audit_quiet_rename,
+       first_layer_quiet_deny_all_second_layer_not_quiet_deny_all)
 {
 	__u64 access = LANDLOCK_ACCESS_FS_MAKE_REG |
 		       LANDLOCK_ACCESS_FS_REMOVE_FILE |
@@ -9855,7 +9857,8 @@ TEST_F(audit_quiet_rename, first_layer_quiet_deny_all_second_layer_not_quiet_den
 	ASSERT_EQ(0, records.access);
 }
 
-TEST_F(audit_quiet_rename, first_layer_quiet_deny_all_second_layer_dest_not_quiet)
+TEST_F(audit_quiet_rename,
+       first_layer_quiet_deny_all_second_layer_dest_not_quiet)
 {
 	__u64 access = LANDLOCK_ACCESS_FS_MAKE_REG |
 		       LANDLOCK_ACCESS_FS_REMOVE_FILE |
@@ -9911,24 +9914,22 @@ TEST_F(audit_quiet_rename, rename_xchg)
 {
 	struct a_layer layer = {
 		.handled_access_fs = LANDLOCK_ACCESS_FS_MAKE_REG |
-				LANDLOCK_ACCESS_FS_REMOVE_FILE |
-				LANDLOCK_ACCESS_FS_REFER,
+				     LANDLOCK_ACCESS_FS_REMOVE_FILE |
+				     LANDLOCK_ACCESS_FS_REFER,
 		.quiet_access_fs = LANDLOCK_ACCESS_FS_MAKE_REG,
-		.rules = {
-			{
-				.path = dir_s1d1,
-				.access = LANDLOCK_ACCESS_FS_REMOVE_FILE |
-					LANDLOCK_ACCESS_FS_REFER,
-				.quiet = true,
-			},
-			{
-				.path = dir_s2d1,
-				.access = LANDLOCK_ACCESS_FS_MAKE_REG |
-					LANDLOCK_ACCESS_FS_REMOVE_FILE |
-					LANDLOCK_ACCESS_FS_REFER,
-				.quiet = false,
-			}
-		},
+		.rules = { {
+				   .path = dir_s1d1,
+				   .access = LANDLOCK_ACCESS_FS_REMOVE_FILE |
+					     LANDLOCK_ACCESS_FS_REFER,
+				   .quiet = true,
+			   },
+			   {
+				   .path = dir_s2d1,
+				   .access = LANDLOCK_ACCESS_FS_MAKE_REG |
+					     LANDLOCK_ACCESS_FS_REMOVE_FILE |
+					     LANDLOCK_ACCESS_FS_REFER,
+				   .quiet = false,
+			   } },
 	};
 	struct audit_records records = {};
 
@@ -9963,7 +9964,8 @@ TEST_F(audit_quiet_rename, quiet_on_parent_mount)
 	EXPECT_EQ(0, unlink(file2_s1d3));
 	ASSERT_EQ(0, apply_a_layer(_metadata, &layer));
 
-	ASSERT_EQ(-1, renameat(AT_FDCWD, bind_file1_s1d3, AT_FDCWD, bind_file2_s1d3));
+	ASSERT_EQ(-1, renameat(AT_FDCWD, bind_file1_s1d3, AT_FDCWD,
+			       bind_file2_s1d3));
 	ASSERT_EQ(EACCES, errno);
 
 	audit_count_records(self->audit_fd, &records);
@@ -9991,11 +9993,12 @@ TEST_F(audit_quiet_rename, quiet_behind_mountpoint_ignored)
 	EXPECT_EQ(0, unlink(file2_s1d3));
 	ASSERT_EQ(0, apply_a_layer(_metadata, &layer));
 
-	ASSERT_EQ(-1, renameat(AT_FDCWD, bind_file1_s1d3, AT_FDCWD, bind_file2_s1d3));
+	ASSERT_EQ(-1, renameat(AT_FDCWD, bind_file1_s1d3, AT_FDCWD,
+			       bind_file2_s1d3));
 	ASSERT_EQ(EACCES, errno);
-	ASSERT_EQ(0,
-		  matches_log_fs(_metadata, self->audit_fd,
-				 "fs\\.remove_file,fs\\.make_reg", bind_dir_s1d3));
+	ASSERT_EQ(0, matches_log_fs(_metadata, self->audit_fd,
+				    "fs\\.remove_file,fs\\.make_reg",
+				    bind_dir_s1d3));
 
 	audit_count_records(self->audit_fd, &records);
 	ASSERT_EQ(0, records.access);
@@ -10031,7 +10034,8 @@ TEST_F(audit_quiet_rename, quiet_on_parent_mount_disconnected)
 
 	ASSERT_EQ(0, apply_a_layer(_metadata, &layer));
 
-	ASSERT_EQ(-1, renameat(bind_s1d3_fd, file1_name, bind_s1d3_fd, file2_name));
+	ASSERT_EQ(-1,
+		  renameat(bind_s1d3_fd, file1_name, bind_s1d3_fd, file2_name));
 	ASSERT_EQ(EACCES, errno);
 
 	audit_count_records(self->audit_fd, &records);
@@ -10068,7 +10072,8 @@ TEST_F(audit_quiet_rename, quiet_behind_mountpoint_disconnected)
 
 	ASSERT_EQ(0, apply_a_layer(_metadata, &layer));
 
-	ASSERT_EQ(-1, renameat(bind_s1d3_fd, file1_name, bind_s1d3_fd, file2_name));
+	ASSERT_EQ(-1,
+		  renameat(bind_s1d3_fd, file1_name, bind_s1d3_fd, file2_name));
 	ASSERT_EQ(EACCES, errno);
 
 	audit_count_records(self->audit_fd, &records);

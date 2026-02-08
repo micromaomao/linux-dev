@@ -47,8 +47,8 @@ static void free_supervisor(struct landlock_supervisor *supervisor)
 	 * nobody else can be trying to update or read us committed_ruleset,
 	 * so the following operation is safe.
 	 */
-	committed = rcu_dereference_protected(supervisor->committed_ruleset,
-					      true);
+	committed =
+		rcu_dereference_protected(supervisor->committed_ruleset, true);
 	if (committed)
 		landlock_put_ruleset(committed);
 
@@ -96,10 +96,11 @@ static int copy_rules_tree(struct landlock_ruleset *dst,
 				.type = key_type,
 			};
 
-			err = landlock_insert_rule(dst, id,
-						   rule->layers[0].access,
-						   rule->layers[0].flags.quiet ?
-						   LANDLOCK_ADD_RULE_QUIET : 0);
+			err = landlock_insert_rule(
+				dst, id, rule->layers[0].access,
+				rule->layers[0].flags.quiet ?
+					LANDLOCK_ADD_RULE_QUIET :
+					0);
 		}
 		if (err)
 			return err;
@@ -118,17 +119,16 @@ static int copy_rules_tree(struct landlock_ruleset *dst,
  *
  * Returns: A newly allocated ruleset copy, or an error pointer.
  */
-static struct landlock_ruleset *copy_ruleset_for_commit(
-	struct landlock_ruleset *src)
+static struct landlock_ruleset *
+copy_ruleset_for_commit(struct landlock_ruleset *src)
 {
 	struct landlock_ruleset *dst;
 	int err;
 
 	/* Create a new single-layer ruleset */
-	dst = landlock_create_ruleset(
-		src->access_masks[0].fs,
-		src->access_masks[0].net,
-		src->access_masks[0].scope);
+	dst = landlock_create_ruleset(src->access_masks[0].fs,
+				      src->access_masks[0].net,
+				      src->access_masks[0].scope);
 	if (IS_ERR(dst))
 		return dst;
 
@@ -208,8 +208,9 @@ int landlock_commit_supervisor(struct landlock_ruleset *ruleset)
 	}
 
 	/* Swap the committed ruleset pointer */
-	old_committed = rcu_dereference_protected(supervisor->committed_ruleset,
-			lockdep_is_held(&supervisor->lock));
+	old_committed =
+		rcu_dereference_protected(supervisor->committed_ruleset,
+					  lockdep_is_held(&supervisor->lock));
 	rcu_assign_pointer(supervisor->committed_ruleset, new_committed);
 
 	/* TODO: remove */
@@ -225,12 +226,14 @@ int landlock_commit_supervisor(struct landlock_ruleset *ruleset)
 			u32 i;
 
 			trace_printk("  rule key=0x%lx num_layers=%u\n",
-				(unsigned long)rule->key.data,
-				rule->num_layers);
+				     (unsigned long)rule->key.data,
+				     rule->num_layers);
 			for (i = 0; i < rule->num_layers; i++) {
-				trace_printk("    layer[%u]: level=%u access=0x%llx quiet=%d\n",
+				trace_printk(
+					"    layer[%u]: level=%u access=0x%llx quiet=%d\n",
 					i, rule->layers[i].level,
-					(unsigned long long)rule->layers[i].access,
+					(unsigned long long)rule->layers[i]
+						.access,
 					rule->layers[i].flags.quiet);
 			}
 		}
@@ -243,12 +246,14 @@ int landlock_commit_supervisor(struct landlock_ruleset *ruleset)
 			u32 i;
 
 			trace_printk("  rule key=0x%lx num_layers=%u\n",
-				(unsigned long)rule->key.data,
-				rule->num_layers);
+				     (unsigned long)rule->key.data,
+				     rule->num_layers);
 			for (i = 0; i < rule->num_layers; i++) {
-				trace_printk("    layer[%u]: level=%u access=0x%llx quiet=%d\n",
+				trace_printk(
+					"    layer[%u]: level=%u access=0x%llx quiet=%d\n",
 					i, rule->layers[i].level,
-					(unsigned long long)rule->layers[i].access,
+					(unsigned long long)rule->layers[i]
+						.access,
 					rule->layers[i].flags.quiet);
 			}
 		}
