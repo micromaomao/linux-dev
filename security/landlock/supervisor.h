@@ -2,8 +2,7 @@
 /*
  * Landlock - Supervisor management for mutable domains
  *
- * Copyright © 2017-2020 Mickaël Salaün <mic@digikod.net>
- * Copyright © 2020 ANSSI
+ * Copyright © 2026 Tingmao Wang <m@maowtm.org>
  */
 
 #ifndef _SECURITY_LANDLOCK_SUPERVISOR_H

@@ -6,6 +6,8 @@
  * as supervisor rules. The sandboxed process runs in a forked child,
  * and the parent monitors the config file for changes and reloads rules
  * when the file is modified.
+ *
+ * Copyright © 2026 Tingmao Wang <m@maowtm.org>
  */
 
 #define _GNU_SOURCE

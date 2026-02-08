@@ -939,7 +939,7 @@ jump_up:
 	 * If the supervisee ruleset denied access, check if supervisor
 	 * rulesets for the denying layers allow the access.
 	 */
-	if (!allowed_parent1) {
+	if (!allowed_parent1 || (unlikely(layer_masks_parent2) && !allowed_parent2)) {
 		const struct landlock_id id = {
 			.key.object = landlock_inode(
 				d_backing_inode(path->dentry))->object,
@@ -947,21 +947,13 @@ jump_up:
 		};
 
 		scoped_guard(rcu) {
-			if (landlock_check_supervisor_access(
+			if (!allowed_parent1 &&
+			    landlock_check_supervisor_access(
 				    domain, id, layer_masks_parent1))
 				allowed_parent1 = true;
-		}
-	}
 
-	if (unlikely(layer_masks_parent2) && !allowed_parent2) {
-		const struct landlock_id id = {
-			.key.object = landlock_inode(
-				d_backing_inode(path->dentry))->object,
-			.type = LANDLOCK_KEY_INODE,
-		};
-
-		scoped_guard(rcu) {
-			if (landlock_check_supervisor_access(
+			if (unlikely(layer_masks_parent2) && !allowed_parent2 &&
+			    landlock_check_supervisor_access(
 				    domain, id, layer_masks_parent2))
 				allowed_parent2 = true;
 		}

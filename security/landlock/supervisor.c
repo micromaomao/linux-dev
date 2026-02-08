@@ -2,7 +2,7 @@
 /*
  * Landlock - Supervisor management for mutable domains
  *
- * Copyright © 2024-2025 Microsoft Corporation
+ * Copyright © 2026 Tingmao Wang <m@maowtm.org>
  */
 
 #include <linux/err.h>
