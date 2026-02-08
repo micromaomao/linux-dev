@@ -830,11 +830,11 @@ bool landlock_check_supervisor_access(
 		rule = landlock_find_rule(committed, id);
 		if (!rule) {
 			/* No rule for this object in supervisor ruleset */
-			/* TODO: remove */
+			/* TODO: remove on submission */
 			trace_printk("no rule for inode %p\n", id.key.object);
 			return false;
 		}
-		/* TODO: remove */
+		/* TODO: remove on submission */
 		trace_printk("yes rule: %p, num_layers = %u, access = %x\n",
 			     rule, rule->num_layers,
 			     rule->num_layers > 0 ? rule->layers[0].access : 0);
