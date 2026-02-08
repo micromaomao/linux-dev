@@ -940,6 +940,12 @@ bool landlock_check_supervisor_optional_access(
 		}
 
 		rule = landlock_find_rule(committed, id);
+		/*
+		 * Supervisor rulesets are single-layer (level 0), so we only
+		 * need to check layers[0].  This is enforced by the rule
+		 * insertion code which creates supervisor rules with exactly
+		 * one layer at level 0.
+		 */
 		if (rule && rule->num_layers >= 1) {
 			access_mask_t granted = rule->layers[0].access;
 			if (granted & access_request)
