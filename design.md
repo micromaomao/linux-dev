@@ -119,6 +119,16 @@ In order to achieve atomic commit, the supervisor fd cannot actually point to (a
 
 Currently access checks do not take any locks, since the rulesets are immutable, and we want to keep this lockless property.  In order to do this, the live ruleset pointer needs to be RCU-protected, and the freeing of the previously live ruleset needs to be RCU synchronized.  To reduce complexity, this initial implementation uses synchronize_rcu() directly in the calling thread of LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR, and frees the old supervisor ruleset afterwards, but this can be rewritten to use call_rcu() in a future iteration if necessary (which will allow quicker commits).
 
+During access checks, for each step of the path walk, after landlock_unmask_layers()-ing the supervisee rule, if the access is not already allowed, we check for rules in the supervisor ruleset and call landlock_unmask_layers() on them too.
+
+An alternative approach would be to perform a separate path walk for supervisor rules only if the supervisee walk denies access, but this has drawbacks:
+
+- Path walk is significantly slower than chasing some pointers and doing some extra rb tree searches to check supervisor rules, so this is less efficient.  It will be even less efficient once we switch to a hash table based ruleset implementation, which will reduce the overhead of checking supervisor rules even further.
+- The two path walks can end up walking different paths if a rename happens in the middle.
+- The refer domain check logic would need to be repeated and thus become more complex.
+
+For optional access rights (TRUNCATE, IOCTL_DEV), which are recorded at `open()` time, the supervisor is re-checked at operation time via `landlock_check_supervisor_optional_access()` to allow dynamically-added rules to take effect on already-opened files.  This enables a future notification workflow where the supervisor can add rules in response to access attempts (notifications are not yet implemented).
+
 Here is a diagram of the relevant structures and relationships:
 
 ```
@@ -178,15 +188,6 @@ Here is a diagram of the relevant structures and relationships:
                                ^ The domain ruleset for a
                                  supervisor-controlled process.
 ```
-
-During access checks, the supervisor ruleset must be checked at each step of the path walk, not just at the target path.  This is because supervisor rules may be attached to parent directories (e.g., `/bin`) that should apply when accessing child paths (e.g., `/bin/sh`).  The path walk loop in `is_access_to_paths_allowed()` iterates from the target path up to the filesystem root; after checking supervisee rules at each path component, if still denied, the supervisor's committed ruleset is consulted via RCU.
-
-An alternative approach would be to perform a separate path walk for supervisor rules only if the supervisee walk denies access, but this has drawbacks:
-- Path walks are significantly slower than rb-tree lookups, making this less efficient (especially with future hash-based implementations).
-- Two separate path walks can see different paths if a rename occurs between them.
-- The domain check logic (`no_more_access`) would become more complex.
-
-For optional access rights (TRUNCATE, IOCTL_DEV), which are recorded at `open()` time, the supervisor is re-checked at operation time via `landlock_check_supervisor_optional_access()` to allow dynamically-added rules to take effect on already-opened files.  This enables a future notification workflow where the supervisor can add rules in response to access attempts (notifications are not yet implemented).
 
 ## Using supervisor_sandboxer
 
