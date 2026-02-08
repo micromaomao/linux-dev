@@ -837,7 +837,6 @@ static bool is_access_to_paths_allowed(
 	 */
 	while (true) {
 		const struct landlock_rule *rule;
-		struct landlock_id walker_id;
 
 		/*
 		 * If at least all accesses allowed on the destination are
@@ -900,8 +899,12 @@ static bool is_access_to_paths_allowed(
 
 			object = landlock_inode(d_backing_inode(walker_path.dentry))->object;
 			if (object) {
-				walker_id.key.object = object;
-				walker_id.type = LANDLOCK_KEY_INODE;
+				struct landlock_id walker_id = {
+					.type = LANDLOCK_KEY_INODE,
+					.key = {
+						.object = object,
+					}
+				};
 
 				scoped_guard(rcu) {
 					if (!allowed_parent1 &&
