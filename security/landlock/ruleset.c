@@ -835,7 +835,7 @@ bool landlock_check_supervisor_access(
 		 * access rights.  Supervisor rules only have one layer at
 		 * level 0.
 		 */
-		if (rule->num_layers >= 1) {
+		if (rule->num_layers == 1) {
 			access_mask_t granted = rule->layers[0].access;
 			unfulfilled &= ~granted;
 		}
@@ -946,7 +946,7 @@ bool landlock_check_supervisor_optional_access(
 		 * insertion code which creates supervisor rules with exactly
 		 * one layer at level 0.
 		 */
-		if (rule && rule->num_layers >= 1) {
+		if (rule && rule->num_layers == 1) {
 			access_mask_t granted = rule->layers[0].access;
 			if (granted & access_request)
 				layer_allows = true;
