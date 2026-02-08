@@ -2,7 +2,8 @@
 /*
  * Landlock - Supervisor management for mutable domains
  *
- * Copyright © 2024-2025 Microsoft Corporation
+ * Copyright © 2017-2020 Mickaël Salaün <mic@digikod.net>
+ * Copyright © 2020 ANSSI
  */
 
 #ifndef _SECURITY_LANDLOCK_SUPERVISOR_H
@@ -52,6 +53,26 @@ landlock_get_supervisor(struct landlock_supervisor *supervisor)
 {
 	WARN_ON_ONCE(!supervisor);
 	refcount_inc(&supervisor->usage);
+}
+
+/**
+ * landlock_get_supervisor_committed_ruleset_rcu - Get committed ruleset under RCU
+ *
+ * @supervisor: The supervisor to get the committed ruleset from.
+ *
+ * Returns the committed ruleset pointer for use in RCU read-side critical
+ * sections.  Caller must be in an RCU read-side critical section.
+ *
+ * Returns: The committed ruleset (may be NULL if no rules committed).
+ */
+static inline struct landlock_ruleset *
+landlock_get_supervisor_committed_ruleset_rcu(
+	struct landlock_supervisor *supervisor)
+{
+	if (!supervisor)
+		return NULL;
+
+	return rcu_dereference(supervisor->committed_ruleset);
 }
 
 /**

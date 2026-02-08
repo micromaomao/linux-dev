@@ -199,6 +199,16 @@ static int current_check_access_socket(struct socket *const sock,
 	if (landlock_unmask_layers(rule, &layer_masks, &rule_flags))
 		return 0;
 
+	/*
+	 * Supervisee ruleset denied access.  Check if supervisor rulesets
+	 * for the denying layers allow this access.
+	 */
+	scoped_guard(rcu) {
+		if (landlock_check_supervisor_access(subject->domain, id,
+						     &layer_masks))
+			return 0;
+	}
+
 	audit_net.family = address->sa_family;
 	landlock_log_denial(
 		subject,

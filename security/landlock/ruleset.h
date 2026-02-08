@@ -358,4 +358,9 @@ landlock_init_layer_masks(const struct landlock_ruleset *const domain,
 			  struct layer_access_masks *masks,
 			  const enum landlock_key_type key_type);
 
+bool landlock_check_supervisor_access(
+	const struct landlock_ruleset *const domain,
+	const struct landlock_id id,
+	struct layer_access_masks *const layer_masks);
+
 #endif /* _SECURITY_LANDLOCK_RULESET_H */

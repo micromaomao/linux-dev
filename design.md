@@ -178,3 +178,47 @@ Here is a diagram of the relevant structures and relationships:
                                ^ The domain ruleset for a
                                  supervisor-controlled process.
 ```
+
+## Access Check Integration
+
+When an access request is evaluated for processes in a supervised domain, the access check follows this flow:
+
+1. **Supervisee check first**: For each layer in the domain, check if the supervisee ruleset (the immutable "folded" rules) allows the requested access. This is done using `landlock_unmask_layers()`.
+
+2. **Early return if allowed**: If all layers are satisfied by the supervisee rules, the access is allowed immediately with no supervisor check needed.
+
+3. **Supervisor fallback**: If any layers still have unfulfilled access rights (i.e., the supervisee denied the access), check if the supervisor rulesets for those layers allow the access:
+   - For each denying layer, traverse the domain's hierarchy to get the supervisor pointer
+   - Use RCU (`scoped_guard(rcu)`) to safely access the supervisor's committed ruleset
+   - Look up the rule for the same object (inode for FS, port for network) in the supervisor ruleset
+   - If the supervisor ruleset allows all unfulfilled access rights for that layer, clear the layer's unfulfilled bits
+
+4. **Final decision**: If all layers are now satisfied (either by supervisee or supervisor rules), the access is allowed. Otherwise, it is denied.
+
+The supervisor check is implemented by `landlock_check_supervisor_access()` which:
+- Takes the domain, object ID, and layer_masks (unfulfilled access per layer)
+- Traverses the hierarchy from the newest layer to the oldest
+- For each layer with unfulfilled access, checks if a supervisor exists
+- Looks up the rule in the supervisor's committed ruleset via RCU
+- Returns true only if all unfulfilled accesses are satisfied
+
+This maintains the lockless access check property because:
+- The supervisor's committed_ruleset pointer is RCU-protected
+- We use `rcu_dereference()` inside an RCU read-side critical section
+- The committed ruleset is never modified after creation (only replaced atomically)
+
+### Optional Access Rights (TRUNCATE, IOCTL_DEV)
+
+Optional access rights require special handling because they may be checked at a different time than when the file descriptor was opened:
+
+- At `open()` time, if the supervisee denies optional access but no supervisor rule exists yet, the deny_masks are recorded in the file's security blob
+- Later, when the protected operation (truncate, ioctl) is attempted, the supervisor ruleset is checked again
+- If new supervisor rules have been added since the file was opened, they can now allow the operation
+
+This enables the notification workflow where:
+1. Sandboxed app opens a file (denied by supervisee, no supervisor rule)
+2. App attempts a protected operation (denied, notification sent to supervisor)
+3. Supervisor adds a rule and commits
+4. App retries the operation (now allowed by supervisor rule)
+
+**Note**: The optional access integration requires additional changes to `hook_file_open()` and related hooks to re-check supervisor rules when the deny_masks indicate potential supervisor override.
