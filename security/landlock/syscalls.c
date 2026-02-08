@@ -374,9 +374,15 @@ SYSCALL_DEFINE3(landlock_create_ruleset,
 /*
  * Returns an owned ruleset from a FD. It is thus needed to call
  * landlock_put_ruleset() on the return value.
+ *
+ * @reject_supervisor: If true, returns -EBADFD for supervisor rulesets.
+ *                     Supervisor rulesets should not be used with
+ *                     landlock_restrict_self() - use the supervisee FD
+ *                     obtained via LANDLOCK_IOCTL_GET_SUPERVISEE_RULESET.
  */
 static struct landlock_ruleset *get_ruleset_from_fd(const int fd,
-						    const fmode_t mode)
+						    const fmode_t mode,
+						    const bool reject_supervisor)
 {
 	CLASS(fd, ruleset_f)(fd);
 	struct landlock_ruleset *ruleset;
@@ -387,6 +393,9 @@ static struct landlock_ruleset *get_ruleset_from_fd(const int fd,
 	/* Checks FD type and access right. */
 	if (fd_file(ruleset_f)->f_op != &ruleset_fops &&
 	    fd_file(ruleset_f)->f_op != &supervisor_ruleset_fops)
+		return ERR_PTR(-EBADFD);
+	if (reject_supervisor &&
+	    fd_file(ruleset_f)->f_op == &supervisor_ruleset_fops)
 		return ERR_PTR(-EBADFD);
 	if (!(fd_file(ruleset_f)->f_mode & mode))
 		return ERR_PTR(-EPERM);
@@ -573,7 +582,7 @@ SYSCALL_DEFINE4(landlock_add_rule, const int, ruleset_fd,
 		return -EINVAL;
 
 	/* Gets and checks the ruleset. */
-	ruleset = get_ruleset_from_fd(ruleset_fd, FMODE_CAN_WRITE);
+	ruleset = get_ruleset_from_fd(ruleset_fd, FMODE_CAN_WRITE, false);
 	if (IS_ERR(ruleset))
 		return PTR_ERR(ruleset);
 
@@ -682,7 +691,7 @@ SYSCALL_DEFINE2(landlock_restrict_self, const int, ruleset_fd, const __u32,
 	if (!(ruleset_fd == -1 &&
 	      flags == LANDLOCK_RESTRICT_SELF_LOG_SUBDOMAINS_OFF)) {
 		/* Gets and checks the ruleset. */
-		ruleset = get_ruleset_from_fd(ruleset_fd, FMODE_CAN_READ);
+		ruleset = get_ruleset_from_fd(ruleset_fd, FMODE_CAN_READ, true);
 		if (IS_ERR(ruleset))
 			return PTR_ERR(ruleset);
 	}
