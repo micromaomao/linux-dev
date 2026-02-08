@@ -179,8 +179,7 @@ struct landlock_ruleset {
 			/**
 			 * @num_layers: Number of layers that are used in this
 			 * ruleset.  This enables to check that all the layers
-			 * allow an access request.  A value of 0 identifies a
-			 * non-merged ruleset (i.e. not a domain).
+			 * allow an access request.
 			 */
 			u32 num_layers;
 			/**
@@ -201,7 +200,8 @@ struct landlock_ruleset {
 			 * layers are set once and never changed for the
 			 * lifetime of the ruleset.
 			 */
-			struct access_masks access_masks[];
+			struct access_masks
+				access_masks[] __counted_by(num_layers);
 		};
 	};
 };
