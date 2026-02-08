@@ -1760,6 +1760,46 @@ static int hook_file_open(struct file *const file)
 	return -EACCES;
 }
 
+/*
+ * check_supervisor_optional_access_recheck - Re-check supervisor rulesets
+ *                                            for optional access rights
+ *
+ * When an optional access right was denied at file open time, this helper
+ * re-checks if supervisor rulesets now allow the access.  This enables
+ * dynamic rule updates to take effect for already-opened files.
+ *
+ * @file: The file being operated on
+ * @access_request: The optional access right being requested
+ *
+ * Returns: true if supervisor rulesets now allow the access, false otherwise.
+ */
+static bool check_supervisor_optional_access_recheck(
+	const struct file *const file, const access_mask_t access_request)
+{
+	const struct landlock_ruleset *domain =
+		landlock_cred(file->f_cred)->domain;
+	const struct inode *inode = file_inode(file);
+	bool allowed = false;
+
+	if (!domain)
+		return false;
+
+	scoped_guard(rcu) {
+		struct landlock_object *object =
+			rcu_dereference(landlock_inode(inode)->object);
+		if (object) {
+			const struct landlock_id id = {
+				.key.object = object,
+				.type = LANDLOCK_KEY_INODE,
+			};
+			allowed = landlock_check_supervisor_optional_access(
+				domain, id, access_request);
+		}
+	}
+
+	return allowed;
+}
+
 static int hook_file_truncate(struct file *const file)
 {
 	/*
@@ -1780,28 +1820,9 @@ static int hook_file_truncate(struct file *const file)
 	 * now allows it - this enables dynamic rule updates to take effect
 	 * for already-opened files.
 	 */
-	{
-		const struct landlock_ruleset *domain =
-			landlock_cred(file->f_cred)->domain;
-		const struct inode *inode = file_inode(file);
-
-		if (domain) {
-			scoped_guard(rcu) {
-				struct landlock_object *object =
-					rcu_dereference(landlock_inode(inode)->object);
-				if (object) {
-					const struct landlock_id id = {
-						.key.object = object,
-						.type = LANDLOCK_KEY_INODE,
-					};
-					if (landlock_check_supervisor_optional_access(
-						    domain, id,
-						    LANDLOCK_ACCESS_FS_TRUNCATE))
-						return 0;
-				}
-			}
-		}
-	}
+	if (check_supervisor_optional_access_recheck(file,
+						     LANDLOCK_ACCESS_FS_TRUNCATE))
+		return 0;
 
 	landlock_log_denial(landlock_cred(file->f_cred), &(struct landlock_request) {
 		.type = LANDLOCK_REQUEST_FS_ACCESS,
@@ -1845,28 +1866,9 @@ static int hook_file_ioctl_common(const struct file *const file,
 	 * now allows it - this enables dynamic rule updates to take effect
 	 * for already-opened files.
 	 */
-	{
-		const struct landlock_ruleset *domain =
-			landlock_cred(file->f_cred)->domain;
-		const struct inode *inode = file_inode(file);
-
-		if (domain) {
-			scoped_guard(rcu) {
-				struct landlock_object *object =
-					rcu_dereference(landlock_inode(inode)->object);
-				if (object) {
-					const struct landlock_id id = {
-						.key.object = object,
-						.type = LANDLOCK_KEY_INODE,
-					};
-					if (landlock_check_supervisor_optional_access(
-						    domain, id,
-						    LANDLOCK_ACCESS_FS_IOCTL_DEV))
-						return 0;
-				}
-			}
-		}
-	}
+	if (check_supervisor_optional_access_recheck(file,
+						     LANDLOCK_ACCESS_FS_IOCTL_DEV))
+		return 0;
 
 	landlock_log_denial(landlock_cred(file->f_cred), &(struct landlock_request) {
 		.type = LANDLOCK_REQUEST_FS_ACCESS,
