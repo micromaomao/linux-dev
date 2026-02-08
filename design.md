@@ -221,4 +221,14 @@ This enables the notification workflow where:
 3. Supervisor adds a rule and commits
 4. App retries the operation (now allowed by supervisor rule)
 
-**Note**: The optional access integration requires additional changes to `hook_file_open()` and related hooks to re-check supervisor rules when the deny_masks indicate potential supervisor override.
+The implementation uses `landlock_check_supervisor_optional_access()` which:
+- Gets the domain from the file's credentials (`file->f_cred`)
+- Gets the inode's landlock object via RCU
+- For each layer that handles the requested optional access:
+  - Checks if a supervisor exists for that layer
+  - Looks up the rule in the supervisor's committed ruleset
+  - Returns true only if all relevant layers have supervisor rules that grant the access
+
+The re-check is integrated into:
+- `hook_file_truncate()` - called when ftruncate() or similar operations are attempted
+- `hook_file_ioctl_common()` - called when ioctl() is attempted on device files

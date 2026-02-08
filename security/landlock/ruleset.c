@@ -857,3 +857,103 @@ bool landlock_check_supervisor_access(
 	/* All layers are now satisfied */
 	return true;
 }
+
+/**
+ * landlock_check_supervisor_optional_access - Check supervisor rulesets for
+ *                                              optional access at operation time
+ *
+ * When an optional access right (e.g., TRUNCATE, IOCTL_DEV) was denied at
+ * file open time, this function re-checks if supervisor rulesets now allow
+ * the access.  This enables dynamic rule updates to take effect for
+ * already-opened files.
+ *
+ * @domain: The domain ruleset from the file's credentials
+ * @id: The object identifier (inode) to check access for
+ * @access_request: The specific optional access right being requested
+ *
+ * Returns: true if supervisor rulesets allow the access, false otherwise.
+ *
+ * Note: Caller must be in an RCU read-side critical section.
+ */
+bool landlock_check_supervisor_optional_access(
+	const struct landlock_ruleset *const domain,
+	const struct landlock_id id,
+	const access_mask_t access_request)
+{
+	struct landlock_hierarchy *hierarchy;
+	size_t layer_level;
+
+	if (!domain || !domain->hierarchy || !access_request)
+		return false;
+
+	/*
+	 * For optional access re-checking, we need to verify that ALL layers
+	 * with supervisors allow this access.  Unlike the initial access check,
+	 * we're checking whether the supervisor rulesets can grant access that
+	 * wasn't available at open time.
+	 */
+	hierarchy = domain->hierarchy;
+
+	for (layer_level = domain->num_layers; layer_level > 0; layer_level--) {
+		struct landlock_supervisor *supervisor;
+		struct landlock_ruleset *committed;
+		const struct landlock_rule *rule;
+		access_mask_t handled;
+		bool layer_allows = false;
+
+		if (!hierarchy) {
+			WARN_ON_ONCE(1);
+			return false;
+		}
+
+		/*
+		 * Check if this layer handles the requested access.  If not,
+		 * the layer doesn't restrict it.
+		 */
+		handled = landlock_get_fs_access_mask(domain, layer_level - 1);
+		if (!(handled & access_request)) {
+			/* Layer doesn't handle this access, move to parent */
+			hierarchy = hierarchy->parent;
+			continue;
+		}
+
+		/*
+		 * This layer handles the access.  Check if a supervisor
+		 * ruleset allows it.
+		 */
+		supervisor = hierarchy->supervisor;
+		if (!supervisor) {
+			/*
+			 * Layer handles the access but has no supervisor.
+			 * Since we only enter this function when the access
+			 * was denied at open time, and this layer handles it
+			 * without a supervisor, the access remains denied.
+			 */
+			return false;
+		}
+
+		committed = landlock_get_supervisor_committed_ruleset_rcu(
+			supervisor);
+		if (!committed) {
+			/* Supervisor has no committed rules */
+			return false;
+		}
+
+		rule = landlock_find_rule(committed, id);
+		if (rule && rule->num_layers >= 1) {
+			access_mask_t granted = rule->layers[0].access;
+			if (granted & access_request)
+				layer_allows = true;
+		}
+
+		if (!layer_allows) {
+			/* Supervisor doesn't grant the needed access */
+			return false;
+		}
+
+		hierarchy = hierarchy->parent;
+	}
+
+	/* All layers that handle this access have supervisor rules allowing it */
+	return true;
+}

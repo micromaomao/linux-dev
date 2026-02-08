@@ -1775,6 +1775,34 @@ static int hook_file_truncate(struct file *const file)
 	if (landlock_file(file)->allowed_access & LANDLOCK_ACCESS_FS_TRUNCATE)
 		return 0;
 
+	/*
+	 * Truncate was denied at open time.  Check if a supervisor ruleset
+	 * now allows it - this enables dynamic rule updates to take effect
+	 * for already-opened files.
+	 */
+	{
+		const struct landlock_ruleset *domain =
+			landlock_cred(file->f_cred)->domain;
+		const struct inode *inode = file_inode(file);
+
+		if (domain) {
+			scoped_guard(rcu) {
+				struct landlock_object *object =
+					rcu_dereference(landlock_inode(inode)->object);
+				if (object) {
+					const struct landlock_id id = {
+						.key.object = object,
+						.type = LANDLOCK_KEY_INODE,
+					};
+					if (landlock_check_supervisor_optional_access(
+						    domain, id,
+						    LANDLOCK_ACCESS_FS_TRUNCATE))
+						return 0;
+				}
+			}
+		}
+	}
+
 	landlock_log_denial(landlock_cred(file->f_cred), &(struct landlock_request) {
 		.type = LANDLOCK_REQUEST_FS_ACCESS,
 		.audit = {
@@ -1811,6 +1839,34 @@ static int hook_file_ioctl_common(const struct file *const file,
 	if (unlikely(is_compat) ? is_masked_device_ioctl_compat(cmd) :
 				  is_masked_device_ioctl(cmd))
 		return 0;
+
+	/*
+	 * IOCTL was denied at open time.  Check if a supervisor ruleset
+	 * now allows it - this enables dynamic rule updates to take effect
+	 * for already-opened files.
+	 */
+	{
+		const struct landlock_ruleset *domain =
+			landlock_cred(file->f_cred)->domain;
+		const struct inode *inode = file_inode(file);
+
+		if (domain) {
+			scoped_guard(rcu) {
+				struct landlock_object *object =
+					rcu_dereference(landlock_inode(inode)->object);
+				if (object) {
+					const struct landlock_id id = {
+						.key.object = object,
+						.type = LANDLOCK_KEY_INODE,
+					};
+					if (landlock_check_supervisor_optional_access(
+						    domain, id,
+						    LANDLOCK_ACCESS_FS_IOCTL_DEV))
+						return 0;
+				}
+			}
+		}
+	}
 
 	landlock_log_denial(landlock_cred(file->f_cred), &(struct landlock_request) {
 		.type = LANDLOCK_REQUEST_FS_ACCESS,
