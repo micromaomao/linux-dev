@@ -740,3 +740,120 @@ landlock_init_layer_masks(const struct landlock_ruleset *const domain,
 
 	return handled_accesses;
 }
+
+/**
+ * landlock_check_supervisor_access - Check if supervisor rulesets allow access
+ *
+ * When the supervisee ruleset denies access for certain layers, this function
+ * checks if the supervisor rulesets for those layers allow the access.
+ *
+ * For an access to be allowed by supervisors:
+ * 1. Each denying layer must have a supervisor with a committed ruleset
+ * 2. Each supervisor's committed ruleset must have a rule that allows the
+ *    requested access for the given object
+ *
+ * @domain: The domain ruleset (used for hierarchy traversal)
+ * @id: The object identifier to check access for
+ * @layer_masks: Per-layer masks of unfulfilled access rights (modified in place)
+ *
+ * Returns: true if all unfulfilled accesses are satisfied by supervisor
+ *          rulesets, false otherwise.
+ */
+bool landlock_check_supervisor_access(
+	const struct landlock_ruleset *const domain,
+	const struct landlock_id id,
+	struct layer_access_masks *const layer_masks)
+{
+	struct landlock_hierarchy *hierarchy;
+	size_t layer_level;
+
+	if (!domain || !domain->hierarchy || !layer_masks)
+		return false;
+
+	/*
+	 * Traverse the hierarchy from the newest layer to the oldest.
+	 * The hierarchy is a linked list where the current domain's
+	 * hierarchy corresponds to layer num_layers, and each parent
+	 * corresponds to the previous layer.
+	 */
+	hierarchy = domain->hierarchy;
+
+	for (layer_level = domain->num_layers; layer_level > 0; layer_level--) {
+		const size_t layer_idx = layer_level - 1;
+		access_mask_t unfulfilled;
+		struct landlock_supervisor *supervisor;
+		struct landlock_ruleset *committed;
+		const struct landlock_rule *rule;
+
+		if (!hierarchy) {
+			/*
+			 * This shouldn't happen - there should be as many
+			 * hierarchy nodes as layers.
+			 */
+			WARN_ON_ONCE(1);
+			return false;
+		}
+
+		unfulfilled = layer_masks->access[layer_idx];
+		if (!unfulfilled) {
+			/* This layer is already satisfied, check next */
+			hierarchy = hierarchy->parent;
+			continue;
+		}
+
+		supervisor = hierarchy->supervisor;
+		if (!supervisor) {
+			/*
+			 * This layer denied access but has no supervisor,
+			 * so there's no way to override.
+			 */
+			return false;
+		}
+
+		/*
+		 * Check if the supervisor's committed ruleset allows the
+		 * access.  We're in an RCU read-side critical section here.
+		 */
+		committed = landlock_get_supervisor_committed_ruleset_rcu(
+			supervisor);
+		if (!committed) {
+			/*
+			 * Supervisor exists but has no committed rules,
+			 * which means no rules allow access.
+			 */
+			return false;
+		}
+
+		rule = landlock_find_rule(committed, id);
+		if (!rule) {
+			/* No rule for this object in supervisor ruleset */
+			return false;
+		}
+
+		/*
+		 * Check if the supervisor rule grants all the unfulfilled
+		 * access rights.  Supervisor rules only have one layer at
+		 * level 0.
+		 */
+		if (rule->num_layers >= 1) {
+			access_mask_t granted = rule->layers[0].access;
+			unfulfilled &= ~granted;
+		}
+
+		if (unfulfilled) {
+			/*
+			 * Supervisor ruleset doesn't grant all needed access
+			 * for this layer.
+			 */
+			return false;
+		}
+
+		/* Clear the fulfilled access in layer_masks */
+		layer_masks->access[layer_idx] = 0;
+
+		hierarchy = hierarchy->parent;
+	}
+
+	/* All layers are now satisfied */
+	return true;
+}

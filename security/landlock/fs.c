@@ -49,6 +49,7 @@
 #include "object.h"
 #include "ruleset.h"
 #include "setup.h"
+#include "supervisor.h"
 
 /* Underlying object management */
 
@@ -933,6 +934,38 @@ jump_up:
 		}
 	}
 	path_put(&walker_path);
+
+	/*
+	 * If the supervisee ruleset denied access, check if supervisor
+	 * rulesets for the denying layers allow the access.
+	 */
+	if (!allowed_parent1) {
+		const struct landlock_id id = {
+			.key.object = landlock_inode(
+				d_backing_inode(path->dentry))->object,
+			.type = LANDLOCK_KEY_INODE,
+		};
+
+		scoped_guard(rcu) {
+			if (landlock_check_supervisor_access(
+				    domain, id, layer_masks_parent1))
+				allowed_parent1 = true;
+		}
+	}
+
+	if (unlikely(layer_masks_parent2) && !allowed_parent2) {
+		const struct landlock_id id = {
+			.key.object = landlock_inode(
+				d_backing_inode(path->dentry))->object,
+			.type = LANDLOCK_KEY_INODE,
+		};
+
+		scoped_guard(rcu) {
+			if (landlock_check_supervisor_access(
+				    domain, id, layer_masks_parent2))
+				allowed_parent2 = true;
+		}
+	}
 
 	/*
 	 * Check CONFIG_AUDIT to enable elision of log_request_parent* and
