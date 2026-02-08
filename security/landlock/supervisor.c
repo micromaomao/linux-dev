@@ -135,7 +135,12 @@ static struct landlock_ruleset *copy_ruleset_for_commit(
 	/* Copy quiet masks */
 	dst->quiet_masks = src->quiet_masks;
 
-	mutex_lock(&dst->lock);
+	/*
+	 * Use nested locking since the caller already holds src->lock
+	 * (same lock class as dst->lock).  This is safe because dst is
+	 * a newly created ruleset not yet visible to other threads.
+	 */
+	mutex_lock_nested(&dst->lock, SINGLE_DEPTH_NESTING);
 
 	/* Copy inode rules */
 	err = copy_rules_tree(dst, &src->root_inode, LANDLOCK_KEY_INODE);
