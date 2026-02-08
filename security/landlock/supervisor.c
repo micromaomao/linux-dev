@@ -212,6 +212,49 @@ int landlock_commit_supervisor(struct landlock_ruleset *ruleset)
 			lockdep_is_held(&supervisor->lock));
 	rcu_assign_pointer(supervisor->committed_ruleset, new_committed);
 
+	/* TODO: remove */
+	trace_printk("committed = %p\n", new_committed);
+	{
+		struct rb_node *node;
+
+		trace_printk("landlock: dumping inode rules:\n");
+		for (node = rb_first(&new_committed->root_inode); node;
+		     node = rb_next(node)) {
+			struct landlock_rule *rule =
+				rb_entry(node, struct landlock_rule, node);
+			u32 i;
+
+			trace_printk("  rule key=0x%lx num_layers=%u\n",
+				(unsigned long)rule->key.data,
+				rule->num_layers);
+			for (i = 0; i < rule->num_layers; i++) {
+				trace_printk("    layer[%u]: level=%u access=0x%llx quiet=%d\n",
+					i, rule->layers[i].level,
+					(unsigned long long)rule->layers[i].access,
+					rule->layers[i].flags.quiet);
+			}
+		}
+#if IS_ENABLED(CONFIG_INET)
+		trace_printk("landlock: dumping net_port rules:\n");
+		for (node = rb_first(&new_committed->root_net_port); node;
+		     node = rb_next(node)) {
+			struct landlock_rule *rule =
+				rb_entry(node, struct landlock_rule, node);
+			u32 i;
+
+			trace_printk("  rule key=0x%lx num_layers=%u\n",
+				(unsigned long)rule->key.data,
+				rule->num_layers);
+			for (i = 0; i < rule->num_layers; i++) {
+				trace_printk("    layer[%u]: level=%u access=0x%llx quiet=%d\n",
+					i, rule->layers[i].level,
+					(unsigned long long)rule->layers[i].access,
+					rule->layers[i].flags.quiet);
+			}
+		}
+#endif /* IS_ENABLED(CONFIG_INET) */
+	}
+
 	mutex_unlock(&supervisor->lock);
 	mutex_unlock(&ruleset->lock);
 

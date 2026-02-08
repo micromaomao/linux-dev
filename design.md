@@ -179,7 +179,14 @@ Here is a diagram of the relevant structures and relationships:
                                  supervisor-controlled process.
 ```
 
-During access checks, the supervisee ruleset is checked first; if denied, `landlock_check_supervisor_access()` consults the supervisor's committed ruleset via RCU for each denying layer.  For optional access rights (TRUNCATE, IOCTL_DEV), which are recorded at `open()` time, the supervisor is re-checked at operation time via `landlock_check_supervisor_optional_access()` to allow dynamically-added rules to take effect on already-opened files.  This enables a future notification workflow where the supervisor can add rules in response to access attempts (notifications are not yet implemented).
+During access checks, the supervisor ruleset must be checked at each step of the path walk, not just at the target path.  This is because supervisor rules may be attached to parent directories (e.g., `/bin`) that should apply when accessing child paths (e.g., `/bin/sh`).  The path walk loop in `is_access_to_paths_allowed()` iterates from the target path up to the filesystem root; after checking supervisee rules at each path component, if still denied, the supervisor's committed ruleset is consulted via RCU.
+
+An alternative approach would be to perform a separate path walk for supervisor rules only if the supervisee walk denies access, but this has drawbacks:
+- Path walks are significantly slower than rb-tree lookups, making this less efficient (especially with future hash-based implementations).
+- Two separate path walks can see different paths if a rename occurs between them.
+- The domain check logic (`no_more_access`) would become more complex.
+
+For optional access rights (TRUNCATE, IOCTL_DEV), which are recorded at `open()` time, the supervisor is re-checked at operation time via `landlock_check_supervisor_optional_access()` to allow dynamically-added rules to take effect on already-opened files.  This enables a future notification workflow where the supervisor can add rules in response to access attempts (notifications are not yet implemented).
 
 ## Using supervisor_sandboxer
 

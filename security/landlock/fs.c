@@ -837,6 +837,7 @@ static bool is_access_to_paths_allowed(
 	 */
 	while (true) {
 		const struct landlock_rule *rule;
+		struct landlock_id walker_id;
 
 		/*
 		 * If at least all accesses allowed on the destination are
@@ -888,6 +889,37 @@ static bool is_access_to_paths_allowed(
 							 layer_masks_parent2,
 							 rule_flags_parent2);
 
+		/*
+		 * If supervisee rules don't allow access, check supervisor
+		 * rulesets for the current path component.  Supervisor rules
+		 * may exist on parent directories (e.g., /bin) that should
+		 * apply when accessing child paths (e.g., /bin/sh).
+		 */
+		if (!allowed_parent1 || (unlikely(layer_masks_parent2) && !allowed_parent2)) {
+			struct landlock_object *object;
+
+			object = landlock_inode(d_backing_inode(walker_path.dentry))->object;
+			if (object) {
+				walker_id.key.object = object;
+				walker_id.type = LANDLOCK_KEY_INODE;
+
+				scoped_guard(rcu) {
+					if (!allowed_parent1 &&
+					    landlock_check_supervisor_access(
+						    domain, walker_id,
+						    layer_masks_parent1))
+						allowed_parent1 = true;
+
+					if (unlikely(layer_masks_parent2) &&
+					    !allowed_parent2 &&
+					    landlock_check_supervisor_access(
+						    domain, walker_id,
+						    layer_masks_parent2))
+						allowed_parent2 = true;
+				}
+			}
+		}
+
 		/* Stops when a rule from each layer grants access. */
 		if (allowed_parent1 && allowed_parent2)
 			break;
@@ -934,30 +966,6 @@ jump_up:
 		}
 	}
 	path_put(&walker_path);
-
-	/*
-	 * If the supervisee ruleset denied access, check if supervisor
-	 * rulesets for the denying layers allow the access.
-	 */
-	if (!allowed_parent1 || (unlikely(layer_masks_parent2) && !allowed_parent2)) {
-		const struct landlock_id id = {
-			.key.object = landlock_inode(
-				d_backing_inode(path->dentry))->object,
-			.type = LANDLOCK_KEY_INODE,
-		};
-
-		scoped_guard(rcu) {
-			if (!allowed_parent1 &&
-			    landlock_check_supervisor_access(
-				    domain, id, layer_masks_parent1))
-				allowed_parent1 = true;
-
-			if (unlikely(layer_masks_parent2) && !allowed_parent2 &&
-			    landlock_check_supervisor_access(
-				    domain, id, layer_masks_parent2))
-				allowed_parent2 = true;
-		}
-	}
 
 	/*
 	 * Check CONFIG_AUDIT to enable elision of log_request_parent* and
