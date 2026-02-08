@@ -303,7 +303,7 @@ static void print_usage(const char *prog)
 		prog);
 }
 
-#define LANDLOCK_ABI_LAST 9
+#define LANDLOCK_ABI_LAST 10
 
 int main(int argc, char *const argv[], char *const *const envp)
 {
@@ -347,8 +347,8 @@ int main(int argc, char *const argv[], char *const *const envp)
 		return 1;
 	}
 
-	if (abi < 9) {
-		fprintf(stderr, "Error: Supervisor support requires ABI version 9 or later.\n");
+	if (abi < 10) {
+		fprintf(stderr, "Error: Supervisor support requires ABI version 10 or later.\n");
 		fprintf(stderr, "Current ABI version: %d\n", abi);
 		return 1;
 	}
