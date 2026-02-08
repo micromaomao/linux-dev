@@ -179,56 +179,48 @@ Here is a diagram of the relevant structures and relationships:
                                  supervisor-controlled process.
 ```
 
-## Access Check Integration
+During access checks, the supervisee ruleset is checked first; if denied, `landlock_check_supervisor_access()` consults the supervisor's committed ruleset via RCU for each denying layer.  For optional access rights (TRUNCATE, IOCTL_DEV), which are recorded at `open()` time, the supervisor is re-checked at operation time via `landlock_check_supervisor_optional_access()` to allow dynamically-added rules to take effect on already-opened files.  This enables a future notification workflow where the supervisor can add rules in response to access attempts (notifications are not yet implemented).
 
-When an access request is evaluated for processes in a supervised domain, the access check follows this flow:
+## Using supervisor_sandboxer
 
-1. **Supervisee check first**: For each layer in the domain, check if the supervisee ruleset (the immutable "folded" rules) allows the requested access. This is done using `landlock_unmask_layers()`.
+The `samples/landlock/supervisor_sandboxer.c` sample demonstrates a file-based supervisor that reads rules from a configuration file and dynamically reloads them when the file changes.
 
-2. **Early return if allowed**: If all layers are satisfied by the supervisee rules, the access is allowed immediately with no supervisor check needed.
+### Configuration File Format
 
-3. **Supervisor fallback**: If any layers still have unfulfilled access rights (i.e., the supervisee denied the access), check if the supervisor rulesets for those layers allow the access:
-   - For each denying layer, traverse the domain's hierarchy to get the supervisor pointer
-   - Use RCU (`scoped_guard(rcu)`) to safely access the supervisor's committed ruleset
-   - Look up the rule for the same object (inode for FS, port for network) in the supervisor ruleset
-   - If the supervisor ruleset allows all unfulfilled access rights for that layer, clear the layer's unfulfilled bits
+Each line specifies an access type and path:
+```
+ro /path/to/readonly/dir
+rw /path/to/readwrite/dir
+```
 
-4. **Final decision**: If all layers are now satisfied (either by supervisee or supervisor rules), the access is allowed. Otherwise, it is denied.
+- `ro` grants read and execute access
+- `rw` grants full filesystem access
 
-The supervisor check is implemented by `landlock_check_supervisor_access()` which:
-- Takes the domain, object ID, and layer_masks (unfulfilled access per layer)
-- Traverses the hierarchy from the newest layer to the oldest
-- For each layer with unfulfilled access, checks if a supervisor exists
-- Looks up the rule in the supervisor's committed ruleset via RCU
-- Returns true only if all unfulfilled accesses are satisfied
+### Example Usage
 
-This maintains the lockless access check property because:
-- The supervisor's committed_ruleset pointer is RCU-protected
-- We use `rcu_dereference()` inside an RCU read-side critical section
-- The committed ruleset is never modified after creation (only replaced atomically)
+```bash
+# Create a configuration file
+$ cat > /tmp/sandbox.conf << EOF
+ro /usr
+ro /lib
+rw /tmp
+EOF
 
-### Optional Access Rights (TRUNCATE, IOCTL_DEV)
+# Run a shell under the supervisor
+$ ./supervisor_sandboxer /tmp/sandbox.conf /bin/sh
+Loaded 3 rules from /tmp/sandbox.conf
+Supervisor committed initial rules
+Child process started with PID 12345
 
-Optional access rights require special handling because they may be checked at a different time than when the file descriptor was opened:
+# In another terminal, modify the config to allow /home access
+$ echo "ro /home" >> /tmp/sandbox.conf
 
-- At `open()` time, if the supervisee denies optional access but no supervisor rule exists yet, the deny_masks are recorded in the file's security blob
-- Later, when the protected operation (truncate, ioctl) is attempted, the supervisor ruleset is checked again
-- If new supervisor rules have been added since the file was opened, they can now allow the operation
+# The supervisor detects the change and reloads
+Config file changed, reloading rules...
+Loaded 4 rules from /tmp/sandbox.conf
+Supervisor committed updated rules
 
-This enables the notification workflow where:
-1. Sandboxed app opens a file (denied by supervisee, no supervisor rule)
-2. App attempts a protected operation (denied, notification sent to supervisor)
-3. Supervisor adds a rule and commits
-4. App retries the operation (now allowed by supervisor rule)
+# Now the sandboxed process can access /home
+```
 
-The implementation uses `landlock_check_supervisor_optional_access()` which:
-- Gets the domain from the file's credentials (`file->f_cred`)
-- Gets the inode's landlock object via RCU
-- For each layer that handles the requested optional access:
-  - Checks if a supervisor exists for that layer
-  - Looks up the rule in the supervisor's committed ruleset
-  - Returns true only if all relevant layers have supervisor rules that grant the access
-
-The re-check is integrated into:
-- `hook_file_truncate()` - called when ftruncate() or similar operations are attempted
-- `hook_file_ioctl_common()` - called when ioctl() is attempted on device files
+The supervisor monitors the configuration file using inotify and atomically commits new rules when changes are detected, demonstrating the dynamic rule update capability.
