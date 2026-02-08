@@ -6,14 +6,13 @@
  * as supervisor rules. The sandboxed process runs in a forked child,
  * and the parent monitors the config file for changes and reloads rules
  * when the file is modified.
- *
- * Copyright © 2024-2025 Microsoft Corporation
  */
 
 #define _GNU_SOURCE
 #define __SANE_USERSPACE_TYPES__
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <linux/landlock.h>
 #include <poll.h>
 #include <signal.h>
@@ -22,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/inotify.h>
+#include <sys/ioctl.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
