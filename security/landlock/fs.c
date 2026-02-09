@@ -1867,15 +1867,13 @@ check_supervisor_optional_access_recheck(const struct file *const file,
 	if (!allowed && (out_deny_masks || out_quiet_access)) {
 		deny_masks_t deny_masks = 0;
 		access_mask_t quiet_access = 0;
-		size_t layer;
 
-		for (layer = 0; layer < domain->num_layers; layer++) {
-			if (layer_masks.access[layer] & access_request) {
-				deny_masks = landlock_set_deny_masks(
-					deny_masks, access_request, layer);
-			}
-		}
-		quiet_access = rule_flags.quiet;
+		deny_masks = landlock_get_deny_masks(
+				_LANDLOCK_ACCESS_FS_OPTIONAL, access_request,
+				&layer_masks);
+		quiet_access = landlock_get_quiet_optional_accesses(
+				_LANDLOCK_ACCESS_FS_OPTIONAL, deny_masks,
+				rule_flags);
 
 		if (out_deny_masks)
 			*out_deny_masks = deny_masks;
