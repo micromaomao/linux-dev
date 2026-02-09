@@ -377,6 +377,9 @@ void landlock_capture_supervisor_committed(
 	const struct landlock_ruleset *const domain,
 	struct supervisor_committed_cache *cache);
 
+void landlock_release_supervisor_committed(
+	struct supervisor_committed_cache *cache);
+
 bool landlock_check_supervisor_access(
 	const struct landlock_ruleset *const domain,
 	const struct landlock_id id,

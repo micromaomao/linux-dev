@@ -772,18 +772,41 @@ void landlock_capture_supervisor_committed(
 		for (layer_level = domain->num_layers; layer_level > 0;
 		     layer_level--) {
 			const size_t layer_idx = layer_level - 1;
+			struct landlock_ruleset *committed;
 
 			if (!hierarchy)
 				break;
 
 			if (hierarchy->supervisor) {
-				cache->rulesets[layer_idx] =
+				committed =
 					landlock_get_supervisor_committed_ruleset_rcu(
 						hierarchy->supervisor);
+				if (committed)
+					landlock_get_ruleset(committed);
+				cache->rulesets[layer_idx] = committed;
 			}
 
 			hierarchy = hierarchy->parent;
 		}
+	}
+}
+
+/**
+ * landlock_release_supervisor_committed - Release captured supervisor rulesets
+ *
+ * @cache: The cache to release.
+ *
+ * Decrements the reference count on all captured rulesets.  Must be called
+ * after landlock_capture_supervisor_committed() when the cache is no longer
+ * needed.
+ */
+void landlock_release_supervisor_committed(struct supervisor_committed_cache *cache)
+{
+	size_t i;
+
+	for (i = 0; i < LANDLOCK_MAX_NUM_LAYERS; i++) {
+		if (cache->rulesets[i])
+			landlock_put_ruleset(cache->rulesets[i]);
 	}
 }
 
