@@ -203,14 +203,14 @@ static int load_rules_from_file(int config_fd)
 /*
  * Apply loaded rules to a supervisor ruleset and commit.
  */
-static int apply_rules_to_supervisor(int supervisor_fd, __u64 access_fs_rw)
+static int apply_rules_to_supervisor(int supervisor_fd, __u64 handled_access_fs)
 {
 	int i;
 
 	for (i = 0; i < num_rules; i++) {
 		struct stat statbuf;
 		struct landlock_path_beneath_attr path_beneath = {
-			.allowed_access = rules[i].access & access_fs_rw,
+			.allowed_access = rules[i].access & handled_access_fs,
 		};
 
 		path_beneath.parent_fd =
@@ -332,11 +332,10 @@ int main(int argc, char *const argv[], char *const *const envp)
 	int inotify_fd;
 	int abi;
 	pid_t child;
-	__u64 access_fs_rw = ACCESS_FS_ROUGHLY_READ | ACCESS_FS_ROUGHLY_WRITE;
 	int config_fd;
 
 	struct landlock_ruleset_attr ruleset_attr = {
-		.handled_access_fs = access_fs_rw,
+		.handled_access_fs = ACCESS_FS_ROUGHLY_READ | ACCESS_FS_ROUGHLY_WRITE,
 	};
 
 	if (argc < 3) {
@@ -397,7 +396,6 @@ int main(int argc, char *const argv[], char *const *const envp)
 			"in ABI version %d (instead of %d).\n",
 			abi, LANDLOCK_ABI_LAST);
 	}
-	access_fs_rw &= ruleset_attr.handled_access_fs;
 
 	/* Create supervisor ruleset */
 	supervisor_fd =
@@ -441,7 +439,7 @@ int main(int argc, char *const argv[], char *const *const envp)
 	config_fd = -1;
 
 	/* Apply initial rules */
-	if (apply_rules_to_supervisor(supervisor_fd, access_fs_rw) < 0) {
+	if (apply_rules_to_supervisor(supervisor_fd, ruleset_attr.handled_access_fs) < 0) {
 		close(supervisor_fd);
 		close(supervisee_fd);
 		return 1;
@@ -535,7 +533,7 @@ int main(int argc, char *const argv[], char *const *const envp)
 		config_fd = -1;
 
 		/* Apply new rules to supervisor */
-		if (apply_rules_to_supervisor(supervisor_fd, access_fs_rw) <
+		if (apply_rules_to_supervisor(supervisor_fd, ruleset_attr.handled_access_fs) <
 		    0) {
 			break;
 		}

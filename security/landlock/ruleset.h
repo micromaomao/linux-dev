@@ -384,6 +384,7 @@ bool landlock_check_supervisor_access(
 	const struct landlock_ruleset *const domain,
 	const struct landlock_id id,
 	struct layer_access_masks *const layer_masks,
+	struct collected_rule_flags *const rule_flags,
 	const struct supervisor_committed_cache *cache);
 
 #endif /* _SECURITY_LANDLOCK_RULESET_H */

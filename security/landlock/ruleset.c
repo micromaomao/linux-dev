@@ -934,11 +934,15 @@ bool landlock_check_supervisor_access(
 		modified_rule->num_layers = 1;
 		modified_rule->layers[0] = rule->layers[0];
 		modified_rule->layers[0].level = layer_level;
-		landlock_unmask_layers(modified_rule, layer_masks, rule_flags);
+
+		/* TODO: extract what's inside the layer for loop in
+		 * landlock_unmask_layers to another function and use that */
+		if (landlock_unmask_layers(modified_rule, layer_masks, rule_flags)) {
+			return true;
+		}
 
 		hierarchy = hierarchy->parent;
 	}
 
-	/* All layers are now satisfied */
-	return true;
+	return false;
 }

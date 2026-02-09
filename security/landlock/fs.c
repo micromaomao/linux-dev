@@ -1753,8 +1753,8 @@ static int hook_file_open(struct file *const file)
 
 	full_access_request = open_access_request | optional_access;
 
-	trace_printk("Request to access %pD4 (rights: %x)\n", &file->f_path,
-		     full_access_request);
+	trace_printk("Request to access %pd4 (rights: %x)\n",
+		     file->f_path.dentry, full_access_request);
 
 	if (is_access_to_paths_allowed(
 		    subject->domain, &file->f_path,
