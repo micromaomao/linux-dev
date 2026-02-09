@@ -71,6 +71,8 @@ landlock_get_supervisor_committed_ruleset_rcu(
 	if (!supervisor)
 		return NULL;
 
+	RCU_LOCKDEP_WARN(!rcu_read_lock_held(),
+		"landlock_get_supervisor_committed_ruleset_rcu() requires RCU");
 	return rcu_dereference(supervisor->committed_ruleset);
 }
 
