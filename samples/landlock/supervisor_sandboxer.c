@@ -126,7 +126,6 @@ static volatile sig_atomic_t child_exited = 0;
 
 static void sigchld_handler(int sig)
 {
-	(void)sig;
 	child_exited = 1;
 }
 
@@ -161,7 +160,8 @@ static int parse_config_line(const char *line, struct rule_entry *entry)
 	if (strcmp(access_type, "ro") == 0) {
 		entry->access = ACCESS_FS_ROUGHLY_READ;
 	} else if (strcmp(access_type, "rw") == 0) {
-		entry->access = ACCESS_FS_ROUGHLY_READ | ACCESS_FS_ROUGHLY_WRITE;
+		entry->access = ACCESS_FS_ROUGHLY_READ |
+				ACCESS_FS_ROUGHLY_WRITE;
 	} else {
 		fprintf(stderr, "Unknown access type: %s\n", access_type);
 		return -1;
@@ -171,14 +171,14 @@ static int parse_config_line(const char *line, struct rule_entry *entry)
 }
 
 /*
- * Load rules from configuration file.
+ * Load rules from configuration file.  Consumes config_fd.
  */
-static int load_rules_from_file(const char *config_path)
+static int load_rules_from_file(int config_fd)
 {
 	FILE *f;
 	char line[MAX_LINE_LENGTH];
 
-	f = fopen(config_path, "r");
+	f = fdopen(config_fd, "r");
 	if (!f) {
 		perror("Failed to open config file");
 		return -1;
@@ -196,7 +196,7 @@ static int load_rules_from_file(const char *config_path)
 
 	fclose(f);
 
-	fprintf(stderr, "Loaded %d rules from %s\n", num_rules, config_path);
+	fprintf(stderr, "Loaded %d rules from config\n", num_rules);
 	return 0;
 }
 
@@ -213,7 +213,8 @@ static int apply_rules_to_supervisor(int supervisor_fd, __u64 access_fs_rw)
 			.allowed_access = rules[i].access & access_fs_rw,
 		};
 
-		path_beneath.parent_fd = open(rules[i].path, O_PATH | O_CLOEXEC);
+		path_beneath.parent_fd =
+			open(rules[i].path, O_PATH | O_CLOEXEC);
 		if (path_beneath.parent_fd < 0) {
 			fprintf(stderr, "Warning: Failed to open \"%s\": %s\n",
 				rules[i].path, strerror(errno));
@@ -254,26 +255,43 @@ static int apply_rules_to_supervisor(int supervisor_fd, __u64 access_fs_rw)
 /*
  * Watch for config file changes using inotify.
  */
-static int setup_file_watch(const char *config_path)
+static int wait_config_file(const char *config_path, int inotify_fd, bool init)
 {
-	int inotify_fd;
-	int watch_fd;
+	int watchd, fd;
 
-	inotify_fd = inotify_init1(IN_CLOEXEC | IN_NONBLOCK);
-	if (inotify_fd < 0) {
-		perror("inotify_init1");
-		return -1;
+	while (true) {
+		watchd = inotify_add_watch(inotify_fd, config_path,
+					   IN_CLOSE_WRITE | IN_MODIFY |
+						   IN_MOVE_SELF |
+						   IN_DELETE_SELF | IN_ONESHOT);
+		if (watchd < 0 && !init && errno == ENOENT) {
+			fprintf(stderr,
+				"Waiting for config file \"%s\" to appear...\n",
+				config_path);
+			usleep(100000);
+			continue;
+		} else if (watchd < 0) {
+			perror("inotify_add_watch");
+			return -1;
+		}
+
+		fd = open(config_path, O_RDONLY | O_CLOEXEC);
+
+		if (fd < 0 && !init && errno == ENOENT) {
+			inotify_rm_watch(inotify_fd, watchd);
+			fprintf(stderr,
+				"Waiting for config file \"%s\" to appear...\n",
+				config_path);
+			usleep(100000);
+			continue;
+		} else if (fd < 0) {
+			inotify_rm_watch(inotify_fd, watchd);
+			perror("Failed to open config file for watching");
+			return -1;
+		} else {
+			return fd;
+		}
 	}
-
-	watch_fd = inotify_add_watch(inotify_fd, config_path,
-				     IN_MODIFY | IN_CLOSE_WRITE);
-	if (watch_fd < 0) {
-		perror("inotify_add_watch");
-		close(inotify_fd);
-		return -1;
-	}
-
-	return inotify_fd;
 }
 
 static void print_usage(const char *prog)
@@ -315,6 +333,7 @@ int main(int argc, char *const argv[], char *const *const envp)
 	int abi;
 	pid_t child;
 	__u64 access_fs_rw = ACCESS_FS_ROUGHLY_READ | ACCESS_FS_ROUGHLY_WRITE;
+	int config_fd;
 
 	struct landlock_ruleset_attr ruleset_attr = {
 		.handled_access_fs = access_fs_rw,
@@ -341,14 +360,16 @@ int main(int argc, char *const argv[], char *const *const envp)
 				"Hint: Landlock is not supported by the current kernel.\n");
 			break;
 		case EOPNOTSUPP:
-			fprintf(stderr, "Hint: Landlock is currently disabled.\n");
+			fprintf(stderr,
+				"Hint: Landlock is currently disabled.\n");
 			break;
 		}
 		return 1;
 	}
 
 	if (abi < 10) {
-		fprintf(stderr, "Error: Supervisor support requires ABI version 10 or later.\n");
+		fprintf(stderr,
+			"Error: Supervisor support requires ABI version 10 or later.\n");
 		fprintf(stderr, "Current ABI version: %d\n", abi);
 		return 1;
 	}
@@ -356,19 +377,18 @@ int main(int argc, char *const argv[], char *const *const envp)
 	/* Apply ABI restrictions */
 	switch (abi) {
 	case 1:
-		ruleset_attr.handled_access_fs &= ~LANDLOCK_ACCESS_FS_REFER;
-		__attribute__((fallthrough));
 	case 2:
-		ruleset_attr.handled_access_fs &= ~LANDLOCK_ACCESS_FS_TRUNCATE;
-		__attribute__((fallthrough));
 	case 3:
 	case 4:
-		ruleset_attr.handled_access_fs &= ~LANDLOCK_ACCESS_FS_IOCTL_DEV;
-		__attribute__((fallthrough));
 	case 5:
 	case 6:
 	case 7:
 	case 8:
+	case 9:
+		fprintf(stderr,
+			"Error: Supervisor support requires ABI version 10 or later.\n");
+		fprintf(stderr, "Current ABI version: %d\n", abi);
+		return 1;
 	case LANDLOCK_ABI_LAST:
 		break;
 	default:
@@ -379,41 +399,70 @@ int main(int argc, char *const argv[], char *const *const envp)
 	}
 	access_fs_rw &= ruleset_attr.handled_access_fs;
 
-	/* Load initial rules */
-	if (load_rules_from_file(config_path) < 0)
-		return 1;
-
 	/* Create supervisor ruleset */
-	supervisor_fd = landlock_create_ruleset(&ruleset_attr,
-						sizeof(ruleset_attr),
-						LANDLOCK_CREATE_RULESET_SUPERVISOR);
+	supervisor_fd =
+		landlock_create_ruleset(&ruleset_attr, sizeof(ruleset_attr),
+					LANDLOCK_CREATE_RULESET_SUPERVISOR);
 	if (supervisor_fd < 0) {
 		perror("Failed to create supervisor ruleset");
 		return 1;
 	}
 
-	/* Apply initial rules */
-	if (apply_rules_to_supervisor(supervisor_fd, access_fs_rw) < 0) {
-		close(supervisor_fd);
-		return 1;
-	}
-
 	/* Get supervisee ruleset */
-	supervisee_fd = ioctl(supervisor_fd, LANDLOCK_IOCTL_GET_SUPERVISEE_RULESET, 0);
+	supervisee_fd =
+		ioctl(supervisor_fd, LANDLOCK_IOCTL_GET_SUPERVISEE_RULESET, 0);
 	if (supervisee_fd < 0) {
 		perror("Failed to get supervisee ruleset");
 		close(supervisor_fd);
 		return 1;
 	}
 
-	/* Set up file watching */
-	inotify_fd = setup_file_watch(config_path);
+	inotify_fd = inotify_init1(IN_CLOEXEC);
 	if (inotify_fd < 0) {
-		fprintf(stderr, "Warning: File watching not available\n");
+		perror("inotify_init1");
+		close(supervisor_fd);
+		close(supervisee_fd);
+		return 1;
 	}
 
-	/* Set up signal handler for child exit */
-	signal(SIGCHLD, sigchld_handler);
+	config_fd = wait_config_file(config_path, inotify_fd, true);
+	if (config_fd < 0) {
+		close(supervisor_fd);
+		close(supervisee_fd);
+		return 1;
+	}
+
+	/* Load initial rules */
+	if (load_rules_from_file(config_fd) < 0) {
+		close(supervisor_fd);
+		close(supervisee_fd);
+		return 1;
+	}
+	config_fd = -1;
+
+	/* Apply initial rules */
+	if (apply_rules_to_supervisor(supervisor_fd, access_fs_rw) < 0) {
+		close(supervisor_fd);
+		close(supervisee_fd);
+		return 1;
+	}
+
+	/* Set up signal handler for child exit (no SA_RESTART so
+	 * SIGCHLD interrupts blocking read/poll calls). */
+	{
+		struct sigaction sa = {
+			.sa_handler = sigchld_handler,
+			.sa_flags = 0, /* no SA_RESTART */
+		};
+		sigemptyset(&sa.sa_mask);
+		if (sigaction(SIGCHLD, &sa, NULL) < 0) {
+			perror("sigaction");
+			close(supervisor_fd);
+			close(supervisee_fd);
+			close(inotify_fd);
+			return 1;
+		}
+	}
 
 	/* Fork the child process */
 	child = fork();
@@ -421,16 +470,14 @@ int main(int argc, char *const argv[], char *const *const envp)
 		perror("fork");
 		close(supervisor_fd);
 		close(supervisee_fd);
-		if (inotify_fd >= 0)
-			close(inotify_fd);
+		close(inotify_fd);
 		return 1;
 	}
 
 	if (child == 0) {
 		/* Child process */
 		close(supervisor_fd);
-		if (inotify_fd >= 0)
-			close(inotify_fd);
+		close(inotify_fd);
 
 		if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) {
 			perror("Failed to restrict privileges");
@@ -459,59 +506,48 @@ int main(int argc, char *const argv[], char *const *const envp)
 
 	/* Monitor for file changes and child exit */
 	while (!child_exited) {
-		struct pollfd pfd = {
-			.fd = inotify_fd,
-			.events = POLLIN,
-		};
-		int ret;
+		char buf[sizeof(struct inotify_event) + NAME_MAX + 1];
+		ssize_t len;
 
-		if (inotify_fd < 0) {
-			/* No file watching, just wait for child */
-			pause();
+		if (child_exited)
+			break;
+		/* Drain inotify events */
+		len = read(inotify_fd, buf, sizeof(buf));
+		if (child_exited)
+			break;
+		if (len < 0 && errno != EAGAIN) {
+			perror("read inotify");
 			break;
 		}
 
-		ret = poll(&pfd, 1, 1000);  /* 1 second timeout */
-		if (ret < 0) {
-			if (errno == EINTR)
-				continue;
-			perror("poll");
+		fprintf(stderr,
+			"\nSupervisor: Config file changed, reloading rules...\n");
+
+		config_fd = wait_config_file(config_path, inotify_fd, false);
+		if (config_fd < 0) {
 			break;
 		}
 
-		if (ret > 0 && (pfd.revents & POLLIN)) {
-			char buf[4096];
-			ssize_t len;
-
-			/* Drain inotify events */
-			len = read(inotify_fd, buf, sizeof(buf));
-			if (len < 0 && errno != EAGAIN) {
-				perror("read inotify");
-				break;
-			}
-
-			fprintf(stderr, "\nSupervisor: Config file changed, reloading rules...\n");
-
-			/* Reload rules */
-			if (load_rules_from_file(config_path) < 0) {
-				fprintf(stderr, "Warning: Failed to reload rules\n");
-				continue;
-			}
-
-			/* Apply new rules to supervisor */
-			if (apply_rules_to_supervisor(supervisor_fd, access_fs_rw) < 0) {
-				fprintf(stderr, "Warning: Failed to apply rules\n");
-				continue;
-			}
-
-			fprintf(stderr, "Supervisor: Rules reloaded and committed\n");
+		/* Reload rules */
+		if (load_rules_from_file(config_fd) < 0) {
+			break;
 		}
+		config_fd = -1;
+
+		/* Apply new rules to supervisor */
+		if (apply_rules_to_supervisor(supervisor_fd, access_fs_rw) <
+		    0) {
+			break;
+		}
+
+		fprintf(stderr, "Supervisor: Rules reloaded and committed\n");
 	}
 
 	/* Clean up */
-	if (inotify_fd >= 0)
-		close(inotify_fd);
+	close(inotify_fd);
 	close(supervisor_fd);
+	if (config_fd >= 0)
+		close(config_fd);
 
 	/* Wait for child to exit */
 	int status;
