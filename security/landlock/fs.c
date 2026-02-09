@@ -909,20 +909,22 @@ static bool is_access_to_paths_allowed(
 		    (unlikely(layer_masks_parent2) && !allowed_parent2)) {
 			struct landlock_object *object;
 
-			object = landlock_inode(
-					 d_backing_inode(walker_path.dentry))
-					 ->object;
+			/*
+			 * Reading the object pointer requires RCU protection.
+			 * The supervisor cache was pre-captured with refcounts,
+			 * but the inode->object pointer is RCU-protected.
+			 */
+			scoped_guard(rcu) {
+				object = landlock_inode(
+						 d_backing_inode(walker_path.dentry))
+						 ->object;
+			}
 			if (object) {
 				struct landlock_id
 					walker_id = { .type = LANDLOCK_KEY_INODE,
 						      .key = {
 							      .object = object,
 						      } };
-
-				/*
-				 * No RCU guard needed here - we use the
-				 * pre-captured supervisor cache.
-				 */
 				if (!allowed_parent1 &&
 				    landlock_check_supervisor_access(
 					    domain, walker_id,
@@ -986,6 +988,9 @@ jump_up:
 		}
 	}
 	path_put(&walker_path);
+
+	/* Release refcounts on captured supervisor rulesets */
+	landlock_release_supervisor_committed(&supervisor_cache);
 
 	/*
 	 * Check CONFIG_AUDIT to enable elision of log_request_parent* and
@@ -1881,8 +1886,9 @@ check_supervisor_optional_access_recheck(const struct file *const file,
 
 static int hook_file_truncate(struct file *const file)
 {
-	deny_masks_t deny_masks = 0;
-	access_mask_t quiet_access = 0;
+	/* Initialize from file, may be updated by supervisor check */
+	deny_masks_t deny_masks = landlock_file(file)->deny_masks;
+	access_mask_t quiet_access = landlock_file(file)->quiet_optional_accesses;
 
 	/*
 	 * Allows truncation if the truncate right was available at the time of
@@ -1915,9 +1921,8 @@ static int hook_file_truncate(struct file *const file)
 		.all_existing_optional_access = _LANDLOCK_ACCESS_FS_OPTIONAL,
 		.access = LANDLOCK_ACCESS_FS_TRUNCATE,
 #ifdef CONFIG_AUDIT
-		/* Use re-computed deny_masks from supervisor check, or fall back to original */
-		.deny_masks = deny_masks ? deny_masks : landlock_file(file)->deny_masks,
-		.quiet_optional_accesses = quiet_access ? quiet_access : landlock_file(file)->quiet_optional_accesses,
+		.deny_masks = deny_masks,
+		.quiet_optional_accesses = quiet_access,
 #endif /* CONFIG_AUDIT */
 	});
 	return -EACCES;
@@ -1927,8 +1932,9 @@ static int hook_file_ioctl_common(const struct file *const file,
 				  const unsigned int cmd, const bool is_compat)
 {
 	access_mask_t allowed_access = landlock_file(file)->allowed_access;
-	deny_masks_t deny_masks = 0;
-	access_mask_t quiet_access = 0;
+	/* Initialize from file, may be updated by supervisor check */
+	deny_masks_t deny_masks = landlock_file(file)->deny_masks;
+	access_mask_t quiet_access = landlock_file(file)->quiet_optional_accesses;
 
 	/*
 	 * It is the access rights at the time of opening the file which
@@ -1967,9 +1973,8 @@ static int hook_file_ioctl_common(const struct file *const file,
 		.all_existing_optional_access = _LANDLOCK_ACCESS_FS_OPTIONAL,
 		.access = LANDLOCK_ACCESS_FS_IOCTL_DEV,
 #ifdef CONFIG_AUDIT
-		/* Use re-computed deny_masks from supervisor check, or fall back to original */
-		.deny_masks = deny_masks ? deny_masks : landlock_file(file)->deny_masks,
-		.quiet_optional_accesses = quiet_access ? quiet_access : landlock_file(file)->quiet_optional_accesses,
+		.deny_masks = deny_masks,
+		.quiet_optional_accesses = quiet_access,
 #endif /* CONFIG_AUDIT */
 	});
 	return -EACCES;
