@@ -834,10 +834,15 @@ bool landlock_check_supervisor_access(
 	const struct landlock_ruleset *const domain,
 	const struct landlock_id id,
 	struct layer_access_masks *const layer_masks,
+	struct collected_rule_flags *const rule_flags,
 	const struct supervisor_committed_cache *cache)
 {
 	struct landlock_hierarchy *hierarchy;
 	size_t layer_level;
+	char single_layer_rule[struct_size_t(struct landlock_rule, layers,
+					     1)] = { 0 };
+	struct landlock_rule *modified_rule =
+		(struct landlock_rule *)single_layer_rule;
 
 	if (!domain || !domain->hierarchy || !layer_masks)
 		return false;
@@ -901,7 +906,8 @@ bool landlock_check_supervisor_access(
 		}
 
 		/* TODO: remove on submission */
-		trace_printk("committed = %p\n", committed);
+		trace_printk("layer %zu: committed = %p\n", layer_idx,
+			     committed);
 
 		rule = landlock_find_rule(committed, id);
 		if (!rule) {
@@ -911,30 +917,24 @@ bool landlock_check_supervisor_access(
 			return false;
 		}
 		/* TODO: remove on submission */
-		trace_printk("yes rule: %p, num_layers = %u, access = %x\n",
-			     rule, rule->num_layers,
-			     rule->num_layers > 0 ? rule->layers[0].access : 0);
+		trace_printk(
+			"yes rule for inode %p, num_layers = %u, access = %x\n",
+			id.key.object, rule->num_layers,
+			rule->num_layers > 0 ? rule->layers[0].access : 0);
 
 		/*
 		 * Check if the supervisor rule grants all the unfulfilled
 		 * access rights.  Supervisor rules only have one layer at
 		 * level 0.
 		 */
-		if (rule->num_layers == 1) {
-			access_mask_t granted = rule->layers[0].access;
-			unfulfilled &= ~granted;
-		}
-
-		if (unfulfilled) {
-			/*
-			 * Supervisor ruleset doesn't grant all needed access
-			 * for this layer.
-			 */
+		if (WARN_ON_ONCE(rule->num_layers != 1)) {
 			return false;
 		}
 
-		/* Clear the fulfilled access in layer_masks */
-		layer_masks->access[layer_idx] = 0;
+		modified_rule->num_layers = 1;
+		modified_rule->layers[0] = rule->layers[0];
+		modified_rule->layers[0].level = layer_level;
+		landlock_unmask_layers(modified_rule, layer_masks, rule_flags);
 
 		hierarchy = hierarchy->parent;
 	}
