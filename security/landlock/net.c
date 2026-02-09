@@ -208,7 +208,8 @@ static int current_check_access_socket(struct socket *const sock,
 	scoped_guard(rcu)
 	{
 		if (landlock_check_supervisor_access(subject->domain, id,
-						     &layer_masks, NULL))
+						     &layer_masks, &rule_flags,
+						     NULL))
 			return 0;
 	}
 

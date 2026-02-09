@@ -931,6 +931,7 @@ static bool is_access_to_paths_allowed(
 					    landlock_check_supervisor_access(
 						    domain, walker_id,
 						    layer_masks_parent1,
+						    rule_flags_parent1,
 						    &supervisor_cache))
 						allowed_parent1 = true;
 
@@ -939,6 +940,7 @@ static bool is_access_to_paths_allowed(
 					    landlock_check_supervisor_access(
 						    domain, walker_id,
 						    layer_masks_parent2,
+						    rule_flags_parent2,
 						    &supervisor_cache))
 						allowed_parent2 = true;
 				}
@@ -1751,6 +1753,9 @@ static int hook_file_open(struct file *const file)
 
 	full_access_request = open_access_request | optional_access;
 
+	trace_printk("Request to access %pD4 (rights: %x)\n", &file->f_path,
+		     full_access_request);
+
 	if (is_access_to_paths_allowed(
 		    subject->domain, &file->f_path,
 		    landlock_init_layer_masks(subject->domain,
@@ -1769,6 +1774,11 @@ static int hook_file_open(struct file *const file)
 		for (size_t i = 0; i < ARRAY_SIZE(layer_masks.access); i++)
 			allowed_access &= ~layer_masks.access[i];
 	}
+
+	for (size_t i = 0; i < ARRAY_SIZE(layer_masks.access); i++)
+		trace_printk("layer_masks.access[%zu] = %x\n", i,
+			     layer_masks.access[i]);
+	trace_printk("allowed_access = %x\n", allowed_access);
 
 	/*
 	 * For operations on already opened files (i.e. ftruncate()), it is the
