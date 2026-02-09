@@ -914,31 +914,34 @@ static bool is_access_to_paths_allowed(
 			 * The supervisor cache was pre-captured with refcounts,
 			 * but the inode->object pointer is RCU-protected.
 			 */
-			scoped_guard(rcu) {
+			scoped_guard(rcu)
+			{
 				object = landlock_inode(
-						 d_backing_inode(walker_path.dentry))
+						 d_backing_inode(
+							 walker_path.dentry))
 						 ->object;
-			}
-			if (object) {
-				struct landlock_id
-					walker_id = { .type = LANDLOCK_KEY_INODE,
-						      .key = {
-							      .object = object,
-						      } };
-				if (!allowed_parent1 &&
-				    landlock_check_supervisor_access(
-					    domain, walker_id,
-					    layer_masks_parent1,
-					    &supervisor_cache))
-					allowed_parent1 = true;
+				if (object) {
+					struct landlock_id
+						walker_id = { .type = LANDLOCK_KEY_INODE,
+							      .key = {
+								      .object =
+									      object,
+							      } };
+					if (!allowed_parent1 &&
+					    landlock_check_supervisor_access(
+						    domain, walker_id,
+						    layer_masks_parent1,
+						    &supervisor_cache))
+						allowed_parent1 = true;
 
-				if (unlikely(layer_masks_parent2) &&
-				    !allowed_parent2 &&
-				    landlock_check_supervisor_access(
-					    domain, walker_id,
-					    layer_masks_parent2,
-					    &supervisor_cache))
-					allowed_parent2 = true;
+					if (unlikely(layer_masks_parent2) &&
+					    !allowed_parent2 &&
+					    landlock_check_supervisor_access(
+						    domain, walker_id,
+						    layer_masks_parent2,
+						    &supervisor_cache))
+						allowed_parent2 = true;
+				}
 			}
 		}
 
