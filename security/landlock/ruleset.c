@@ -742,6 +742,52 @@ landlock_init_layer_masks(const struct landlock_ruleset *const domain,
 }
 
 /**
+ * landlock_capture_supervisor_committed - Pre-capture supervisor rulesets
+ *
+ * Captures the committed rulesets from all supervisors in the domain's
+ * hierarchy.  This should be called at the start of an access check (before
+ * pathwalk) to ensure atomicity - a supervisor commit during pathwalk won't
+ * cause inconsistent results where some path components use the old ruleset
+ * and others use the new one.
+ *
+ * @domain: The domain ruleset
+ * @cache: Output structure to store captured ruleset pointers (stack-allocated)
+ */
+void landlock_capture_supervisor_committed(
+	const struct landlock_ruleset *const domain,
+	struct supervisor_committed_cache *cache)
+{
+	struct landlock_hierarchy *hierarchy;
+	size_t layer_level;
+
+	memset(cache, 0, sizeof(*cache));
+
+	if (!domain || !domain->hierarchy)
+		return;
+
+	hierarchy = domain->hierarchy;
+
+	scoped_guard(rcu)
+	{
+		for (layer_level = domain->num_layers; layer_level > 0;
+		     layer_level--) {
+			const size_t layer_idx = layer_level - 1;
+
+			if (!hierarchy)
+				break;
+
+			if (hierarchy->supervisor) {
+				cache->rulesets[layer_idx] =
+					landlock_get_supervisor_committed_ruleset_rcu(
+						hierarchy->supervisor);
+			}
+
+			hierarchy = hierarchy->parent;
+		}
+	}
+}
+
+/**
  * landlock_check_supervisor_access - Check if supervisor rulesets allow access
  *
  * When the supervisee ruleset denies access for certain layers, this function
@@ -755,6 +801,8 @@ landlock_init_layer_masks(const struct landlock_ruleset *const domain,
  * @domain: The domain ruleset (used for hierarchy traversal)
  * @id: The object identifier to check access for
  * @layer_masks: Per-layer masks of unfulfilled access rights (modified in place)
+ * @cache: Pre-captured supervisor rulesets (NULL to fetch on demand, which is
+ *         less atomic but still works for single-point checks)
  *
  * Returns: true if all unfulfilled accesses are satisfied by supervisor
  *          rulesets, false otherwise.
@@ -762,7 +810,8 @@ landlock_init_layer_masks(const struct landlock_ruleset *const domain,
 bool landlock_check_supervisor_access(
 	const struct landlock_ruleset *const domain,
 	const struct landlock_id id,
-	struct layer_access_masks *const layer_masks)
+	struct layer_access_masks *const layer_masks,
+	const struct supervisor_committed_cache *cache)
 {
 	struct landlock_hierarchy *hierarchy;
 	size_t layer_level;
@@ -781,7 +830,6 @@ bool landlock_check_supervisor_access(
 	for (layer_level = domain->num_layers; layer_level > 0; layer_level--) {
 		const size_t layer_idx = layer_level - 1;
 		access_mask_t unfulfilled;
-		struct landlock_supervisor *supervisor;
 		struct landlock_ruleset *committed;
 		const struct landlock_rule *rule;
 
@@ -801,24 +849,29 @@ bool landlock_check_supervisor_access(
 			continue;
 		}
 
-		supervisor = hierarchy->supervisor;
-		if (!supervisor) {
-			/*
-			 * This layer denied access but has no supervisor,
-			 * so there's no way to override.
-			 */
-			return false;
+		/*
+		 * Use pre-captured committed ruleset if available, otherwise
+		 * fetch on demand (less atomic but works for single checks).
+		 */
+		if (cache) {
+			committed = cache->rulesets[layer_idx];
+		} else {
+			struct landlock_supervisor *supervisor =
+				hierarchy->supervisor;
+			if (!supervisor) {
+				/*
+				 * This layer denied access but has no supervisor,
+				 * so there's no way to override.
+				 */
+				return false;
+			}
+			committed = landlock_get_supervisor_committed_ruleset_rcu(
+				supervisor);
 		}
 
-		/*
-		 * Check if the supervisor's committed ruleset allows the
-		 * access.  We're in an RCU read-side critical section here.
-		 */
-		committed = landlock_get_supervisor_committed_ruleset_rcu(
-			supervisor);
 		if (!committed) {
 			/*
-			 * Supervisor exists but has no committed rules,
+			 * Supervisor doesn't exist or has no committed rules,
 			 * which means no rules allow access.
 			 */
 			return false;

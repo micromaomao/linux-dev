@@ -358,10 +358,30 @@ landlock_init_layer_masks(const struct landlock_ruleset *const domain,
 			  struct layer_access_masks *masks,
 			  const enum landlock_key_type key_type);
 
+/**
+ * struct supervisor_committed_cache - Pre-captured supervisor committed rulesets
+ *
+ * This structure holds pointers to supervisor committed rulesets that were
+ * captured at the start of an access check.  This ensures atomicity of the
+ * access check with respect to supervisor commits - a commit that happens
+ * during the pathwalk won't cause inconsistent results.
+ *
+ * The extra 128 bytes of stack space (16 pointers) is the tradeoff for
+ * atomicity.
+ */
+struct supervisor_committed_cache {
+	struct landlock_ruleset *rulesets[LANDLOCK_MAX_NUM_LAYERS];
+};
+
+void landlock_capture_supervisor_committed(
+	const struct landlock_ruleset *const domain,
+	struct supervisor_committed_cache *cache);
+
 bool landlock_check_supervisor_access(
 	const struct landlock_ruleset *const domain,
 	const struct landlock_id id,
-	struct layer_access_masks *const layer_masks);
+	struct layer_access_masks *const layer_masks,
+	const struct supervisor_committed_cache *cache);
 
 bool landlock_check_supervisor_optional_access(
 	const struct landlock_ruleset *const domain,
