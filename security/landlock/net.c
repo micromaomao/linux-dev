@@ -199,6 +199,20 @@ static int current_check_access_socket(struct socket *const sock,
 	if (landlock_unmask_layers(rule, &layer_masks, &rule_flags))
 		return 0;
 
+	/*
+	 * Supervisee ruleset denied access.  Check if supervisor rulesets
+	 * for the denying layers allow this access.
+	 * For network checks, we pass NULL for the cache since it's a
+	 * single-point check (no pathwalk), so atomicity is not a concern.
+	 */
+	scoped_guard(rcu)
+	{
+		if (landlock_check_supervisor_access(subject->domain, id,
+						     &layer_masks, &rule_flags,
+						     NULL))
+			return 0;
+	}
+
 	audit_net.family = address->sa_family;
 	landlock_log_denial(
 		subject,

@@ -521,6 +521,9 @@ int main(const int argc, char *const argv[], char *const *const envp)
 		quiet_supported = false;
 
 		__attribute__((fallthrough));
+	case 8:
+		/* Supervisor support added in ABI 9 (no changes needed) */
+		__attribute__((fallthrough));
 	case LANDLOCK_ABI_LAST:
 		break;
 	default:
