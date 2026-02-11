@@ -72,6 +72,10 @@ static inline int landlock_restrict_self(const int ruleset_fd,
 #define LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR (1U << 1)
 #endif
 
+#ifndef LANDLOCK_ADD_RULE_INTERSECT
+#define LANDLOCK_ADD_RULE_INTERSECT (1U << 2)
+#endif
+
 #ifndef LANDLOCK_IOC_MAGIC
 #define LANDLOCK_IOC_MAGIC 'L'
 #endif
@@ -112,143 +116,351 @@ static inline int landlock_restrict_self(const int ruleset_fd,
 /* clang-format on */
 
 #define MAX_LINE_LENGTH 4096
-#define MAX_RULES 1024
 
+/**
+ * struct rule_entry - Tracks a single rule in the ruleset.
+ * @access: Landlock fs access mask currently applied.
+ * @pathfd: An O_PATH fd that we keep open until it is removed from the
+ *          ruleset in a future config load, after which we set it to -1.
+ * @should_keep: Marker to determine which rules are removed during reload.
+ * @pathname: Pathname as originally given in the config file (dynamically
+ *            allocated).
+ */
 struct rule_entry {
-	char path[PATH_MAX];
 	__u64 access;
+	int pathfd;
+	bool should_keep;
+	char *pathname;
 };
 
-static struct rule_entry rules[MAX_RULES];
-static int num_rules = 0;
+/**
+ * struct tracked_ruleset - Tracks all rules in a supervisor ruleset.
+ * @len: Number of valid entries in the array.
+ * @cap: Current capacity of the entries array.
+ * @entries: Dynamically allocated array of rule entries.
+ */
+struct tracked_ruleset {
+	size_t len;
+	size_t cap;
+	struct rule_entry *entries;
+};
+
+/**
+ * tracked_ruleset_init() - Initialize a tracked ruleset.
+ * @rs: Pointer to the tracked ruleset to initialize.
+ */
+static void tracked_ruleset_init(struct tracked_ruleset *rs)
+{
+	rs->len = 0;
+	rs->cap = 0;
+	rs->entries = NULL;
+}
+
+/**
+ * tracked_ruleset_find() - Find a rule by pathname.
+ * @rs: Pointer to the tracked ruleset.
+ * @pathname: The pathname to search for.
+ *
+ * Return: Index of the rule if found, or -1 if not found.
+ */
+static int tracked_ruleset_find(struct tracked_ruleset *rs, const char *pathname)
+{
+	size_t i;
+
+	for (i = 0; i < rs->len; i++) {
+		if (rs->entries[i].pathname &&
+		    strcmp(rs->entries[i].pathname, pathname) == 0)
+			return (int)i;
+	}
+	return -1;
+}
+
+/**
+ * tracked_ruleset_insert() - Insert a new rule into the tracked ruleset.
+ * @rs: Pointer to the tracked ruleset.
+ * @entry: The rule entry to insert.
+ *
+ * Expands the array in powers of 2 if needed.
+ *
+ * Return: 0 on success, -1 on error.
+ */
+static int tracked_ruleset_insert(struct tracked_ruleset *rs,
+				  const struct rule_entry *entry)
+{
+	if (rs->len >= rs->cap) {
+		size_t new_cap = rs->cap ? rs->cap * 2 : 8;
+		struct rule_entry *new_entries;
+
+		new_entries = realloc(rs->entries,
+				      new_cap * sizeof(*new_entries));
+		if (!new_entries)
+			return -1;
+		rs->entries = new_entries;
+		rs->cap = new_cap;
+	}
+	rs->entries[rs->len++] = *entry;
+	return 0;
+}
+
+/**
+ * access_to_string() - Convert access mask to human-readable string.
+ * @access: The access mask to convert.
+ * @buf: Buffer to write the string to.
+ * @buflen: Size of the buffer.
+ *
+ * Return: Pointer to buf.
+ */
+static const char *access_to_string(__u64 access, char *buf, size_t buflen)
+{
+	bool has_read = (access & ACCESS_FS_ROUGHLY_READ) != 0;
+	bool has_write = (access & ACCESS_FS_ROUGHLY_WRITE) != 0;
+
+	if (has_read && has_write)
+		snprintf(buf, buflen, "read-write");
+	else if (has_read)
+		snprintf(buf, buflen, "read");
+	else if (has_write)
+		snprintf(buf, buflen, "write");
+	else
+		snprintf(buf, buflen, "no");
+	return buf;
+}
 
 static volatile sig_atomic_t child_exited = 0;
 
 static void sigchld_handler(int sig)
 {
+	(void)sig;
 	child_exited = 1;
 }
 
-/*
- * Parse a line from the config file.
- * Format: <access_type> <path>
- * Where access_type is one of: ro, rw
+/**
+ * parse_access_type() - Parse access type from config.
+ * @access_type: String like "ro" or "rw".
+ * @access: Output access mask.
+ *
+ * Return: 0 on success, -1 on error.
  */
-static int parse_config_line(const char *line, struct rule_entry *entry)
+static int parse_access_type(const char *access_type, __u64 *access)
 {
-	char access_type[16];
-	char path[PATH_MAX];
-	int n;
-
-	/* Skip empty lines and comments */
-	if (line[0] == '\0' || line[0] == '#' || line[0] == '\n')
-		return -1;
-
-	n = sscanf(line, "%15s %4095s", access_type, path);
-	if (n != 2) {
-		fprintf(stderr, "Invalid config line: %s", line);
-		return -1;
-	}
-
-	/* Use snprintf for safe string copying with guaranteed null-termination */
-	if (snprintf(entry->path, sizeof(entry->path), "%s", path) >=
-	    (int)sizeof(entry->path)) {
-		fprintf(stderr, "Path too long: %s\n", path);
-		return -1;
-	}
-
 	if (strcmp(access_type, "ro") == 0) {
-		entry->access = ACCESS_FS_ROUGHLY_READ;
+		*access = ACCESS_FS_ROUGHLY_READ;
+		return 0;
 	} else if (strcmp(access_type, "rw") == 0) {
-		entry->access = ACCESS_FS_ROUGHLY_READ |
-				ACCESS_FS_ROUGHLY_WRITE;
-	} else {
-		fprintf(stderr, "Unknown access type: %s\n", access_type);
-		return -1;
+		*access = ACCESS_FS_ROUGHLY_READ | ACCESS_FS_ROUGHLY_WRITE;
+		return 0;
 	}
-
-	return 0;
+	return -1;
 }
 
-/*
- * Load rules from configuration file.  Consumes config_fd.
+/**
+ * load_and_apply_config() - Load config file and apply rules to supervisor.
+ * @config_fd: Open file descriptor to config file (consumed).
+ * @supervisor_fd: Supervisor ruleset fd.
+ * @tracked: Tracked ruleset state.
+ * @handled_access_fs: Handled access mask.
+ *
+ * This function implements incremental rule updates:
+ * 1. Mark all existing rules as should_keep=false
+ * 2. For each line in config, find or create rule
+ * 3. Remove rules that are no longer in config
+ *
+ * Return: 0 on success, -1 on error.
  */
-static int load_rules_from_file(int config_fd)
+static int load_and_apply_config(int config_fd, int supervisor_fd,
+				 struct tracked_ruleset *tracked,
+				 __u64 handled_access_fs)
 {
 	FILE *f;
 	char line[MAX_LINE_LENGTH];
+	size_t i, write_idx;
+	char access_buf[32];
 
 	f = fdopen(config_fd, "r");
 	if (!f) {
 		perror("Failed to open config file");
+		close(config_fd);
 		return -1;
 	}
 
-	num_rules = 0;
+	/* Step 1: Mark all existing rules as not to keep */
+	for (i = 0; i < tracked->len; i++)
+		tracked->entries[i].should_keep = false;
 
-	while (fgets(line, sizeof(line), f) && num_rules < MAX_RULES) {
-		struct rule_entry entry;
+	/* Step 2: Process each line in config */
+	while (fgets(line, sizeof(line), f)) {
+		char access_type[16];
+		char path[PATH_MAX];
+		__u64 new_access;
+		int n, idx;
+		struct stat statbuf;
 
-		if (parse_config_line(line, &entry) == 0) {
-			rules[num_rules++] = entry;
+		/* Skip empty lines and comments */
+		if (line[0] == '\0' || line[0] == '#' || line[0] == '\n')
+			continue;
+
+		n = sscanf(line, "%15s %4095s", access_type, path);
+		if (n != 2) {
+			fprintf(stderr, "Invalid config line: %s", line);
+			continue;
+		}
+
+		if (parse_access_type(access_type, &new_access) < 0) {
+			fprintf(stderr, "Unknown access type: %s\n",
+				access_type);
+			continue;
+		}
+
+		new_access &= handled_access_fs;
+
+		idx = tracked_ruleset_find(tracked, path);
+		if (idx >= 0) {
+			/* Existing rule - mark to keep and update if needed */
+			struct rule_entry *entry = &tracked->entries[idx];
+
+			entry->should_keep = true;
+
+			if (entry->access != new_access) {
+				struct landlock_path_beneath_attr path_beneath = {
+					.parent_fd = entry->pathfd,
+				};
+
+				if (new_access > entry->access) {
+					/* Adding access - use normal add */
+					path_beneath.allowed_access =
+						new_access & ~entry->access;
+					if (landlock_add_rule(
+						    supervisor_fd,
+						    LANDLOCK_RULE_PATH_BENEATH,
+						    &path_beneath, 0) == 0) {
+						fprintf(stderr,
+							"supervisor: Added %s access for %s\n",
+							access_to_string(
+								path_beneath
+									.allowed_access,
+								access_buf,
+								sizeof(access_buf)),
+							path);
+					}
+				} else {
+					/* Removing access - use intersect */
+					path_beneath.allowed_access = new_access;
+					if (landlock_add_rule(
+						    supervisor_fd,
+						    LANDLOCK_RULE_PATH_BENEATH,
+						    &path_beneath,
+						    LANDLOCK_ADD_RULE_INTERSECT) ==
+					    0) {
+						fprintf(stderr,
+							"supervisor: Removed %s access for %s\n",
+							access_to_string(
+								entry->access &
+									~new_access,
+								access_buf,
+								sizeof(access_buf)),
+							path);
+					}
+				}
+				entry->access = new_access;
+			}
+		} else {
+			/* New rule - add it */
+			struct rule_entry new_entry;
+			struct landlock_path_beneath_attr path_beneath;
+			int pathfd;
+
+			pathfd = open(path, O_PATH | O_CLOEXEC);
+			if (pathfd < 0) {
+				fprintf(stderr,
+					"Warning: Failed to open \"%s\": %s\n",
+					path, strerror(errno));
+				continue;
+			}
+
+			if (fstat(pathfd, &statbuf)) {
+				fprintf(stderr,
+					"Warning: Failed to stat \"%s\": %s\n",
+					path, strerror(errno));
+				close(pathfd);
+				continue;
+			}
+
+			/* Restrict file access rights for non-directories */
+			if (!S_ISDIR(statbuf.st_mode))
+				new_access &= ACCESS_FILE;
+
+			new_entry.access = new_access;
+			new_entry.pathfd = pathfd;
+			new_entry.should_keep = true;
+			new_entry.pathname = strdup(path);
+			if (!new_entry.pathname) {
+				close(pathfd);
+				continue;
+			}
+
+			path_beneath.parent_fd = pathfd;
+			path_beneath.allowed_access = new_access;
+
+			if (landlock_add_rule(supervisor_fd,
+					      LANDLOCK_RULE_PATH_BENEATH,
+					      &path_beneath, 0) == 0) {
+				fprintf(stderr,
+					"supervisor: Added %s access for %s\n",
+					access_to_string(new_access, access_buf,
+							 sizeof(access_buf)),
+					path);
+			}
+
+			tracked_ruleset_insert(tracked, &new_entry);
 		}
 	}
 
 	fclose(f);
 
-	fprintf(stderr, "Loaded %d rules from config\n", num_rules);
-	return 0;
-}
+	/* Step 3: Remove rules that are no longer in config */
+	write_idx = 0;
+	for (i = 0; i < tracked->len; i++) {
+		struct rule_entry *entry = &tracked->entries[i];
 
-/*
- * Apply loaded rules to a supervisor ruleset and commit.
- */
-static int apply_rules_to_supervisor(int supervisor_fd, __u64 handled_access_fs)
-{
-	int i;
+		if (!entry->should_keep) {
+			/* Remove this rule by intersecting with 0 */
+			struct landlock_path_beneath_attr path_beneath = {
+				.parent_fd = entry->pathfd,
+				.allowed_access = 0,
+			};
 
-	for (i = 0; i < num_rules; i++) {
-		struct stat statbuf;
-		struct landlock_path_beneath_attr path_beneath = {
-			.allowed_access = rules[i].access & handled_access_fs,
-		};
+			if (landlock_add_rule(supervisor_fd,
+					      LANDLOCK_RULE_PATH_BENEATH,
+					      &path_beneath,
+					      LANDLOCK_ADD_RULE_INTERSECT) ==
+			    0) {
+				fprintf(stderr,
+					"supervisor: Removed all access for %s\n",
+					entry->pathname);
+			}
 
-		path_beneath.parent_fd =
-			open(rules[i].path, O_PATH | O_CLOEXEC);
-		if (path_beneath.parent_fd < 0) {
-			fprintf(stderr, "Warning: Failed to open \"%s\": %s\n",
-				rules[i].path, strerror(errno));
-			continue;
+			/* Clean up */
+			if (entry->pathfd >= 0)
+				close(entry->pathfd);
+			free(entry->pathname);
+		} else {
+			/* Keep this rule - compact the array */
+			if (write_idx != i)
+				tracked->entries[write_idx] = *entry;
+			write_idx++;
 		}
-
-		if (fstat(path_beneath.parent_fd, &statbuf)) {
-			fprintf(stderr, "Warning: Failed to stat \"%s\": %s\n",
-				rules[i].path, strerror(errno));
-			close(path_beneath.parent_fd);
-			continue;
-		}
-
-		/* Restrict file access rights for non-directories */
-		if (!S_ISDIR(statbuf.st_mode))
-			path_beneath.allowed_access &= ACCESS_FILE;
-
-		if (landlock_add_rule(supervisor_fd, LANDLOCK_RULE_PATH_BENEATH,
-				      &path_beneath, 0)) {
-			fprintf(stderr,
-				"Warning: Failed to add rule for \"%s\": %s\n",
-				rules[i].path, strerror(errno));
-		}
-
-		close(path_beneath.parent_fd);
 	}
+	tracked->len = write_idx;
 
-	/* Commit the rules (rule_type = 0 means commit only) */
+	/* Commit the rules */
 	if (landlock_add_rule(supervisor_fd, 0, NULL,
 			      LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR)) {
 		perror("Failed to commit supervisor rules");
 		return -1;
 	}
 
+	fprintf(stderr, "supervisor: Config reloaded, %zu rules active\n",
+		tracked->len);
 	return 0;
 }
 
@@ -333,6 +545,7 @@ int main(int argc, char *const argv[], char *const *const envp)
 	int abi;
 	pid_t child;
 	int config_fd;
+	struct tracked_ruleset tracked;
 
 	struct landlock_ruleset_attr ruleset_attr = {
 		.handled_access_fs = ACCESS_FS_ROUGHLY_READ | ACCESS_FS_ROUGHLY_WRITE,
@@ -346,6 +559,8 @@ int main(int argc, char *const argv[], char *const *const envp)
 	config_path = argv[1];
 	cmd_path = argv[2];
 	cmd_argv = argv + 2;
+
+	tracked_ruleset_init(&tracked);
 
 	/* Check Landlock ABI version */
 	abi = landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION);
@@ -430,16 +645,9 @@ int main(int argc, char *const argv[], char *const *const envp)
 		return 1;
 	}
 
-	/* Load initial rules */
-	if (load_rules_from_file(config_fd) < 0) {
-		close(supervisor_fd);
-		close(supervisee_fd);
-		return 1;
-	}
-	config_fd = -1;
-
-	/* Apply initial rules */
-	if (apply_rules_to_supervisor(supervisor_fd, ruleset_attr.handled_access_fs) < 0) {
+	/* Load and apply initial rules */
+	if (load_and_apply_config(config_fd, supervisor_fd, &tracked,
+				  ruleset_attr.handled_access_fs) < 0) {
 		close(supervisor_fd);
 		close(supervisee_fd);
 		return 1;
@@ -526,26 +734,28 @@ int main(int argc, char *const argv[], char *const *const envp)
 			break;
 		}
 
-		/* Reload rules */
-		if (load_rules_from_file(config_fd) < 0) {
+		/* Load and apply new rules */
+		if (load_and_apply_config(config_fd, supervisor_fd, &tracked,
+					  ruleset_attr.handled_access_fs) < 0) {
 			break;
 		}
-		config_fd = -1;
+	}
 
-		/* Apply new rules to supervisor */
-		if (apply_rules_to_supervisor(supervisor_fd, ruleset_attr.handled_access_fs) <
-		    0) {
-			break;
+	/* Clean up tracked ruleset */
+	{
+		size_t i;
+
+		for (i = 0; i < tracked.len; i++) {
+			if (tracked.entries[i].pathfd >= 0)
+				close(tracked.entries[i].pathfd);
+			free(tracked.entries[i].pathname);
 		}
-
-		fprintf(stderr, "Supervisor: Rules reloaded and committed\n");
+		free(tracked.entries);
 	}
 
 	/* Clean up */
 	close(inotify_fd);
 	close(supervisor_fd);
-	if (config_fd >= 0)
-		close(config_fd);
 
 	/* Wait for child to exit */
 	int status;
