@@ -325,9 +325,9 @@ static int load_and_apply_config(int config_fd, int supervisor_fd,
 			if (entry->access != new_access) {
 				struct landlock_path_beneath_attr path_beneath = {
 					.parent_fd = entry->pathfd,
+					.allowed_access = new_access,
 				};
 
-				path_beneath.allowed_access = new_access;
 				if ((new_access | entry->access) !=
 				    entry->access) {
 					/* Adding access - use normal add */
