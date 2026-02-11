@@ -343,6 +343,11 @@ static int load_and_apply_config(int config_fd, int supervisor_fd,
 			/* Existing rule - mark to keep and update if needed */
 			entry->should_keep = true;
 
+			/* Restrict file access rights for non-directories */
+			if (fstat(entry->pathfd, &statbuf) == 0 &&
+			    !S_ISDIR(statbuf.st_mode))
+				new_access &= ACCESS_FILE;
+
 			if (entry->access != new_access) {
 				struct landlock_path_beneath_attr path_beneath = {
 					.parent_fd = entry->pathfd,
