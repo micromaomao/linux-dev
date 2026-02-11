@@ -249,10 +249,167 @@ What if a supervisor wants to clear all rules and reconstruct the supervisor rul
 
 Intersect or replace?  How about just having a "clear all rules in a ruleset"?
 
+## Supervisor Notifications
+
+The supervisor notification mechanism allows a supervisor process to receive notifications when access is denied by its supervised layer, enabling dynamic policy decisions.
+
+### Overview
+
+When a supervisee process attempts an action that would be denied by the supervisor layer, instead of immediately denying the request, Landlock can notify the supervisor process and wait for its decision. This enables:
+
+1. **Dynamic policy updates**: The supervisor can add rules to allow future similar accesses
+2. **User interaction**: The supervisor can prompt the user for permission
+3. **Audit logging**: The supervisor can log denied accesses with full context
+
+### uAPI
+
+#### Creating a Notifying Supervisor
+
+To enable notifications, create a supervisor ruleset with the `LANDLOCK_CREATE_SUPERVISOR_NOTIFICATION` flag:
+
+```c
+struct landlock_ruleset_attr attr = {
+    .handled_access_fs = LANDLOCK_ACCESS_FS_READ_FILE | 
+                         LANDLOCK_ACCESS_FS_WRITE_FILE,
+};
+
+int supervisor_fd = landlock_create_ruleset(
+    &attr, sizeof(attr),
+    LANDLOCK_CREATE_RULESET_SUPERVISOR | 
+    LANDLOCK_CREATE_SUPERVISOR_NOTIFICATION);
+```
+
+The `LANDLOCK_CREATE_SUPERVISOR_NOTIFICATION` flag requires `LANDLOCK_CREATE_RULESET_SUPERVISOR` to also be set.
+
+#### Reading Notifications
+
+Notifications are read from the supervisor ruleset file descriptor:
+
+```c
+struct landlock_supervise_event event;
+ssize_t ret = read(supervisor_fd, &event, sizeof(event));
+
+if (ret > 0) {
+    // event.hdr.type: LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS or _NET_ACCESS
+    // event.hdr.cookie: Opaque ID to use in response
+    // event.access_request: Bitmask of denied access rights
+    // event.accessor: PID of the process that triggered the denial
+    // For FS events: event.fd1, event.fd2, event.destname
+    // For network events: event.port
+}
+```
+
+#### Writing Responses
+
+To respond to a notification, write a `landlock_supervise_response`:
+
+```c
+struct landlock_supervise_response resp = {
+    .length = sizeof(resp),
+    .decision = 1,  // 1 to allow, 0 to deny
+    ._reserved = 0,
+    .cookie = event.hdr.cookie,
+};
+
+write(supervisor_fd, &resp, sizeof(resp));
+```
+
+**Important**: The supervisor cannot directly allow a single request. Instead:
+- If `decision = 1`: The supervisor should have already updated the domain rules (via `landlock_add_rule` + `LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR`) to allow this type of access. On syscall restart, the new rules will allow the access.
+- If `decision = 0`: The request will be denied and logged.
+
+### Implementation Details
+
+#### Event Flow
+
+1. **Denial occurs**: A supervisee process attempts an access denied by the supervisor layer
+2. **Quiet check**: If the access is marked quiet (via `LANDLOCK_ADD_RULE_QUIET`), deny immediately without notification
+3. **Event creation**: If the supervisor layer has notifications enabled, create a `landlock_supervise_event_kernel`
+4. **Queue event**: Add the event to the supervisor's notification queue
+5. **Task work**: Schedule a task_work callback to wait for the supervisor's response
+6. **Return -ERESTARTSYS**: The LSM hook returns `-ERESTARTSYS` to restart the syscall
+7. **Task work executes**: Before returning to userspace, the task_work waits for the supervisor's response
+8. **Supervisor reads**: The supervisor reads the event from the supervisor fd
+9. **Supervisor responds**: The supervisor writes a response (after optionally updating rules)
+10. **Syscall restarts**: The syscall restarts and is re-evaluated with potentially updated rules
+
+#### Task Work and Non-Blocking Hooks
+
+To avoid denial-of-service attacks, the notification mechanism does NOT block inside LSM hooks (which may hold locks like inode->i_mutex). Instead:
+
+- The LSM hook returns `-ERESTARTSYS` immediately
+- A task_work callback (`landlock_supervise_wait_work`) is registered
+- The task_work executes before returning to userspace, where it can safely block
+- The task_work waits for the supervisor's response
+- If denied, the task_work sets a flag to force `-EPERM` on syscall restart
+
+#### Waiting for Multiple Supervisors
+
+If multiple layers deny the same access, notifications are sent one at a time, starting with the youngest (most recently added) layer:
+
+1. Send notification for layer N (youngest denying layer)
+2. Wait for response
+3. If allowed, syscall restarts and may trigger notification for layer N-1
+4. If denied, return -EPERM immediately
+
+This simplifies the implementation and avoids the complexity of waiting for multiple responses.
+
+#### Quiet Flag Behavior
+
+The quiet flag serves dual purposes:
+1. Suppresses audit logging (original behavior)
+2. **Prevents supervisor notifications** (new behavior)
+
+If a rule is marked quiet and denies access, the denial happens immediately without notifying the supervisor.
+
+### Example Workflow
+
+```c
+// Supervisor process
+int supervisor_fd = landlock_create_ruleset(&attr, sizeof(attr),
+    LANDLOCK_CREATE_RULESET_SUPERVISOR | 
+    LANDLOCK_CREATE_SUPERVISOR_NOTIFICATION);
+
+// Get supervisee fd and pass to child
+int supervisee_fd = ioctl(supervisor_fd, LANDLOCK_IOCTL_GET_SUPERVISEE_RULESET, 0);
+
+// Child process calls landlock_restrict_self(supervisee_fd, 0)
+
+// Supervisor event loop
+while (1) {
+    struct landlock_supervise_event event;
+    ssize_t ret = read(supervisor_fd, &event, sizeof(event));
+    
+    if (ret > 0) {
+        // Log the denial
+        fprintf(stderr, "Access denied: PID %d wants access 0x%llx\n",
+                event.accessor, event.access_request);
+        
+        // Optionally update rules
+        if (should_allow(&event)) {
+            add_rule_for_access(supervisor_fd, &event);
+            landlock_add_rule(supervisor_fd, ..., LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR);
+        }
+        
+        // Send response
+        struct landlock_supervise_response resp = {
+            .length = sizeof(resp),
+            .decision = should_allow(&event) ? 1 : 0,
+            .cookie = event.hdr.cookie,
+        };
+        write(supervisor_fd, &resp, sizeof(resp));
+    }
+}
+```
+
+### Security Considerations
+
+1. **Supervisor privileges**: The supervisor must not be under the same Landlock domain, or it won't be able to add rules or access paths to make policy decisions
+2. **DoS prevention**: The task_work mechanism prevents unprivileged processes from causing DoS by blocking kernel threads
+3. **Race conditions**: The two-phase approach (update rules, then respond) prevents race conditions where permissions change between decision and enforcement
+
 ## Future work
 
 Implement hash table or not?
-
-Supervisor notification: uAPI - new uAPI or fanotify?
 
 Do mutable domains or supervisor notification first?
