@@ -161,18 +161,19 @@ static void tracked_ruleset_init(struct tracked_ruleset *rs)
  * @rs: Pointer to the tracked ruleset.
  * @pathname: The pathname to search for.
  *
- * Return: Index of the rule if found, or -1 if not found.
+ * Return: Pointer to the rule_entry if found, or NULL if not found.
  */
-static int tracked_ruleset_find(struct tracked_ruleset *rs, const char *pathname)
+static struct rule_entry *tracked_ruleset_find(struct tracked_ruleset *rs,
+					       const char *pathname)
 {
 	size_t i;
 
 	for (i = 0; i < rs->len; i++) {
 		if (rs->entries[i].pathname &&
 		    strcmp(rs->entries[i].pathname, pathname) == 0)
-			return (int)i;
+			return &rs->entries[i];
 	}
-	return -1;
+	return NULL;
 }
 
 /**
@@ -193,8 +194,10 @@ static int tracked_ruleset_insert(struct tracked_ruleset *rs,
 
 		new_entries = realloc(rs->entries,
 				      new_cap * sizeof(*new_entries));
-		if (!new_entries)
+		if (!new_entries) {
+			fprintf(stderr, "Out of memory\n");
 			return -1;
+		}
 		rs->entries = new_entries;
 		rs->cap = new_cap;
 	}
@@ -292,8 +295,9 @@ static int load_and_apply_config(int config_fd, int supervisor_fd,
 		char access_type[16];
 		char path[PATH_MAX];
 		__u64 new_access;
-		int n, idx;
+		int n;
 		struct stat statbuf;
+		struct rule_entry *entry;
 
 		/* Skip empty lines and comments */
 		if (line[0] == '\0' || line[0] == '#' || line[0] == '\n')
@@ -313,11 +317,9 @@ static int load_and_apply_config(int config_fd, int supervisor_fd,
 
 		new_access &= handled_access_fs;
 
-		idx = tracked_ruleset_find(tracked, path);
-		if (idx >= 0) {
+		entry = tracked_ruleset_find(tracked, path);
+		if (entry != NULL) {
 			/* Existing rule - mark to keep and update if needed */
-			struct rule_entry *entry = &tracked->entries[idx];
-
 			entry->should_keep = true;
 
 			if (entry->access != new_access) {
@@ -325,19 +327,28 @@ static int load_and_apply_config(int config_fd, int supervisor_fd,
 					.parent_fd = entry->pathfd,
 				};
 
+				/*
+				 * rw_access is always a superset of ro_access, so we can
+				 * always add or intersect with the new access value directly.
+				 */
+				_Static_assert((ACCESS_FS_ROUGHLY_WRITE | ACCESS_FS_ROUGHLY_READ) == ACCESS_FS_ROUGHLY_WRITE,
+					       "rw_access must be superset of ro_access");
+
 				if (new_access > entry->access) {
 					/* Adding access - use normal add */
-					path_beneath.allowed_access =
-						new_access & ~entry->access;
+					path_beneath.allowed_access = new_access;
 					if (landlock_add_rule(
 						    supervisor_fd,
 						    LANDLOCK_RULE_PATH_BENEATH,
-						    &path_beneath, 0) == 0) {
+						    &path_beneath, 0) < 0) {
+						fprintf(stderr,
+							"Error: landlock_add_rule failed: %s\n",
+							strerror(errno));
+					} else {
 						fprintf(stderr,
 							"supervisor: Added %s access for %s\n",
 							access_to_string(
-								path_beneath
-									.allowed_access,
+								new_access & ~entry->access,
 								access_buf,
 								sizeof(access_buf)),
 							path);
@@ -349,8 +360,11 @@ static int load_and_apply_config(int config_fd, int supervisor_fd,
 						    supervisor_fd,
 						    LANDLOCK_RULE_PATH_BENEATH,
 						    &path_beneath,
-						    LANDLOCK_ADD_RULE_INTERSECT) ==
-					    0) {
+						    LANDLOCK_ADD_RULE_INTERSECT) < 0) {
+						fprintf(stderr,
+							"Error: landlock_add_rule failed: %s\n",
+							strerror(errno));
+					} else {
 						fprintf(stderr,
 							"supervisor: Removed %s access for %s\n",
 							access_to_string(
@@ -394,6 +408,7 @@ static int load_and_apply_config(int config_fd, int supervisor_fd,
 			new_entry.should_keep = true;
 			new_entry.pathname = strdup(path);
 			if (!new_entry.pathname) {
+				fprintf(stderr, "Out of memory\n");
 				close(pathfd);
 				continue;
 			}
@@ -403,7 +418,11 @@ static int load_and_apply_config(int config_fd, int supervisor_fd,
 
 			if (landlock_add_rule(supervisor_fd,
 					      LANDLOCK_RULE_PATH_BENEATH,
-					      &path_beneath, 0) == 0) {
+					      &path_beneath, 0) < 0) {
+				fprintf(stderr,
+					"Error: landlock_add_rule failed: %s\n",
+					strerror(errno));
+			} else {
 				fprintf(stderr,
 					"supervisor: Added %s access for %s\n",
 					access_to_string(new_access, access_buf,
@@ -531,6 +550,37 @@ static void print_usage(const char *prog)
 		"  # Allow read-write access to tmp\n"
 		"  rw /tmp\n",
 		prog);
+}
+
+/**
+ * wait_for_child() - Wait for child process to exit and return exit status.
+ * @child: PID of the child process.
+ *
+ * Waits for the child process, prints a message indicating how it exited,
+ * and returns an appropriate exit code.
+ *
+ * Return: 0 on normal exit, child's exit status otherwise.
+ */
+static int wait_for_child(pid_t child)
+{
+	int status;
+
+	if (waitpid(child, &status, 0) < 0) {
+		perror("waitpid");
+		return 1;
+	}
+
+	if (WIFEXITED(status)) {
+		fprintf(stderr, "Supervisor: Child exited with status %d\n",
+			WEXITSTATUS(status));
+		return WEXITSTATUS(status);
+	} else if (WIFSIGNALED(status)) {
+		fprintf(stderr, "Supervisor: Child killed by signal %d\n",
+			WTERMSIG(status));
+		return 128 + WTERMSIG(status);
+	}
+
+	return 0;
 }
 
 #define LANDLOCK_ABI_LAST 10
@@ -758,21 +808,5 @@ int main(int argc, char *const argv[], char *const *const envp)
 	close(supervisor_fd);
 
 	/* Wait for child to exit */
-	int status;
-	if (waitpid(child, &status, 0) < 0) {
-		perror("waitpid");
-		return 1;
-	}
-
-	if (WIFEXITED(status)) {
-		fprintf(stderr, "Supervisor: Child exited with status %d\n",
-			WEXITSTATUS(status));
-		return WEXITSTATUS(status);
-	} else if (WIFSIGNALED(status)) {
-		fprintf(stderr, "Supervisor: Child killed by signal %d\n",
-			WTERMSIG(status));
-		return 128 + WTERMSIG(status);
-	}
-
-	return 0;
+	return wait_for_child(child);
 }
