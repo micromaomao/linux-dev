@@ -241,3 +241,18 @@ Supervisor committed updated rules
 ```
 
 The supervisor monitors the configuration file using inotify and atomically commits new rules when changes are detected, demonstrating the dynamic rule update capability.
+
+
+## To consider
+
+What if a supervisor wants to clear all rules and reconstruct the supervisor ruleset from scratch?  Forcing it to keep track of all the existing rules and use LANDLOCK_ADD_RULE_INTERSECT to remove them one by one is not ideal.
+
+Intersect or replace?  How about just having a "clear all rules in a ruleset"?
+
+## Future work
+
+Implement hash table or not?
+
+Supervisor notification: uAPI - new uAPI or fanotify?
+
+Do mutable domains or supervisor notification first?
