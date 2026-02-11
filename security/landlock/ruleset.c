@@ -267,6 +267,8 @@ static int insert_rule(struct landlock_ruleset *const ruleset,
 			return 0;
 		}
 
+		/* TODO: remove a rule if it's empty */
+
 		if (WARN_ON_ONCE(this->layers[0].level == 0))
 			return -EINVAL;
 
