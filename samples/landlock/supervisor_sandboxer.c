@@ -206,6 +206,27 @@ static int tracked_ruleset_insert(struct tracked_ruleset *rs,
 }
 
 /**
+ * tracked_ruleset_cleanup() - Free all resources in a tracked ruleset.
+ * @rs: Pointer to the tracked ruleset to clean up.
+ *
+ * Closes all path file descriptors and frees all allocated memory.
+ */
+static void tracked_ruleset_cleanup(struct tracked_ruleset *rs)
+{
+	size_t i;
+
+	for (i = 0; i < rs->len; i++) {
+		if (rs->entries[i].pathfd >= 0)
+			close(rs->entries[i].pathfd);
+		free(rs->entries[i].pathname);
+	}
+	free(rs->entries);
+	rs->entries = NULL;
+	rs->len = 0;
+	rs->cap = 0;
+}
+
+/**
  * access_to_string() - Convert access mask to human-readable string.
  * @access: The access mask to convert.
  * @buf: Buffer to write the string to.
@@ -336,8 +357,8 @@ static int load_and_apply_config(int config_fd, int supervisor_fd,
 						    LANDLOCK_RULE_PATH_BENEATH,
 						    &path_beneath, 0) < 0) {
 						fprintf(stderr,
-							"Error: landlock_add_rule failed: %s\n",
-							strerror(errno));
+							"Error adding access on %s: landlock_add_rule failed: %s\n",
+							path, strerror(errno));
 					} else {
 						fprintf(stderr,
 							"supervisor: Added %s access for %s\n",
@@ -359,8 +380,8 @@ static int load_and_apply_config(int config_fd, int supervisor_fd,
 						    LANDLOCK_ADD_RULE_INTERSECT) <
 					    0) {
 						fprintf(stderr,
-							"Error: landlock_add_rule failed: %s\n",
-							strerror(errno));
+							"Error removing access on %s: landlock_add_rule failed: %s\n",
+							path, strerror(errno));
 					} else {
 						fprintf(stderr,
 							"supervisor: Removed %s access for %s\n",
@@ -417,8 +438,8 @@ static int load_and_apply_config(int config_fd, int supervisor_fd,
 					      LANDLOCK_RULE_PATH_BENEATH,
 					      &path_beneath, 0) < 0) {
 				fprintf(stderr,
-					"Error: landlock_add_rule failed: %s\n",
-					strerror(errno));
+					"Error adding access on %s: landlock_add_rule failed: %s\n",
+					path, strerror(errno));
 			} else {
 				fprintf(stderr,
 					"supervisor: Added %s access for %s\n",
@@ -789,16 +810,7 @@ int main(int argc, char *const argv[], char *const *const envp)
 	}
 
 	/* Clean up tracked ruleset */
-	{
-		size_t i;
-
-		for (i = 0; i < tracked.len; i++) {
-			if (tracked.entries[i].pathfd >= 0)
-				close(tracked.entries[i].pathfd);
-			free(tracked.entries[i].pathname);
-		}
-		free(tracked.entries);
-	}
+	tracked_ruleset_cleanup(&tracked);
 
 	/* Clean up */
 	close(inotify_fd);
