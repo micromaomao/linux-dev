@@ -38,6 +38,7 @@
 #include "setup.h"
 #include "tsync.h"
 #include "supervisor.h"
+#include "supervise.h"
 
 static bool is_initialized(void)
 {
@@ -275,7 +276,7 @@ SYSCALL_DEFINE3(landlock_create_ruleset,
 	struct landlock_ruleset *ruleset;
 	struct landlock_supervisor *supervisor = NULL;
 	const struct file_operations *fops;
-	bool is_supervisor;
+	bool is_supervisor, has_notification;
 	int err, ruleset_fd;
 
 	/* Build-time checks. */
@@ -297,11 +298,16 @@ SYSCALL_DEFINE3(landlock_create_ruleset,
 		return landlock_errata;
 	}
 
-	/* Only SUPERVISOR flag is valid for ruleset creation */
-	if (flags & ~LANDLOCK_CREATE_RULESET_SUPERVISOR)
+	/* Only SUPERVISOR and SUPERVISOR_NOTIFICATION flags are valid for ruleset creation */
+	if (flags & ~(LANDLOCK_CREATE_RULESET_SUPERVISOR | LANDLOCK_CREATE_SUPERVISOR_NOTIFICATION))
 		return -EINVAL;
 
 	is_supervisor = !!(flags & LANDLOCK_CREATE_RULESET_SUPERVISOR);
+	has_notification = !!(flags & LANDLOCK_CREATE_SUPERVISOR_NOTIFICATION);
+
+	/* Notification requires supervisor */
+	if (has_notification && !is_supervisor)
+		return -EINVAL;
 
 	/* Copies raw user space buffer. */
 	err = copy_min_struct_from_user(&ruleset_attr, sizeof(ruleset_attr),
@@ -358,6 +364,20 @@ SYSCALL_DEFINE3(landlock_create_ruleset,
 			landlock_put_ruleset(ruleset);
 			return PTR_ERR(supervisor);
 		}
+		
+		/* Enable notifications if requested */
+		if (has_notification) {
+			struct landlock_supervisor_notif *notif;
+			
+			notif = landlock_create_supervisor_notif(supervisor);
+			if (IS_ERR(notif)) {
+				landlock_put_supervisor(supervisor);
+				landlock_put_ruleset(ruleset);
+				return PTR_ERR(notif);
+			}
+			supervisor->notif = notif;
+		}
+		
 		ruleset->supervisor = supervisor;
 		fops = &supervisor_ruleset_fops;
 	} else {

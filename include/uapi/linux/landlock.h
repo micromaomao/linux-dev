@@ -105,11 +105,21 @@ struct landlock_ruleset_attr {
  *     Rules can be added to the supervisor ruleset after the supervisee has
  *     called landlock_restrict_self(), and changes take effect after calling
  *     landlock_add_rule() with the %LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR flag.
+ *
+ * %LANDLOCK_CREATE_SUPERVISOR_NOTIFICATION
+ *     Enable supervisor notifications. This flag must be combined with
+ *     %LANDLOCK_CREATE_RULESET_SUPERVISOR.  When enabled, access denials
+ *     by this layer (that are not quieted) will generate notification events
+ *     that can be read from the supervisor ruleset file descriptor.
+ *     The supervisor can read events and respond by either allowing the
+ *     specific request or denying it (and optionally updating the domain
+ *     rules for future accesses).
  */
 /* clang-format off */
 #define LANDLOCK_CREATE_RULESET_VERSION			(1U << 0)
 #define LANDLOCK_CREATE_RULESET_ERRATA			(1U << 1)
 #define LANDLOCK_CREATE_RULESET_SUPERVISOR		(1U << 2)
+#define LANDLOCK_CREATE_SUPERVISOR_NOTIFICATION		(1U << 3)
 /* clang-format on */
 
 /**
@@ -493,5 +503,141 @@ struct landlock_net_port_attr {
  */
 #define LANDLOCK_IOC_MAGIC			'L'
 #define LANDLOCK_IOCTL_GET_SUPERVISEE_RULESET	_IO(LANDLOCK_IOC_MAGIC, 0x20)
+
+/**
+ * DOC: supervisor_notification
+ *
+ * Supervisor notification structures
+ * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ *
+ * When a supervisor ruleset is created with %LANDLOCK_CREATE_SUPERVISOR_NOTIFICATION,
+ * access denials by that layer generate notification events that can be read
+ * from the supervisor ruleset file descriptor.
+ *
+ * Event types
+ */
+
+/**
+ * typedef landlock_supervise_event_type_t - Type of supervisor notification event
+ */
+typedef __u16 landlock_supervise_event_type_t;
+
+#define LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS		1
+#define LANDLOCK_SUPERVISE_EVENT_TYPE_NET_ACCESS	2
+
+/**
+ * struct landlock_supervise_event_hdr - Header for supervisor notification events
+ */
+struct landlock_supervise_event_hdr {
+	/**
+	 * @type: Type of the event (FS_ACCESS or NET_ACCESS).
+	 */
+	landlock_supervise_event_type_t type;
+	/**
+	 * @length: Length of the entire struct landlock_supervise_event
+	 * including this header.
+	 */
+	__u16 length;
+	/**
+	 * @cookie: Opaque identifier to be included in the response.
+	 */
+	__u32 cookie;
+};
+
+/**
+ * struct landlock_supervise_event - Supervisor notification event
+ *
+ * This structure is read from the supervisor ruleset file descriptor
+ * when an access denial occurs.  The supervisor should respond by
+ * writing a landlock_supervise_response structure.
+ */
+struct landlock_supervise_event {
+	struct landlock_supervise_event_hdr hdr;
+	/**
+	 * @access_request: Bitmask of access rights that were denied.
+	 * For filesystem events, this is a bitmask of LANDLOCK_ACCESS_FS_* flags.
+	 * For network events, this is a bitmask of LANDLOCK_ACCESS_NET_* flags.
+	 */
+	__u64 access_request;
+	/**
+	 * @accessor: PID of the process that triggered the access denial.
+	 */
+	__kernel_pid_t accessor;
+	union {
+		struct {
+			/**
+			 * @fd1: An open file descriptor for the file (open,
+			 * delete, execute, link, readdir, rename, truncate),
+			 * or the parent directory (for create operations
+			 * targeting its child) being accessed.  Must be
+			 * closed by the reader.
+			 *
+			 * If this points to a parent directory, @destname
+			 * will contain the target filename. If @destname is
+			 * empty, this points to the target file.
+			 */
+			int fd1;
+			/**
+			 * @fd2: For link or rename requests, a second file
+			 * descriptor for the target parent directory.  Must
+			 * be closed by the reader.  @destname contains the
+			 * destination filename.  This field is -1 if not
+			 * used.
+			 */
+			int fd2;
+			/**
+			 * @destname: A filename for a file creation target.
+			 *
+			 * If either of fd1 or fd2 points to a parent
+			 * directory rather than the target file, this is the
+			 * NULL-terminated name of the file that will be
+			 * newly created.
+			 *
+			 * Counting the NULL terminator, this field will
+			 * contain one or more NULL padding at the end so
+			 * that the length of the whole struct
+			 * landlock_supervise_event is a multiple of 8 bytes.
+			 *
+			 * This is a variable length member, and the length
+			 * including the terminating NULL(s) can be derived
+			 * from hdr.length - offsetof(struct
+			 * landlock_supervise_event, destname).
+			 */
+			char destname[];
+		};
+		struct {
+			/**
+			 * @port: For network events, the port number.
+			 */
+			__u16 port;
+		};
+	};
+};
+
+/**
+ * struct landlock_supervise_response - Response to supervisor notification
+ *
+ * This structure is written to the supervisor ruleset file descriptor
+ * to respond to a notification event.
+ */
+struct landlock_supervise_response {
+	/**
+	 * @length: Size of this structure.
+	 */
+	__u16 length;
+	/**
+	 * @decision: Whether to allow the request.
+	 * 0 = deny, 1 = allow.
+	 */
+	__u8 decision;
+	/**
+	 * @_reserved: Reserved, must be zero.
+	 */
+	__u8 _reserved;
+	/**
+	 * @cookie: Cookie previously received in the request.
+	 */
+	__u32 cookie;
+};
 
 #endif /* _UAPI_LINUX_LANDLOCK_H */

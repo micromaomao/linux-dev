@@ -15,6 +15,9 @@
 
 #include "ruleset.h"
 
+/* Forward declaration */
+struct landlock_supervisor_notif;
+
 /**
  * struct landlock_supervisor - Supervisor state for mutable domains
  *
@@ -41,6 +44,11 @@ struct landlock_supervisor {
 	 * The old ruleset is freed after an RCU grace period.
 	 */
 	struct landlock_ruleset __rcu *committed_ruleset;
+	/**
+	 * @notif: Optional notification state for supervisors that want to
+	 * receive denial notifications.  NULL if notifications not enabled.
+	 */
+	struct landlock_supervisor_notif *notif;
 };
 
 struct landlock_supervisor *landlock_create_supervisor(void);

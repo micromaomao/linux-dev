@@ -14,6 +14,7 @@
 
 #include "ruleset.h"
 #include "supervisor.h"
+#include "supervise.h"
 
 /**
  * landlock_create_supervisor - Create a new supervisor
@@ -33,6 +34,7 @@ struct landlock_supervisor *landlock_create_supervisor(void)
 	mutex_init(&supervisor->lock);
 	refcount_set(&supervisor->usage, 1);
 	RCU_INIT_POINTER(supervisor->committed_ruleset, NULL);
+	supervisor->notif = NULL;
 
 	return supervisor;
 }
@@ -51,6 +53,9 @@ static void free_supervisor(struct landlock_supervisor *supervisor)
 		rcu_dereference_protected(supervisor->committed_ruleset, true);
 	if (committed)
 		landlock_put_ruleset(committed);
+
+	if (supervisor->notif)
+		landlock_put_supervisor_notif(supervisor->notif);
 
 	kfree(supervisor);
 }
