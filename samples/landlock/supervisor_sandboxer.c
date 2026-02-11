@@ -327,16 +327,10 @@ static int load_and_apply_config(int config_fd, int supervisor_fd,
 					.parent_fd = entry->pathfd,
 				};
 
-				/*
-				 * rw_access is always a superset of ro_access, so we can
-				 * always add or intersect with the new access value directly.
-				 */
-				_Static_assert((ACCESS_FS_ROUGHLY_WRITE | ACCESS_FS_ROUGHLY_READ) == ACCESS_FS_ROUGHLY_WRITE,
-					       "rw_access must be superset of ro_access");
-
-				if (new_access > entry->access) {
+				path_beneath.allowed_access = new_access;
+				if ((new_access | entry->access) !=
+				    entry->access) {
 					/* Adding access - use normal add */
-					path_beneath.allowed_access = new_access;
 					if (landlock_add_rule(
 						    supervisor_fd,
 						    LANDLOCK_RULE_PATH_BENEATH,
@@ -348,19 +342,22 @@ static int load_and_apply_config(int config_fd, int supervisor_fd,
 						fprintf(stderr,
 							"supervisor: Added %s access for %s\n",
 							access_to_string(
-								new_access & ~entry->access,
+								new_access &
+									~entry->access,
 								access_buf,
 								sizeof(access_buf)),
 							path);
 					}
-				} else {
+				}
+				if ((new_access | entry->access) !=
+				    new_access) {
 					/* Removing access - use intersect */
-					path_beneath.allowed_access = new_access;
 					if (landlock_add_rule(
 						    supervisor_fd,
 						    LANDLOCK_RULE_PATH_BENEATH,
 						    &path_beneath,
-						    LANDLOCK_ADD_RULE_INTERSECT) < 0) {
+						    LANDLOCK_ADD_RULE_INTERSECT) <
+					    0) {
 						fprintf(stderr,
 							"Error: landlock_add_rule failed: %s\n",
 							strerror(errno));
