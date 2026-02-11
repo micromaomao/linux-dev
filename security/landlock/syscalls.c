@@ -522,11 +522,11 @@ SYSCALL_DEFINE3(landlock_create_ruleset,
 			landlock_put_ruleset(ruleset);
 			return PTR_ERR(supervisor);
 		}
-		
+
 		/* Enable notifications if requested */
 		if (has_notification) {
 			struct landlock_supervisor_notif *notif;
-			
+
 			notif = landlock_create_supervisor_notif(supervisor);
 			if (IS_ERR(notif)) {
 				landlock_put_supervisor(supervisor);
@@ -535,7 +535,7 @@ SYSCALL_DEFINE3(landlock_create_ruleset,
 			}
 			supervisor->notif = notif;
 		}
-		
+
 		ruleset->supervisor = supervisor;
 		fops = &supervisor_ruleset_fops;
 	} else {
