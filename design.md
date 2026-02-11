@@ -119,6 +119,25 @@ In order to achieve atomic commit, the supervisor fd cannot actually point to (a
 
 Currently access checks do not take any locks, since the rulesets are immutable, and we want to keep this lockless property.  In order to do this, the live ruleset pointer needs to be RCU-protected, and the freeing of the previously live ruleset needs to be RCU synchronized.  To reduce complexity, this initial implementation uses synchronize_rcu() directly in the calling thread of LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR, and frees the old supervisor ruleset afterwards, but this can be rewritten to use call_rcu() in a future iteration if necessary (which will allow quicker commits).
 
+During access checks, for each step of the path walk, after landlock_unmask_layers()-ing the supervisee rule, if the access is not already allowed, we check for rules in the supervisor ruleset and call landlock_unmask_layers() on them too.
+
+To ensure atomicity of access checks with respect to supervisor commits, we pre-capture the supervisor committed ruleset pointers at the start of the path walk (in `is_access_to_paths_allowed`).  Without this, a race condition could occur:
+
+1. Initially, supervisee ruleset allows access to /a/
+2. An access check for /a/b starts, finds no rules on /a/b, then gets preempted
+3. Supervisor removes the /a rule and adds a rule for /a/b in one commit
+4. The original access check resumes, finds no rules on /a either (seeing the new commit), and incorrectly denies access
+
+By capturing the committed rulesets into a `struct supervisor_committed_cache` (16 pointers, 128 bytes on 64-bit) at the start, the entire path walk uses a consistent snapshot.  This stack space cost is the tradeoff for atomicity.
+
+An alternative approach would be to perform a separate path walk for supervisor rules only if the supervisee walk denies access, but this has drawbacks:
+
+- Path walk is significantly slower than chasing some pointers and doing some extra rb tree searches to check supervisor rules, so this is less efficient.  It will be even less efficient once we switch to a hash table based ruleset implementation, which will reduce the overhead of checking supervisor rules even further.
+- The two path walks can end up walking different paths if a rename happens in the middle.
+- The refer domain check logic would need to be repeated and thus become more complex.
+
+For optional access rights (TRUNCATE, IOCTL_DEV), which are recorded at `open()` time, the supervisor is re-checked at operation time via `check_supervisor_optional_access_recheck()`.  This function reuses `is_access_to_paths_allowed()` to perform a full path walk, ensuring that supervisor rules on parent directories apply to child files.  The re-check also computes updated `deny_masks` and `quiet_optional_accesses` for proper audit logging.  This enables a future notification workflow where the supervisor can add rules in response to access attempts (notifications are not yet implemented).
+
 Here is a diagram of the relevant structures and relationships:
 
 ```
@@ -178,3 +197,47 @@ Here is a diagram of the relevant structures and relationships:
                                ^ The domain ruleset for a
                                  supervisor-controlled process.
 ```
+
+## Using supervisor_sandboxer
+
+The `samples/landlock/supervisor_sandboxer.c` sample demonstrates a file-based supervisor that reads rules from a configuration file and dynamically reloads them when the file changes.
+
+### Configuration File Format
+
+Each line specifies an access type and path:
+```
+ro /path/to/readonly/dir
+rw /path/to/readwrite/dir
+```
+
+- `ro` grants read and execute access
+- `rw` grants full filesystem access
+
+### Example Usage
+
+```bash
+# Create a configuration file
+$ cat > /tmp/sandbox.conf << EOF
+ro /usr
+ro /lib
+rw /tmp
+EOF
+
+# Run a shell under the supervisor
+$ ./supervisor_sandboxer /tmp/sandbox.conf /bin/sh
+Loaded 3 rules from /tmp/sandbox.conf
+Supervisor committed initial rules
+Child process started with PID 12345
+
+# In another terminal, modify the config to allow /home access
+$ echo "ro /home" >> /tmp/sandbox.conf
+
+# The supervisor detects the change and reloads
+Config file changed, reloading rules...
+Loaded 4 rules from /tmp/sandbox.conf
+Supervisor committed updated rules
+
+# Now the sandboxed process can access /home
+```
+
+The supervisor monitors the configuration file using inotify and atomically commits new rules when changes are detected, demonstrating the dynamic rule update capability.

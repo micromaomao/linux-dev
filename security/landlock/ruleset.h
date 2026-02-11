@@ -21,6 +21,7 @@
 #include "object.h"
 
 struct landlock_hierarchy;
+struct landlock_supervisor;
 
 /**
  * struct landlock_layer - Access rights for a given layer
@@ -167,6 +168,19 @@ struct landlock_ruleset {
 	 * domain vanishes.  This is needed for the ptrace protection.
 	 */
 	struct landlock_hierarchy *hierarchy;
+	/**
+	 * @supervisor: Pointer to the supervisor for mutable domains.
+	 *
+	 * For a supervisor ruleset (created with LANDLOCK_CREATE_SUPERVISOR),
+	 * this points to the supervisor struct that manages committed rules.
+	 *
+	 * For a supervisee ruleset (obtained via LANDLOCK_IOCTL_GET_SUPERVISEE_RULESET),
+	 * this points to the attached supervisor.  On landlock_restrict_self(),
+	 * this pointer is copied to the landlock_hierarchy.
+	 *
+	 * For a domain ruleset, this is always NULL (supervisor is in hierarchy).
+	 */
+	struct landlock_supervisor *supervisor;
 	union {
 		/**
 		 * @work_free: Enables to free a ruleset within a lockless
@@ -343,5 +357,34 @@ landlock_init_layer_masks(const struct landlock_ruleset *const domain,
 			  const access_mask_t access_request,
 			  struct layer_access_masks *masks,
 			  const enum landlock_key_type key_type);
+
+/**
+ * struct supervisor_committed_cache - Pre-captured supervisor committed rulesets
+ *
+ * This structure holds pointers to supervisor committed rulesets that were
+ * captured at the start of an access check.  This ensures atomicity of the
+ * access check with respect to supervisor commits - a commit that happens
+ * during the pathwalk won't cause inconsistent results.
+ *
+ * The extra 128 bytes of stack space (16 pointers) is the tradeoff for
+ * atomicity.
+ */
+struct supervisor_committed_cache {
+	struct landlock_ruleset *rulesets[LANDLOCK_MAX_NUM_LAYERS];
+};
+
+void landlock_capture_supervisor_committed(
+	const struct landlock_ruleset *const domain,
+	struct supervisor_committed_cache *cache);
+
+void landlock_release_supervisor_committed(
+	struct supervisor_committed_cache *cache);
+
+bool landlock_check_supervisor_access(
+	const struct landlock_ruleset *const domain,
+	const struct landlock_id id,
+	struct layer_access_masks *const layer_masks,
+	struct collected_rule_flags *const rule_flags,
+	const struct supervisor_committed_cache *cache);
 
 #endif /* _SECURITY_LANDLOCK_RULESET_H */

@@ -28,6 +28,7 @@
 #include "limits.h"
 #include "object.h"
 #include "ruleset.h"
+#include "supervisor.h"
 
 static struct landlock_ruleset *create_ruleset(const u32 num_layers)
 {
@@ -194,11 +195,12 @@ static void build_check_ruleset(void)
  *      any, must be held by the caller.
  * @layers: One or multiple layers to be copied into the new rule.
  * @num_layers: The number of @layers entries.
+ * @intersect: If true, intersect (AND) access rights instead of extend (OR).
  *
  * When user space requests to add a new rule to a ruleset, @layers only
  * contains one entry and this entry is not assigned to any level.  In this
  * case, the new rule will extend @ruleset, similarly to a boolean OR between
- * access rights.
+ * access rights (unless @intersect is true).
  *
  * When merging a ruleset in a domain, or copying a domain, @layers will be
  * added to @ruleset as new constraints, similarly to a boolean AND between
@@ -207,7 +209,8 @@ static void build_check_ruleset(void)
 static int insert_rule(struct landlock_ruleset *const ruleset,
 		       const struct landlock_id id,
 		       const struct landlock_layer (*const layers)[],
-		       const size_t num_layers)
+		       const size_t num_layers,
+		       const bool intersect)
 {
 	struct rb_node **walker_node;
 	struct rb_node *parent_node = NULL;
@@ -249,15 +252,22 @@ static int insert_rule(struct landlock_ruleset *const ruleset,
 			/*
 			 * Extends access rights when the request comes from
 			 * landlock_add_rule(2), i.e. @ruleset is not a domain.
+			 * If @intersect is true, intersect (AND) instead of
+			 * extend (OR).
 			 */
 			if (WARN_ON_ONCE(this->num_layers != 1))
 				return -EINVAL;
 			if (WARN_ON_ONCE(this->layers[0].level != 0))
 				return -EINVAL;
-			this->layers[0].access |= (*layers)[0].access;
+			if (intersect)
+				this->layers[0].access &= (*layers)[0].access;
+			else
+				this->layers[0].access |= (*layers)[0].access;
 			this->layers[0].flags.quiet |= (*layers)[0].flags.quiet;
 			return 0;
 		}
+
+		/* TODO: remove a rule if it's empty */
 
 		if (WARN_ON_ONCE(this->layers[0].level == 0))
 			return -EINVAL;
@@ -316,9 +326,10 @@ int landlock_insert_rule(struct landlock_ruleset *const ruleset,
 			.quiet = !!(flags & LANDLOCK_ADD_RULE_QUIET),
 		},
 	} };
+	const bool intersect = !!(flags & LANDLOCK_ADD_RULE_INTERSECT);
 
 	build_check_layer();
-	return insert_rule(ruleset, id, &layers, ARRAY_SIZE(layers));
+	return insert_rule(ruleset, id, &layers, ARRAY_SIZE(layers), intersect);
 }
 
 static int merge_tree(struct landlock_ruleset *const dst,
@@ -357,7 +368,7 @@ static int merge_tree(struct landlock_ruleset *const dst,
 		layers[0].access = walker_rule->layers[0].access;
 		layers[0].flags = walker_rule->layers[0].flags;
 
-		err = insert_rule(dst, id, &layers, ARRAY_SIZE(layers));
+		err = insert_rule(dst, id, &layers, ARRAY_SIZE(layers), false);
 		if (err)
 			return err;
 	}
@@ -432,7 +443,7 @@ static int inherit_tree(struct landlock_ruleset *const parent,
 		};
 
 		err = insert_rule(child, id, &walker_rule->layers,
-				  walker_rule->num_layers);
+				  walker_rule->num_layers, false);
 		if (err)
 			return err;
 	}
@@ -501,6 +512,7 @@ static void free_ruleset(struct landlock_ruleset *const ruleset)
 #endif /* IS_ENABLED(CONFIG_INET) */
 
 	landlock_put_hierarchy(ruleset->hierarchy);
+	landlock_put_supervisor(ruleset->supervisor);
 	kfree(ruleset);
 }
 
@@ -571,6 +583,12 @@ landlock_merge_ruleset(struct landlock_ruleset *const parent,
 		return ERR_PTR(-ENOMEM);
 
 	refcount_set(&new_dom->hierarchy->usage, 1);
+
+	/* Copy the supervisor reference from the ruleset to the hierarchy */
+	if (ruleset->supervisor) {
+		landlock_get_supervisor(ruleset->supervisor);
+		new_dom->hierarchy->supervisor = ruleset->supervisor;
+	}
 
 	/* ...as a child of @parent... */
 	err = inherit_ruleset(parent, new_dom);
@@ -731,4 +749,210 @@ landlock_init_layer_masks(const struct landlock_ruleset *const domain,
 		masks->access[i] = 0;
 
 	return handled_accesses;
+}
+
+/**
+ * landlock_capture_supervisor_committed - Pre-capture supervisor rulesets
+ *
+ * Captures the committed rulesets from all supervisors in the domain's
+ * hierarchy.  This should be called at the start of an access check (before
+ * pathwalk) to ensure atomicity - a supervisor commit during pathwalk won't
+ * cause inconsistent results where some path components use the old ruleset
+ * and others use the new one.
+ *
+ * @domain: The domain ruleset
+ * @cache: Output structure to store captured ruleset pointers (stack-allocated)
+ */
+void landlock_capture_supervisor_committed(
+	const struct landlock_ruleset *const domain,
+	struct supervisor_committed_cache *cache)
+{
+	struct landlock_hierarchy *hierarchy;
+	size_t layer_level;
+
+	memset(cache, 0, sizeof(*cache));
+
+	if (!domain || !domain->hierarchy)
+		return;
+
+	hierarchy = domain->hierarchy;
+
+	scoped_guard(rcu)
+	{
+		for (layer_level = domain->num_layers; layer_level > 0;
+		     layer_level--) {
+			const size_t layer_idx = layer_level - 1;
+			struct landlock_ruleset *committed;
+
+			if (!hierarchy)
+				break;
+
+			if (hierarchy->supervisor) {
+				committed =
+					landlock_get_supervisor_committed_ruleset_rcu(
+						hierarchy->supervisor);
+				if (committed)
+					landlock_get_ruleset(committed);
+				cache->rulesets[layer_idx] = committed;
+			}
+
+			hierarchy = hierarchy->parent;
+		}
+	}
+}
+
+/**
+ * landlock_release_supervisor_committed - Release captured supervisor rulesets
+ *
+ * @cache: The cache to release.
+ *
+ * Decrements the reference count on all captured rulesets.  Must be called
+ * after landlock_capture_supervisor_committed() when the cache is no longer
+ * needed.
+ */
+void landlock_release_supervisor_committed(struct supervisor_committed_cache *cache)
+{
+	size_t i;
+
+	for (i = 0; i < LANDLOCK_MAX_NUM_LAYERS; i++) {
+		if (cache->rulesets[i])
+			landlock_put_ruleset(cache->rulesets[i]);
+	}
+}
+
+/**
+ * landlock_check_supervisor_access - Check if supervisor rulesets allow access
+ *
+ * When the supervisee ruleset denies access for certain layers, this function
+ * checks if the supervisor rulesets for those layers allow the access.
+ *
+ * For an access to be allowed by supervisors:
+ * 1. Each denying layer must have a supervisor with a committed ruleset
+ * 2. Each supervisor's committed ruleset must have a rule that allows the
+ *    requested access for the given object
+ *
+ * @domain: The domain ruleset (used for hierarchy traversal)
+ * @id: The object identifier to check access for
+ * @layer_masks: Per-layer masks of unfulfilled access rights (modified in place)
+ * @cache: Pre-captured supervisor rulesets (NULL to fetch on demand, which is
+ *         less atomic but still works for single-point checks)
+ *
+ * Returns: true if all unfulfilled accesses are satisfied by supervisor
+ *          rulesets, false otherwise.
+ */
+bool landlock_check_supervisor_access(
+	const struct landlock_ruleset *const domain,
+	const struct landlock_id id,
+	struct layer_access_masks *const layer_masks,
+	struct collected_rule_flags *const rule_flags,
+	const struct supervisor_committed_cache *cache)
+{
+	struct landlock_hierarchy *hierarchy;
+	size_t layer_level;
+	char single_layer_rule[struct_size_t(struct landlock_rule, layers,
+					     1)] = { 0 };
+	struct landlock_rule *modified_rule =
+		(struct landlock_rule *)single_layer_rule;
+
+	if (!domain || !domain->hierarchy || !layer_masks)
+		return false;
+
+	/*
+	 * Traverse the hierarchy from the newest layer to the oldest.
+	 * The hierarchy is a linked list where the current domain's
+	 * hierarchy corresponds to layer num_layers, and each parent
+	 * corresponds to the previous layer.
+	 */
+	hierarchy = domain->hierarchy;
+
+	for (layer_level = domain->num_layers; layer_level > 0; layer_level--) {
+		const size_t layer_idx = layer_level - 1;
+		access_mask_t unfulfilled;
+		struct landlock_ruleset *committed;
+		const struct landlock_rule *rule;
+
+		if (!hierarchy) {
+			/*
+			 * This shouldn't happen - there should be as many
+			 * hierarchy nodes as layers.
+			 */
+			WARN_ON_ONCE(1);
+			return false;
+		}
+
+		unfulfilled = layer_masks->access[layer_idx];
+		if (!unfulfilled) {
+			/* This layer is already satisfied, check next */
+			hierarchy = hierarchy->parent;
+			continue;
+		}
+
+		/*
+		 * Use pre-captured committed ruleset if available, otherwise
+		 * fetch on demand (less atomic but works for single checks).
+		 */
+		if (cache) {
+			committed = cache->rulesets[layer_idx];
+		} else {
+			struct landlock_supervisor *supervisor =
+				hierarchy->supervisor;
+			if (!supervisor) {
+				/*
+				 * This layer denied access but has no supervisor,
+				 * so there's no way to override.
+				 */
+				return false;
+			}
+			committed = landlock_get_supervisor_committed_ruleset_rcu(
+				supervisor);
+		}
+
+		if (!committed) {
+			/*
+			 * Supervisor doesn't exist or has no committed rules,
+			 * which means no rules allow access.
+			 */
+			return false;
+		}
+
+		/* TODO: remove on submission */
+		trace_printk("layer %zu: committed = %p\n", layer_idx,
+			     committed);
+
+		rule = landlock_find_rule(committed, id);
+		if (!rule) {
+			/* No rule for this object in supervisor ruleset */
+			/* TODO: remove on submission */
+			trace_printk("no rule for inode %p\n", id.key.object);
+			return false;
+		}
+		/* TODO: remove on submission */
+		trace_printk(
+			"yes rule for inode %p, num_layers = %u, access = %x\n",
+			id.key.object, rule->num_layers,
+			rule->num_layers > 0 ? rule->layers[0].access : 0);
+
+		/*
+		 * Check if the supervisor rule grants all the unfulfilled
+		 * access rights.  Supervisor rules only have one layer at
+		 * level 0.
+		 */
+		if (WARN_ON_ONCE(rule->num_layers != 1)) {
+			return false;
+		}
+
+		modified_rule->num_layers = 1;
+		modified_rule->layers[0] = rule->layers[0];
+		modified_rule->layers[0].level = layer_level;
+
+		/* TODO: extract what's inside the layer for loop in
+		 * landlock_unmask_layers to another function and use that */
+		if (landlock_unmask_layers(modified_rule, layer_masks, rule_flags)) {
+			return true;
+		}
+
+		hierarchy = hierarchy->parent;
+	}
+
+	return false;
 }
