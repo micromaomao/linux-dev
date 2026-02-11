@@ -357,7 +357,7 @@ static int load_and_apply_config(int config_fd, int supervisor_fd,
 						    LANDLOCK_RULE_PATH_BENEATH,
 						    &path_beneath, 0) < 0) {
 						fprintf(stderr,
-							"Error adding access on %s: landlock_add_rule failed: %s\n",
+							"Error expanding access on %s: landlock_add_rule failed: %s\n",
 							path, strerror(errno));
 					} else {
 						fprintf(stderr,
