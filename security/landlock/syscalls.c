@@ -569,11 +569,10 @@ static int add_rule_net_port(struct landlock_ruleset *ruleset,
 
 SYSCALL_DEFINE4(landlock_add_rule, const int, ruleset_fd,
 		const enum landlock_rule_type, rule_type,
-		const void __user *const, rule_attr, const __u32, flags)
+		const void __user *const, rule_attr, __u32, flags)
 {
 	struct landlock_ruleset *ruleset __free(landlock_put_ruleset) = NULL;
 	bool commit_supervisor;
-	__u32 rule_flags;
 	int err;
 
 	if (!is_initialized())
@@ -588,7 +587,7 @@ SYSCALL_DEFINE4(landlock_add_rule, const int, ruleset_fd,
 		return PTR_ERR(ruleset);
 
 	commit_supervisor = !!(flags & LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR);
-	rule_flags = flags & ~LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR;
+	flags = flags & ~LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR;
 
 	if (commit_supervisor && !ruleset->supervisor)
 		return -EINVAL;
@@ -596,11 +595,10 @@ SYSCALL_DEFINE4(landlock_add_rule, const int, ruleset_fd,
 	if (rule_type) {
 		switch (rule_type) {
 		case LANDLOCK_RULE_PATH_BENEATH:
-			err = add_rule_path_beneath(ruleset, rule_attr,
-						    rule_flags);
+			err = add_rule_path_beneath(ruleset, rule_attr, flags);
 			break;
 		case LANDLOCK_RULE_NET_PORT:
-			err = add_rule_net_port(ruleset, rule_attr, rule_flags);
+			err = add_rule_net_port(ruleset, rule_attr, flags);
 			break;
 		default:
 			return -EINVAL;
