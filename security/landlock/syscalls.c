@@ -149,6 +149,164 @@ static ssize_t fop_dummy_write(struct file *const filp,
 }
 
 /*
+ * Supervisor notification read - reads one event from the queue
+ *
+ * Returns event data to userspace. Events are moved from event_queue
+ * to notified_events after being read.
+ */
+static ssize_t fop_supervisor_notif_read(struct file *const filp,
+					 char __user *const buf,
+					 const size_t size, loff_t *const ppos)
+{
+	struct landlock_ruleset *ruleset = filp->private_data;
+	struct landlock_supervisor *supervisor;
+	struct landlock_supervisor_notif *notif;
+	struct landlock_supervise_event_kernel *event;
+	struct landlock_supervise_event __user *user_event;
+	size_t event_size;
+	int ret;
+
+	if (!ruleset || !ruleset->supervisor)
+		return -EBADFD;
+
+	supervisor = ruleset->supervisor;
+	notif = supervisor->notif;
+
+	if (!notif)
+		return -EINVAL;
+
+	/* Wait for an event to be available */
+	ret = wait_event_interruptible(notif->poll_event_wq,
+				       !list_empty(&notif->event_queue));
+	if (ret)
+		return ret;
+
+	spin_lock(&notif->lock);
+
+	if (list_empty(&notif->event_queue)) {
+		spin_unlock(&notif->lock);
+		return -EAGAIN;
+	}
+
+	event = list_first_entry(&notif->event_queue,
+				struct landlock_supervise_event_kernel, node);
+	landlock_get_supervise_event(event);
+	list_del(&event->node);
+	list_add_tail(&event->node, &notif->notified_events);
+	event->state = LANDLOCK_SUPERVISE_EVENT_NOTIFIED;
+
+	spin_unlock(&notif->lock);
+
+	/* Calculate event size */
+	event_size = offsetof(struct landlock_supervise_event, destname);
+	if (event->type == LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS &&
+	    (event->target_1_is_new || event->target_2_is_new)) {
+		/* TODO: Add destname support */
+		event_size = ALIGN(event_size + 1, 8); /* +1 for NULL terminator */
+	}
+
+	if (size < event_size) {
+		landlock_put_supervise_event(event);
+		return -EINVAL;
+	}
+
+	user_event = (struct landlock_supervise_event __user *)buf;
+
+	/* Fill in header */
+	if (put_user((__u16)event->type, &user_event->hdr.type) ||
+	    put_user((__u16)event_size, &user_event->hdr.length) ||
+	    put_user(event->event_id, &user_event->hdr.cookie) ||
+	    put_user(event->access_request, &user_event->access_request) ||
+	    put_user(pid_vnr(event->accessor), &user_event->accessor)) {
+		landlock_put_supervise_event(event);
+		return -EFAULT;
+	}
+
+	/* Fill in type-specific data */
+	if (event->type == LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS) {
+		int fd1 = -1, fd2 = -1;
+
+		/* TODO: Open fds for paths - for now just fail */
+		/* This requires more complex implementation to open O_PATH fds */
+		if (put_user(fd1, &user_event->fd1) ||
+		    put_user(fd2, &user_event->fd2)) {
+			landlock_put_supervise_event(event);
+			return -EFAULT;
+		}
+	} else if (event->type == LANDLOCK_SUPERVISE_EVENT_TYPE_NET_ACCESS) {
+		if (put_user(event->port, &user_event->port)) {
+			landlock_put_supervise_event(event);
+			return -EFAULT;
+		}
+	}
+
+	landlock_put_supervise_event(event);
+	return event_size;
+}
+
+/*
+ * Supervisor notification write - writes a response to an event
+ *
+ * Looks up the event by cookie and sets its state to allowed or denied.
+ */
+static ssize_t fop_supervisor_notif_write(struct file *const filp,
+					  const char __user *const buf,
+					  const size_t size, loff_t *const ppos)
+{
+	struct landlock_ruleset *ruleset = filp->private_data;
+	struct landlock_supervisor *supervisor;
+	struct landlock_supervisor_notif *notif;
+	struct landlock_supervise_response resp;
+	struct landlock_supervise_event_kernel *event, *found = NULL;
+	bool allow;
+
+	if (!ruleset || !ruleset->supervisor)
+		return -EBADFD;
+
+	supervisor = ruleset->supervisor;
+	notif = supervisor->notif;
+
+	if (!notif)
+		return -EINVAL;
+
+	if (size < sizeof(resp))
+		return -EINVAL;
+
+	if (copy_from_user(&resp, buf, sizeof(resp)))
+		return -EFAULT;
+
+	if (resp.length != sizeof(resp) || resp._reserved != 0)
+		return -EINVAL;
+
+	allow = !!resp.decision;
+
+	/* Find the event */
+	spin_lock(&notif->lock);
+
+	list_for_each_entry(event, &notif->notified_events, node) {
+		if (event->event_id == resp.cookie) {
+			found = event;
+			landlock_get_supervise_event(found);
+			list_del(&event->node);
+			break;
+		}
+	}
+
+	spin_unlock(&notif->lock);
+
+	if (!found)
+		return -ENOENT;
+
+	/* Set event state */
+	found->state = allow ? LANDLOCK_SUPERVISE_EVENT_ALLOWED :
+			       LANDLOCK_SUPERVISE_EVENT_DENIED;
+	wake_up_var(found);
+	landlock_put_supervise_event(found);
+
+	return sizeof(resp);
+}
+
+/*
  * A ruleset file descriptor enables to build a ruleset by adding (i.e.
  * writing) rule after rule, without relying on the task's context.  This
  * reentrant design is also used in a read way to enforce the ruleset on the
@@ -219,8 +377,8 @@ static long fop_supervisor_ioctl(struct file *filp, unsigned int cmd,
 
 static const struct file_operations supervisor_ruleset_fops = {
 	.release = fop_ruleset_release,
-	.read = fop_dummy_read,
-	.write = fop_dummy_write,
+	.read = fop_supervisor_notif_read,
+	.write = fop_supervisor_notif_write,
 	.unlocked_ioctl = fop_supervisor_ioctl,
 	/* We don't take pointer argument, so no need to compat_ptr_ioctl */
 	.compat_ioctl = fop_supervisor_ioctl,
