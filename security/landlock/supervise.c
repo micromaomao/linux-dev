@@ -14,6 +14,7 @@
 
 #include "supervise.h"
 #include "supervisor.h"
+#include "ruleset.h"
 
 #ifdef pr_fmt
 #undef pr_fmt
@@ -103,4 +104,65 @@ void landlock_put_supervise_event(struct landlock_supervise_event_kernel *event)
 
 		kfree(event);
 	}
+}
+
+struct landlock_supervise_event_kernel *
+landlock_queue_supervisor_event(const struct landlock_hierarchy *hierarchy,
+				const enum landlock_supervise_event_type request_type,
+				const access_mask_t access_request,
+				const struct path *path1,
+				const struct path *path2,
+				const bool path1_new, const bool path2_new,
+				const __u16 port)
+{
+	struct landlock_supervisor *supervisor;
+	struct landlock_supervisor_notif *notif;
+	struct landlock_supervise_event_kernel *event;
+
+	if (!hierarchy || !hierarchy->supervisor)
+		return ERR_PTR(-EINVAL);
+
+	supervisor = hierarchy->supervisor;
+	notif = supervisor->notif;
+
+	if (!notif)
+		return ERR_PTR(-EINVAL);
+
+	event = kzalloc(sizeof(*event), GFP_KERNEL_ACCOUNT);
+	if (!event)
+		return ERR_PTR(-ENOMEM);
+
+	refcount_set(&event->usage, 1);
+	event->state = LANDLOCK_SUPERVISE_EVENT_NEW;
+	event->type = request_type;
+	event->access_request = access_request;
+	event->accessor = get_pid(task_pid(current));
+
+	switch (request_type) {
+	case LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS:
+		if (path1) {
+			event->target_1 = *path1;
+			path_get(&event->target_1);
+			event->target_1_is_new = path1_new;
+		}
+		if (path2) {
+			event->target_2 = *path2;
+			path_get(&event->target_2);
+			event->target_2_is_new = path2_new;
+		}
+		break;
+	case LANDLOCK_SUPERVISE_EVENT_TYPE_NET_ACCESS:
+		event->port = port;
+		break;
+	}
+
+	spin_lock(&notif->lock);
+	event->event_id = notif->next_event_id++;
+	landlock_get_supervise_event(event);
+	list_add_tail(&event->node, &notif->event_queue);
+	spin_unlock(&notif->lock);
+
+	wake_up(&notif->poll_event_wq);
+
+	return event;
 }

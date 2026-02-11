@@ -100,6 +100,35 @@ landlock_create_supervisor_notif(struct landlock_supervisor *supervisor);
 void landlock_get_supervisor_notif(struct landlock_supervisor_notif *notif);
 void landlock_put_supervisor_notif(struct landlock_supervisor_notif *notif);
 
+/* Forward declaration for ruleset */
+struct landlock_hierarchy;
+
+/**
+ * landlock_queue_supervisor_event - Queue an event for supervisor notification
+ *
+ * @hierarchy: The layer's hierarchy containing the supervisor
+ * @request_type: Type of access request
+ * @access_request: Bitmask of denied access rights
+ * @path1: First path (for FS events), may be NULL
+ * @path2: Second path (for FS events, e.g., rename dest), may be NULL
+ * @path1_new: Whether path1 is a new file being created
+ * @path2_new: Whether path2 is a new file being created
+ * @port: Port number (for network events)
+ *
+ * Creates and queues a notification event. The calling task will later
+ * wait for supervisor response via task_work.
+ *
+ * Returns: The queued event (with a reference), or ERR_PTR on error.
+ */
+struct landlock_supervise_event_kernel *
+landlock_queue_supervisor_event(const struct landlock_hierarchy *hierarchy,
+				const enum landlock_supervise_event_type request_type,
+				const access_mask_t access_request,
+				const struct path *path1,
+				const struct path *path2,
+				const bool path1_new, const bool path2_new,
+				const __u16 port);
+
 static inline void
 landlock_get_supervise_event(struct landlock_supervise_event_kernel *event)
 {
