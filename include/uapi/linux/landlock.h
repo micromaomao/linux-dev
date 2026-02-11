@@ -50,6 +50,15 @@ struct landlock_ruleset_attr {
 	 * resources (e.g. IPCs).
 	 */
 	__u64 scoped;
+	/**
+	 * @supervisor_fd: Placeholder to store the supervisor file
+	 * descriptor when %LANDLOCK_CREATE_RULESET_SUPERVISE is set.
+	 */
+	__s32 supervisor_fd;
+	/**
+	 * @pad: Unused, must be zero.
+	 */
+	__u32 pad;
 };
 
 /*
@@ -60,6 +69,7 @@ struct landlock_ruleset_attr {
  */
 /* clang-format off */
 #define LANDLOCK_CREATE_RULESET_VERSION			(1U << 0)
+#define LANDLOCK_CREATE_RULESET_SUPERVISE		(1U << 1)
 /* clang-format on */
 
 /**
@@ -260,6 +270,7 @@ struct landlock_net_port_attr {
 #define LANDLOCK_ACCESS_FS_TRUNCATE			(1ULL << 14)
 #define LANDLOCK_ACCESS_FS_IOCTL_DEV			(1ULL << 15)
 /* clang-format on */
+/* Add extra entries to access_request_to_string too */
 
 /**
  * DOC: net_access
@@ -282,6 +293,7 @@ struct landlock_net_port_attr {
 #define LANDLOCK_ACCESS_NET_BIND_TCP			(1ULL << 0)
 #define LANDLOCK_ACCESS_NET_CONNECT_TCP			(1ULL << 1)
 /* clang-format on */
+/* Add extra entries to access_request_to_string too */
 
 /**
  * DOC: scope
@@ -307,5 +319,112 @@ struct landlock_net_port_attr {
 #define LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET		(1ULL << 0)
 #define LANDLOCK_SCOPE_SIGNAL		                (1ULL << 1)
 /* clang-format on*/
+
+/**
+ * DOC: supervisor
+ *
+ * Supervise mode
+ * ~~~~~~~~~~~~~~
+ *
+ * TODO
+ */
+
+typedef __u16 landlock_supervise_event_type_t;
+/* clang-format off */
+#define LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS         1
+#define LANDLOCK_SUPERVISE_EVENT_TYPE_NET_ACCESS        2
+/* clang-format on */
+
+struct landlock_supervise_event_hdr {
+	/**
+	 * @type: Type of the event.
+	 */
+	landlock_supervise_event_type_t type;
+	/**
+	 * @length: Length of the entire struct
+	 * landlock_supervise_event including this header.
+	 */
+	__u16 length;
+	/**
+	 * @cookie: Opaque identifier to be included in the response.
+	 */
+	__u32 cookie;
+};
+
+struct landlock_supervise_event {
+	struct landlock_supervise_event_hdr hdr;
+	__u64 access_request;
+	__kernel_pid_t accessor;
+	union {
+		struct {
+			/**
+			 * @fd1: An open file descriptor for the file (open,
+			 * delete, execute, link, readdir, rename, truncate),
+			 * or the parent directory (for create operations
+			 * targeting its child) being accessed.  Must be
+			 * closed by the reader.
+			 *
+			 * If this points to a parent directory, @destname
+			 * will contain the target filename. If @destname is
+			 * empty, this points to the target file.
+			 */
+			int fd1;
+			/**
+			 * @fd2: For link or rename requests, a second file
+			 * descriptor for the target parent directory.  Must
+			 * be closed by the reader.  @destname contains the
+			 * destination filename.  This field is -1 if not
+			 * used.
+			 */
+			int fd2;
+			/**
+			 * @destname: A filename for a file creation target.
+			 *
+			 * If either of fd1 or fd2 points to a parent
+			 * directory rather than the target file, this is the
+			 * NULL-terminated name of the file that will be
+			 * newly created.
+			 *
+			 * Counting the NULL terminator, this field will
+			 * contain one or more NULL padding at the end so
+			 * that the length of the whole struct
+			 * landlock_supervise_event is a multiple of 8 bytes.
+			 *
+			 * This is a variable length member, and the length
+			 * including the terminating NULL(s) can be derived
+			 * from hdr.length - offsetof(struct
+			 * landlock_supervise_event, destname).
+			 */
+			char destname[];
+		};
+		struct {
+			__u16 port;
+		};
+	};
+};
+
+/* clang-format off */
+#define LANDLOCK_SUPERVISE_DECISION_DENY              0
+#define LANDLOCK_SUPERVISE_DECISION_ALLOW             1
+/* clang-format on */
+
+struct landlock_supervise_response {
+	/**
+	 * @length: Size of this structure.
+	 */
+	__u16 length;
+	/**
+	 * @decision: Whether to allow the request.
+	 */
+	__u8 decision;
+	/**
+	 * @pad: Reserved, must be zero.
+	 */
+	__u8 _reserved;
+	/**
+	 * @cookie: Cookie previously received in the request.
+	 */
+	__u32 cookie;
+};
 
 #endif /* _UAPI_LINUX_LANDLOCK_H */

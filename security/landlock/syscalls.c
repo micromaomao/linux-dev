@@ -32,6 +32,7 @@
 #include "limits.h"
 #include "net.h"
 #include "ruleset.h"
+#include "supervise.h"
 #include "setup.h"
 
 static bool is_initialized(void)
@@ -90,6 +91,9 @@ static void build_check_abi(void)
 	struct landlock_path_beneath_attr path_beneath_attr;
 	struct landlock_net_port_attr net_port_attr;
 	size_t ruleset_size, path_beneath_size, net_port_size;
+	struct landlock_supervise_event *event;
+	struct landlock_supervise_response response;
+	size_t supervise_evt_size, supervise_response_size;
 
 	/*
 	 * For each user space ABI structures, first checks that there is no
@@ -99,8 +103,10 @@ static void build_check_abi(void)
 	ruleset_size = sizeof(ruleset_attr.handled_access_fs);
 	ruleset_size += sizeof(ruleset_attr.handled_access_net);
 	ruleset_size += sizeof(ruleset_attr.scoped);
+	ruleset_size += sizeof(ruleset_attr.supervisor_fd);
+	ruleset_size += sizeof(ruleset_attr.pad);
 	BUILD_BUG_ON(sizeof(ruleset_attr) != ruleset_size);
-	BUILD_BUG_ON(sizeof(ruleset_attr) != 24);
+	BUILD_BUG_ON(sizeof(ruleset_attr) != 32);
 
 	path_beneath_size = sizeof(path_beneath_attr.allowed_access);
 	path_beneath_size += sizeof(path_beneath_attr.parent_fd);
@@ -111,6 +117,31 @@ static void build_check_abi(void)
 	net_port_size += sizeof(net_port_attr.port);
 	BUILD_BUG_ON(sizeof(net_port_attr) != net_port_size);
 	BUILD_BUG_ON(sizeof(net_port_attr) != 16);
+
+	/* Check that anything before the destname does not have holes */
+	supervise_evt_size = sizeof(event->hdr.type);
+	supervise_evt_size += sizeof(event->hdr.length);
+	supervise_evt_size += sizeof(event->hdr.cookie);
+	BUILD_BUG_ON(offsetofend(typeof(*event), hdr) != 8);
+	supervise_evt_size += sizeof(event->access_request);
+	supervise_evt_size += sizeof(event->accessor);
+	supervise_evt_size += sizeof(event->fd1);
+	supervise_evt_size += sizeof(event->fd2);
+	BUILD_BUG_ON(offsetof(typeof(*event), destname) != supervise_evt_size);
+	BUILD_BUG_ON(offsetof(typeof(*event), destname) != 28);
+
+	/*
+	 * Make sure this struct does not end up with stricter
+	 * alignment than 8
+	 */
+	BUILD_BUG_ON(__alignof__(typeof(*event)) != 8);
+
+	supervise_response_size = sizeof(response.length);
+	supervise_response_size += sizeof(response.decision);
+	supervise_response_size += sizeof(response._reserved);
+	supervise_response_size += sizeof(response.cookie);
+	BUILD_BUG_ON(sizeof(response) != supervise_response_size);
+	BUILD_BUG_ON(sizeof(response) != 8);
 }
 
 /* Ruleset handling */
@@ -139,6 +170,17 @@ static ssize_t fop_dummy_write(struct file *const filp,
 	return -EINVAL;
 }
 
+static void fop_ruleset_fdinfo(struct seq_file *const m, struct file *const f)
+{
+	struct landlock_ruleset *const ruleset = f->private_data;
+
+	seq_printf(m, "num_rules: %d\n", ruleset->num_rules);
+	if (ruleset->layer_stack[0].supervisor)
+		seq_puts(m, "supervisor: yes\n");
+	else
+		seq_puts(m, "supervisor: no\n");
+}
+
 /*
  * A ruleset file descriptor enables to build a ruleset by adding (i.e.
  * writing) rule after rule, without relying on the task's context.  This
@@ -149,18 +191,522 @@ static const struct file_operations ruleset_fops = {
 	.release = fop_ruleset_release,
 	.read = fop_dummy_read,
 	.write = fop_dummy_write,
+	.show_fdinfo = fop_ruleset_fdinfo,
 };
 
-#define LANDLOCK_ABI_VERSION 6
+static int fop_supervisor_release(struct inode *const inode,
+				  struct file *const filp)
+{
+	struct landlock_supervisor *supervisor = filp->private_data;
+
+	landlock_put_supervisor(supervisor);
+	return 0;
+}
+
+/**
+ * Lifetime of return value is tied to p.
+ */
+static struct path p_parent(struct path p)
+{
+	struct path parent_path = { .mnt = p.mnt,
+				    .dentry = p.dentry->d_parent };
+	return parent_path;
+}
+
+/**
+ * Open an O_PATH fd of a target file for passing to the
+ * supervisor.
+ */
+static int supervise_fs_fd_open_install(struct path *path)
+{
+	int fd = get_unused_fd_flags(O_CLOEXEC);
+	if (fd < 0) {
+		pr_warn("get_unused_fd_flags: %pe\n", ERR_PTR(fd));
+		return fd;
+	}
+	struct file *f = dentry_open(path, O_PATH | O_CLOEXEC, current_cred());
+	if (IS_ERR(f)) {
+		pr_warn("Failed to open fd in supervisor: %ld\n", PTR_ERR(f));
+		put_unused_fd(fd);
+		return PTR_ERR(f);
+	}
+	fd_install(fd, f);
+	return fd;
+}
+
+static ssize_t fop_supervisor_read(struct file *const filp,
+				   char __user *const buf, const size_t size,
+				   loff_t *const ppos)
+{
+	struct landlock_supervisor *supervisor = filp->private_data;
+	struct landlock_supervise_event_kernel *event = NULL;
+	bool found = false;
+	struct landlock_supervise_event *user_event = NULL;
+	size_t destname_size = 0, event_size = 0;
+	const size_t dest_offset =
+		offsetof(struct landlock_supervise_event, destname);
+	const char *destname = NULL; /* Lifetime tied to event */
+	int fd1 = -1, fd2 = -1, ret = 0;
+	bool nonblock = filp->f_flags & O_NONBLOCK;
+	struct path parent_path;
+
+	if (WARN_ON(!supervisor))
+		return -ENODEV;
+
+	if (size < sizeof(struct landlock_supervise_event))
+		return -EINVAL;
+
+retry:
+	spin_lock(&supervisor->lock);
+
+	/*
+	 * Find the first new event (but really, all events in this
+	 * list should be new)
+	 */
+	list_for_each_entry(event, &supervisor->event_queue, node) {
+		if (event->state == LANDLOCK_SUPERVISE_EVENT_NEW) {
+			found = true;
+			break;
+		}
+	}
+
+	if (!found) {
+		spin_unlock(&supervisor->lock);
+		if (nonblock) {
+			return -EAGAIN;
+		}
+
+		/*
+		 * Wait for events to be added to the queue.
+		 * Not sure if we can call list_empty() without the lock
+		 * here, hence true.
+		 */
+		ret = wait_event_interruptible(supervisor->poll_event_wq, true);
+		if (ret)
+			return ret;
+
+		goto retry;
+	}
+
+	/*
+	 * We take the event out of the list and let other readers
+	 * carry on.  We take over the event's ownership from the
+	 * list (hence no get/put).
+	 */
+	list_del(&event->node);
+	spin_unlock(&supervisor->lock);
+
+	if (event->type == LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS) {
+		struct dentry *dest_dentry;
+
+		if (WARN_ON(event->target_1_is_new && event->target_2_is_new)) {
+			ret = -EAGAIN;
+			goto fail_deny;
+		}
+
+		/*
+		 * Get destname out here so that we know the event's size.
+		 * We separate the lifetime of destname away from the
+		 * kernel event so we can move the copy outside of lock.
+		 */
+		if (event->target_1.dentry && event->target_1_is_new) {
+			dest_dentry = event->target_1.dentry;
+			destname = (char *)dest_dentry->d_name.name;
+			destname_size = dest_dentry->d_name.len + 1;
+		} else if (event->target_2.dentry && event->target_2_is_new) {
+			dest_dentry = event->target_2.dentry;
+			destname = (char *)dest_dentry->d_name.name;
+			destname_size = dest_dentry->d_name.len + 1;
+		}
+	}
+
+	event_size = ALIGN(dest_offset + destname_size,
+			   __alignof__(typeof(*user_event)));
+
+	if (event_size > size) {
+		ret = -EINVAL;
+		goto fail_readd_event;
+	}
+
+	/* We will copy the destname directly to user buffer */
+	user_event =
+		kzalloc(sizeof(struct landlock_supervise_event), GFP_KERNEL);
+	if (!user_event)
+		return -ENOMEM;
+
+	user_event->hdr.type = event->type;
+	user_event->hdr.length = event_size;
+	user_event->hdr.cookie = event->event_id;
+	user_event->access_request = event->access_request;
+	user_event->accessor = pid_vnr(event->accessor);
+
+	/* Set up the appropriate file descriptors based on the type */
+	if (event->type == LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS) {
+		if (event->target_1.dentry) {
+			if (event->target_1_is_new) {
+				parent_path = p_parent(event->target_1);
+				fd1 = supervise_fs_fd_open_install(
+					&parent_path);
+				if (fd1 < 0) {
+					ret = fd1;
+					goto fail_deny_or_readd;
+				}
+			} else {
+				fd1 = supervise_fs_fd_open_install(
+					&event->target_1);
+				if (fd1 < 0) {
+					ret = fd1;
+					goto fail_deny_or_readd;
+				}
+			}
+		}
+
+		if (event->target_2.dentry) {
+			if (event->target_2_is_new) {
+				parent_path = p_parent(event->target_2);
+				fd2 = supervise_fs_fd_open_install(
+					&parent_path);
+				if (fd2 < 0) {
+					ret = fd2;
+					goto fail_deny_or_readd;
+				}
+			} else {
+				fd2 = supervise_fs_fd_open_install(
+					&event->target_2);
+				if (fd2 < 0) {
+					ret = fd2;
+					goto fail_deny_or_readd;
+				}
+			}
+		}
+	} else if (event->type == LANDLOCK_SUPERVISE_EVENT_TYPE_NET_ACCESS) {
+		user_event->port = event->port;
+	}
+
+	user_event->fd1 = fd1;
+	user_event->fd2 = fd2;
+
+	/* Non-variable-sized part */
+	if (copy_to_user(buf, user_event, dest_offset)) {
+		ret = -EFAULT;
+		goto fail_readd_event;
+	}
+
+	/* destname */
+	if (destname && destname_size > 0) {
+		if (copy_to_user(buf + dest_offset, destname, destname_size)) {
+			ret = -EFAULT;
+			goto fail_readd_event;
+		}
+	}
+
+	/* Zero out any padding bytes */
+	if (event_size > dest_offset + destname_size) {
+		size_t padding_len = event_size - dest_offset - destname_size;
+		if (clear_user(buf + dest_offset + destname_size,
+			       padding_len)) {
+			ret = -EFAULT;
+			goto fail_readd_event;
+		}
+	}
+
+	ret = event_size;
+	event->state = LANDLOCK_SUPERVISE_EVENT_NOTIFIED;
+	/* No decision yet, don't wake up! */
+	spin_lock(&supervisor->lock);
+	list_add(&event->node, &supervisor->notified_events);
+	event = NULL;
+	spin_unlock(&supervisor->lock);
+	goto free;
+
+fail_deny_or_readd:
+	if (ret == -EINTR)
+		goto fail_readd_event;
+	else
+		goto fail_deny;
+
+fail_readd_event:
+	WARN_ON(event->state != LANDLOCK_SUPERVISE_EVENT_NEW);
+	spin_lock(&supervisor->lock);
+	list_add(&event->node, &supervisor->event_queue);
+	event = NULL;
+	spin_unlock(&supervisor->lock);
+	goto free;
+
+fail_deny:
+	event->state = LANDLOCK_SUPERVISE_EVENT_DENIED;
+	wake_up_var(event);
+	landlock_put_supervise_event(event);
+	event = NULL;
+	goto free;
+
+free:
+	WARN_ON(event);
+	if (fd1 >= 0)
+		put_unused_fd(fd1);
+	if (fd2 >= 0)
+		put_unused_fd(fd2);
+	kfree(user_event);
+	return ret;
+}
+
+static __poll_t fop_supervisor_poll(struct file *file, poll_table *wait)
+{
+	struct landlock_supervisor *supervisor = file->private_data;
+	__poll_t mask = 0;
+
+	poll_wait(file, &supervisor->poll_event_wq, wait);
+
+	spin_lock(&supervisor->lock);
+	if (!list_empty(&supervisor->event_queue))
+		mask |= POLLIN | POLLRDNORM;
+	spin_unlock(&supervisor->lock);
+
+	return mask;
+}
+
+static ssize_t fop_supervisor_write(struct file *const filp,
+				    const char __user *const buf,
+				    const size_t size, loff_t *const ppos)
+{
+	struct landlock_supervisor *supervisor = filp->private_data;
+	struct landlock_supervise_response response;
+	struct landlock_supervise_event_kernel *event;
+	size_t bytes_processed = 0;
+	bool found;
+
+	/* We need at least one complete response */
+	if (size < sizeof(response))
+		return -EINVAL;
+
+	while (bytes_processed + sizeof(response) <= size) {
+		if (copy_from_user(&response, buf + bytes_processed,
+				   sizeof(response)))
+			return -EFAULT;
+
+		if (response.length != sizeof(response))
+			return -EINVAL;
+
+		spin_lock(&supervisor->lock);
+
+		/* Find the event with matching cookie */
+		found = false;
+		list_for_each_entry(event, &supervisor->notified_events, node) {
+			if (event->event_id == response.cookie) {
+				found = true;
+				break;
+			}
+		}
+
+		if (!found) {
+			spin_unlock(&supervisor->lock);
+			pr_warn("Unknown supervise event cookie: %u\n",
+				response.cookie);
+			event = NULL;
+			goto ret;
+		}
+
+		list_del(&event->node);
+		spin_unlock(&supervisor->lock);
+
+		if (WARN_ON(LANDLOCK_SUPERVISE_EVENT_HANDLED(event))) {
+			bytes_processed += sizeof(response);
+			landlock_put_supervise_event(event);
+			event = NULL;
+			continue;
+		}
+
+		if (response.decision == LANDLOCK_SUPERVISE_DECISION_ALLOW)
+			event->state = LANDLOCK_SUPERVISE_EVENT_ALLOWED;
+		else if (response.decision == LANDLOCK_SUPERVISE_DECISION_DENY)
+			event->state = LANDLOCK_SUPERVISE_EVENT_DENIED;
+		else {
+			pr_warn("Invalid supervise event decision: %u\n",
+				response.decision);
+			goto fail_re_add;
+		}
+
+		wake_up_var(event);
+		landlock_put_supervise_event(event);
+		event = NULL;
+
+		bytes_processed += sizeof(response);
+	}
+	goto ret;
+
+fail_re_add:
+	spin_lock(&supervisor->lock);
+	list_add(&event->node, &supervisor->notified_events);
+	event = NULL;
+	spin_unlock(&supervisor->lock);
+
+ret:
+	WARN_ON(event);
+	return bytes_processed > 0 ? bytes_processed : -EINVAL;
+}
+
+static const char *
+event_state_to_string(enum landlock_supervise_event_state state)
+{
+	switch (state) {
+	case LANDLOCK_SUPERVISE_EVENT_NEW:
+		return "new";
+	case LANDLOCK_SUPERVISE_EVENT_NOTIFIED:
+		return "notified";
+	case LANDLOCK_SUPERVISE_EVENT_ALLOWED:
+		return "allowed";
+	case LANDLOCK_SUPERVISE_EVENT_DENIED:
+		return "denied";
+	default:
+		WARN_ONCE(1, "unknown event state\n");
+		return "unknown";
+	}
+}
+
+static void
+access_request_to_string(const landlock_supervise_event_type_t access_type,
+			 const access_mask_t access_request, struct seq_file *m)
+{
+	switch (access_type) {
+	case LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS:
+		if (access_request & LANDLOCK_ACCESS_FS_EXECUTE)
+			seq_puts(m, "FS_EXECUTE ");
+		if (access_request & LANDLOCK_ACCESS_FS_WRITE_FILE)
+			seq_puts(m, "FS_WRITE_FILE ");
+		if (access_request & LANDLOCK_ACCESS_FS_READ_FILE)
+			seq_puts(m, "FS_READ_FILE ");
+		if (access_request & LANDLOCK_ACCESS_FS_READ_DIR)
+			seq_puts(m, "FS_READ_DIR ");
+		if (access_request & LANDLOCK_ACCESS_FS_REMOVE_DIR)
+			seq_puts(m, "FS_REMOVE_DIR ");
+		if (access_request & LANDLOCK_ACCESS_FS_REMOVE_FILE)
+			seq_puts(m, "FS_REMOVE_FILE ");
+		if (access_request & LANDLOCK_ACCESS_FS_MAKE_CHAR)
+			seq_puts(m, "FS_MAKE_CHAR ");
+		if (access_request & LANDLOCK_ACCESS_FS_MAKE_DIR)
+			seq_puts(m, "FS_MAKE_DIR ");
+		if (access_request & LANDLOCK_ACCESS_FS_MAKE_REG)
+			seq_puts(m, "FS_MAKE_REG ");
+		if (access_request & LANDLOCK_ACCESS_FS_MAKE_SOCK)
+			seq_puts(m, "FS_MAKE_SOCK ");
+		if (access_request & LANDLOCK_ACCESS_FS_MAKE_FIFO)
+			seq_puts(m, "FS_MAKE_FIFO ");
+		if (access_request & LANDLOCK_ACCESS_FS_MAKE_BLOCK)
+			seq_puts(m, "FS_MAKE_BLOCK ");
+		if (access_request & LANDLOCK_ACCESS_FS_MAKE_SYM)
+			seq_puts(m, "FS_MAKE_SYM ");
+		if (access_request & LANDLOCK_ACCESS_FS_REFER)
+			seq_puts(m, "FS_REFER ");
+		if (access_request & LANDLOCK_ACCESS_FS_TRUNCATE)
+			seq_puts(m, "FS_TRUNCATE ");
+		if (access_request & LANDLOCK_ACCESS_FS_IOCTL_DEV)
+			seq_puts(m, "FS_IOCTL_DEV ");
+		break;
+	case LANDLOCK_SUPERVISE_EVENT_TYPE_NET_ACCESS:
+		if (access_request & LANDLOCK_ACCESS_NET_BIND_TCP)
+			seq_puts(m, "NET_BIND_TCP ");
+		if (access_request & LANDLOCK_ACCESS_NET_CONNECT_TCP)
+			seq_puts(m, "NET_CONNECT_TCP ");
+		break;
+	}
+}
+
+static void fop_supervisor_fdinfo(struct seq_file *m, struct file *f)
+{
+	struct landlock_supervisor *const supervisor = f->private_data;
+	struct landlock_supervise_event_kernel *event;
+
+	spin_lock(&supervisor->lock);
+
+	size_t cnt = list_count_nodes(&supervisor->event_queue);
+	seq_printf(m, "num_events: %zu\n", cnt);
+	list_for_each_entry(event, &supervisor->event_queue, node) {
+		struct task_struct *task =
+			get_pid_task(event->accessor, PIDTYPE_PID);
+
+		seq_puts(m, "event:\n");
+		if (task) {
+			seq_printf(m, "\taccessor: %s[%d]\n", task->comm,
+				   task->pid);
+			put_task_struct(task);
+		} else {
+			seq_puts(m, "\taccessor: defunct\n");
+		}
+
+		if (event->type == LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS) {
+			seq_puts(m, "\taccess: filesystem\n");
+			seq_printf(m, "\taccess_request: %llu ",
+				   (unsigned long long)event->access_request);
+			access_request_to_string(event->type,
+						 event->access_request, m);
+			seq_puts(m, "\n");
+			if (event->target_1.dentry) {
+				/*
+				 * ok to access since event owns a ref to the
+				 * path, and we have event list spin lock.
+				 */
+				if (event->target_1_is_new) {
+					seq_puts(m, "\ttarget_1 (new): ");
+				} else {
+					seq_puts(m, "\ttarget_1: ");
+				}
+				seq_path(m, &event->target_1, "");
+				seq_puts(m, "\n");
+			}
+			if (event->target_2.dentry) {
+				if (event->target_2_is_new) {
+					seq_puts(m, "\ttarget_2 (new): ");
+				} else {
+					seq_puts(m, "\ttarget_2: ");
+				}
+				seq_path(m, &event->target_2, "");
+				seq_puts(m, "\n");
+			}
+		} else if (event->type ==
+			   LANDLOCK_SUPERVISE_EVENT_TYPE_NET_ACCESS) {
+			seq_puts(m, "\taccess: network\n");
+			seq_printf(m, "\tport: %u\n",
+				   (unsigned int)event->port);
+		} else {
+			WARN(1, "unknown event key type\n");
+		}
+
+		seq_printf(m, "\tstate: %s\n",
+			   event_state_to_string(event->state));
+	}
+
+	spin_unlock(&supervisor->lock);
+}
+
+static const struct file_operations supervisor_fops = {
+	.release = fop_supervisor_release,
+	.read = fop_supervisor_read,
+	.write = fop_supervisor_write,
+	.poll = fop_supervisor_poll,
+	.llseek = noop_llseek,
+	.show_fdinfo = fop_supervisor_fdinfo,
+};
+
+static int
+landlock_supervisor_open_fd(struct landlock_supervisor *const supervisor,
+			    const fmode_t mode)
+{
+	landlock_get_supervisor(supervisor);
+	return anon_inode_getfd("[landlock-supervisor]", &supervisor_fops,
+				supervisor, O_RDWR | O_CLOEXEC);
+}
+
+#define LANDLOCK_ABI_VERSION 7
 
 /**
  * sys_landlock_create_ruleset - Create a new ruleset
  *
- * @attr: Pointer to a &struct landlock_ruleset_attr identifying the scope of
- *        the new ruleset.
- * @size: Size of the pointed &struct landlock_ruleset_attr (needed for
- *        backward and forward compatibility).
- * @flags: Supported value: %LANDLOCK_CREATE_RULESET_VERSION.
+ * @attr:  Pointer to a &struct landlock_ruleset_attr identifying the scope of
+ *         the new ruleset.
+ * @size:  Size of the pointed &struct landlock_ruleset_attr (needed for
+ *         backward and forward compatibility).
+ * @flags: Supported value: %LANDLOCK_CREATE_RULESET_VERSION,
+ * 	       %LANDLOCK_CREATE_RULESET_SUPERVISE.
  *
  * This system call enables to create a new Landlock ruleset, and returns the
  * related file descriptor on success.
@@ -172,18 +718,21 @@ static const struct file_operations ruleset_fops = {
  * Possible returned errors are:
  *
  * - %EOPNOTSUPP: Landlock is supported by the kernel but disabled at boot time;
- * - %EINVAL: unknown @flags, or unknown access, or unknown scope, or too small @size;
+ * - %EINVAL: unknown @flags, or unknown access, or unknown
+ * 	          scope, or too small @size, or non-zero @pad;
  * - %E2BIG: @attr or @size inconsistencies;
  * - %EFAULT: @attr or @size inconsistencies;
  * - %ENOMSG: empty &landlock_ruleset_attr.handled_access_fs.
  */
 SYSCALL_DEFINE3(landlock_create_ruleset,
-		const struct landlock_ruleset_attr __user *const, attr,
-		const size_t, size, const __u32, flags)
+		struct landlock_ruleset_attr __user *const, attr, const size_t,
+		size, const __u32, flags)
 {
 	struct landlock_ruleset_attr ruleset_attr;
 	struct landlock_ruleset *ruleset;
+	struct landlock_supervisor *supervisor;
 	int err, ruleset_fd;
+	bool supervise = false;
 
 	/* Build-time checks. */
 	build_check_abi();
@@ -192,10 +741,16 @@ SYSCALL_DEFINE3(landlock_create_ruleset,
 		return -EOPNOTSUPP;
 
 	if (flags) {
-		if ((flags == LANDLOCK_CREATE_RULESET_VERSION) && !attr &&
-		    !size)
+		if (flags == LANDLOCK_CREATE_RULESET_VERSION) {
+			if (attr || size)
+				return -EINVAL;
 			return LANDLOCK_ABI_VERSION;
-		return -EINVAL;
+		}
+		if (flags == LANDLOCK_CREATE_RULESET_SUPERVISE) {
+			supervise = true;
+		} else {
+			return -EINVAL;
+		}
 	}
 
 	/* Copies raw user space buffer. */
@@ -205,6 +760,13 @@ SYSCALL_DEFINE3(landlock_create_ruleset,
 					attr, size);
 	if (err)
 		return err;
+
+	if (supervise && size < offsetofend(typeof(ruleset_attr), pad))
+		return -EINVAL;
+
+	if (size >= offsetofend(typeof(ruleset_attr), pad) &&
+	    ruleset_attr.pad != 0)
+		return -EINVAL;
 
 	/* Checks content (and 32-bits cast). */
 	if ((ruleset_attr.handled_access_fs | LANDLOCK_MASK_ACCESS_FS) !=
@@ -227,11 +789,40 @@ SYSCALL_DEFINE3(landlock_create_ruleset,
 	if (IS_ERR(ruleset))
 		return PTR_ERR(ruleset);
 
+	if (supervise) {
+		supervisor = landlock_create_supervisor();
+		if (IS_ERR(supervisor)) {
+			landlock_put_ruleset(ruleset);
+			return -ENOMEM;
+		}
+		/* Pass ownership of supervisor to ruleset struct */
+		ruleset->layer_stack[0].supervisor = supervisor;
+	}
+
 	/* Creates anonymous FD referring to the ruleset. */
 	ruleset_fd = anon_inode_getfd("[landlock-ruleset]", &ruleset_fops,
 				      ruleset, O_RDWR | O_CLOEXEC);
-	if (ruleset_fd < 0)
+	if (ruleset_fd < 0) {
 		landlock_put_ruleset(ruleset);
+		return ruleset_fd;
+	}
+
+	if (supervise) {
+		int supervisor_fd;
+
+		supervisor_fd = landlock_supervisor_open_fd(
+			ruleset->layer_stack[0].supervisor, O_RDWR | O_CLOEXEC);
+		if (supervisor_fd < 0) {
+			landlock_put_ruleset(ruleset);
+			return supervisor_fd;
+		}
+		if (copy_to_user(&attr->supervisor_fd, &supervisor_fd,
+				 sizeof(supervisor_fd))) {
+			landlock_put_ruleset(ruleset);
+			return -EFAULT;
+		}
+	}
+
 	return ruleset_fd;
 }
 
@@ -313,7 +904,7 @@ static int add_rule_path_beneath(struct landlock_ruleset *const ruleset,
 		return -ENOMSG;
 
 	/* Checks that allowed_access matches the @ruleset constraints. */
-	mask = ruleset->access_masks[0].fs;
+	mask = landlock_get_fs_access_mask(ruleset, 0);
 	if ((path_beneath_attr.allowed_access | mask) != mask)
 		return -EINVAL;
 

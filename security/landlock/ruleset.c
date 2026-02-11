@@ -26,14 +26,14 @@
 #include "limits.h"
 #include "object.h"
 #include "ruleset.h"
+#include "supervise.h"
 
 static struct landlock_ruleset *create_ruleset(const u32 num_layers)
 {
 	struct landlock_ruleset *new_ruleset;
 
-	new_ruleset =
-		kzalloc(struct_size(new_ruleset, access_masks, num_layers),
-			GFP_KERNEL_ACCOUNT);
+	new_ruleset = kzalloc(struct_size(new_ruleset, layer_stack, num_layers),
+			      GFP_KERNEL_ACCOUNT);
 	if (!new_ruleset)
 		return ERR_PTR(-ENOMEM);
 	refcount_set(&new_ruleset->usage, 1);
@@ -104,8 +104,9 @@ static bool is_object_pointer(const enum landlock_key_type key_type)
 
 static struct landlock_rule *
 create_rule(const struct landlock_id id,
-	    const struct landlock_layer (*const layers)[], const u32 num_layers,
-	    const struct landlock_layer *const new_layer)
+	    const struct landlock_rule_layer (*const layers)[],
+	    const u32 num_layers,
+	    const struct landlock_rule_layer *const new_layer)
 {
 	struct landlock_rule *new_rule;
 	u32 new_num_layers;
@@ -201,7 +202,7 @@ static void build_check_ruleset(void)
  */
 static int insert_rule(struct landlock_ruleset *const ruleset,
 		       const struct landlock_id id,
-		       const struct landlock_layer (*const layers)[],
+		       const struct landlock_rule_layer (*const layers)[],
 		       const size_t num_layers)
 {
 	struct rb_node **walker_node;
@@ -284,7 +285,7 @@ static int insert_rule(struct landlock_ruleset *const ruleset,
 
 static void build_check_layer(void)
 {
-	const struct landlock_layer layer = {
+	const struct landlock_rule_layer layer = {
 		.level = ~0,
 		.access = ~0,
 	};
@@ -299,7 +300,7 @@ int landlock_insert_rule(struct landlock_ruleset *const ruleset,
 			 const struct landlock_id id,
 			 const access_mask_t access)
 {
-	struct landlock_layer layers[] = { {
+	struct landlock_rule_layer layers[] = { {
 		.access = access,
 		/* When @level is zero, insert_rule() extends @ruleset. */
 		.level = 0,
@@ -344,7 +345,7 @@ static int merge_tree(struct landlock_ruleset *const dst,
 	/* Merges the @src tree. */
 	rbtree_postorder_for_each_entry_safe(walker_rule, next_rule, src_root,
 					     node) {
-		struct landlock_layer layers[] = { {
+		struct landlock_rule_layer layers[] = { {
 			.level = dst->num_layers,
 		} };
 		const struct landlock_id id = {
@@ -389,8 +390,14 @@ static int merge_ruleset(struct landlock_ruleset *const dst,
 		err = -EINVAL;
 		goto out_unlock;
 	}
-	dst->access_masks[dst->num_layers - 1] =
-		landlock_upgrade_handled_access_masks(src->access_masks[0]);
+	dst->layer_stack[dst->num_layers - 1] = (struct landlock_ruleset_layer){
+		.access_masks = landlock_upgrade_handled_access_masks(
+			src->layer_stack[0].access_masks),
+		.supervisor = src->layer_stack[0].supervisor,
+	};
+	if (dst->layer_stack[dst->num_layers - 1].supervisor)
+		landlock_get_supervisor(
+			dst->layer_stack[dst->num_layers - 1].supervisor);
 
 	/* Merges the @src inode tree. */
 	err = merge_tree(dst, src, LANDLOCK_KEY_INODE);
@@ -446,6 +453,7 @@ static int inherit_ruleset(struct landlock_ruleset *const parent,
 			   struct landlock_ruleset *const child)
 {
 	int err = 0;
+	int layer;
 
 	might_sleep();
 	if (!parent)
@@ -472,8 +480,14 @@ static int inherit_ruleset(struct landlock_ruleset *const parent,
 		goto out_unlock;
 	}
 	/* Copies the parent layer stack and leaves a space for the new layer. */
-	memcpy(child->access_masks, parent->access_masks,
-	       flex_array_size(parent, access_masks, parent->num_layers));
+	memcpy(child->layer_stack, parent->layer_stack,
+	       flex_array_size(parent, layer_stack, parent->num_layers));
+	/* Get the refcount of any supervisor copied over */
+	for (layer = 0; layer < child->num_layers; layer++) {
+		if (child->layer_stack[layer].supervisor)
+			landlock_get_supervisor(
+				child->layer_stack[layer].supervisor);
+	}
 
 	if (WARN_ON_ONCE(!parent->hierarchy)) {
 		err = -EINVAL;
@@ -491,6 +505,7 @@ out_unlock:
 static void free_ruleset(struct landlock_ruleset *const ruleset)
 {
 	struct landlock_rule *freeme, *next;
+	int layer;
 
 	might_sleep();
 	rbtree_postorder_for_each_entry_safe(freeme, next, &ruleset->root_inode,
@@ -504,6 +519,12 @@ static void free_ruleset(struct landlock_ruleset *const ruleset)
 #endif /* IS_ENABLED(CONFIG_INET) */
 
 	put_hierarchy(ruleset->hierarchy);
+	for (layer = 0; layer < ruleset->num_layers; layer++) {
+		struct landlock_supervisor *const supervisor =
+			ruleset->layer_stack[layer].supervisor;
+		if (supervisor)
+			landlock_put_supervisor(supervisor);
+	}
 	kfree(ruleset);
 }
 
@@ -644,7 +665,7 @@ bool landlock_unmask_layers(const struct landlock_rule *const rule,
 	 * E.g. /a/b <execute> + /a <read> => /a/b <execute + read>
 	 */
 	for (layer_level = 0; layer_level < rule->num_layers; layer_level++) {
-		const struct landlock_layer *const layer =
+		const struct landlock_rule_layer *const layer =
 			&rule->layers[layer_level];
 		const layer_mask_t layer_bit = BIT_ULL(layer->level - 1);
 		const unsigned long access_req = access_request;
