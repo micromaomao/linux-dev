@@ -195,11 +195,12 @@ static void build_check_ruleset(void)
  *      any, must be held by the caller.
  * @layers: One or multiple layers to be copied into the new rule.
  * @num_layers: The number of @layers entries.
+ * @intersect: If true, intersect (AND) access rights instead of extend (OR).
  *
  * When user space requests to add a new rule to a ruleset, @layers only
  * contains one entry and this entry is not assigned to any level.  In this
  * case, the new rule will extend @ruleset, similarly to a boolean OR between
- * access rights.
+ * access rights (unless @intersect is true).
  *
  * When merging a ruleset in a domain, or copying a domain, @layers will be
  * added to @ruleset as new constraints, similarly to a boolean AND between
@@ -208,7 +209,8 @@ static void build_check_ruleset(void)
 static int insert_rule(struct landlock_ruleset *const ruleset,
 		       const struct landlock_id id,
 		       const struct landlock_layer (*const layers)[],
-		       const size_t num_layers)
+		       const size_t num_layers,
+		       const bool intersect)
 {
 	struct rb_node **walker_node;
 	struct rb_node *parent_node = NULL;
@@ -250,12 +252,17 @@ static int insert_rule(struct landlock_ruleset *const ruleset,
 			/*
 			 * Extends access rights when the request comes from
 			 * landlock_add_rule(2), i.e. @ruleset is not a domain.
+			 * If @intersect is true, intersect (AND) instead of
+			 * extend (OR).
 			 */
 			if (WARN_ON_ONCE(this->num_layers != 1))
 				return -EINVAL;
 			if (WARN_ON_ONCE(this->layers[0].level != 0))
 				return -EINVAL;
-			this->layers[0].access |= (*layers)[0].access;
+			if (intersect)
+				this->layers[0].access &= (*layers)[0].access;
+			else
+				this->layers[0].access |= (*layers)[0].access;
 			this->layers[0].flags.quiet |= (*layers)[0].flags.quiet;
 			return 0;
 		}
@@ -317,9 +324,10 @@ int landlock_insert_rule(struct landlock_ruleset *const ruleset,
 			.quiet = !!(flags & LANDLOCK_ADD_RULE_QUIET),
 		},
 	} };
+	const bool intersect = !!(flags & LANDLOCK_ADD_RULE_INTERSECT);
 
 	build_check_layer();
-	return insert_rule(ruleset, id, &layers, ARRAY_SIZE(layers));
+	return insert_rule(ruleset, id, &layers, ARRAY_SIZE(layers), intersect);
 }
 
 static int merge_tree(struct landlock_ruleset *const dst,
@@ -358,7 +366,7 @@ static int merge_tree(struct landlock_ruleset *const dst,
 		layers[0].access = walker_rule->layers[0].access;
 		layers[0].flags = walker_rule->layers[0].flags;
 
-		err = insert_rule(dst, id, &layers, ARRAY_SIZE(layers));
+		err = insert_rule(dst, id, &layers, ARRAY_SIZE(layers), false);
 		if (err)
 			return err;
 	}
@@ -433,7 +441,7 @@ static int inherit_tree(struct landlock_ruleset *const parent,
 		};
 
 		err = insert_rule(child, id, &walker_rule->layers,
-				  walker_rule->num_layers);
+				  walker_rule->num_layers, false);
 		if (err)
 			return err;
 	}
