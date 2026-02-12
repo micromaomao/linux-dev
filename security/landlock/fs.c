@@ -1056,12 +1056,12 @@ static int landlock_check_notify_fs(
 		return -EACCES;
 
 	/*
-	 * Walk layers from youngest (highest index) to oldest.
-	 * Find the youngest layer that denies access.
+	 * Walk the hierarchy chain once from youngest to oldest layer,
+	 * checking each denying layer.
 	 */
 	hierarchy = domain->hierarchy;
 	for (layer_level = domain->num_layers - 1; layer_level >= 0;
-	     layer_level--) {
+	     layer_level--, hierarchy = hierarchy->parent) {
 		if (!layer_masks->access[layer_level])
 			continue;
 
@@ -1072,23 +1072,13 @@ static int landlock_check_notify_fs(
 		    (rule_flags->quiet_masks & BIT(layer_level)))
 			return -EACCES;
 
-		/* Find the hierarchy node for this layer. */
-		{
-			const struct landlock_hierarchy *h =
-				domain->hierarchy;
-			ssize_t i;
+		if (!landlock_supervisor_has_notification(
+			    hierarchy->supervisor))
+			return -EACCES;
 
-			for (i = domain->num_layers - 1; i > layer_level; i--)
-				h = h->parent;
-
-			if (!landlock_supervisor_has_notification(
-				    h->supervisor))
-				return -EACCES;
-
-			/* Record the youngest denying layer's supervisor. */
-			if (!notify_supervisor)
-				notify_supervisor = h->supervisor;
-		}
+		/* Record the youngest denying layer's supervisor. */
+		if (!notify_supervisor)
+			notify_supervisor = hierarchy->supervisor;
 	}
 
 	if (!notify_supervisor)

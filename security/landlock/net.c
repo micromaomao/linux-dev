@@ -65,17 +65,16 @@ static int landlock_check_notify_net(
 	const access_mask_t access_request, const __u16 port)
 {
 	ssize_t layer_level;
+	const struct landlock_hierarchy *hierarchy;
 	struct landlock_supervisor *notify_supervisor = NULL;
 	int ret;
 
 	if (!domain || !domain->hierarchy)
 		return -EACCES;
 
+	hierarchy = domain->hierarchy;
 	for (layer_level = domain->num_layers - 1; layer_level >= 0;
-	     layer_level--) {
-		const struct landlock_hierarchy *h;
-		ssize_t i;
-
+	     layer_level--, hierarchy = hierarchy->parent) {
 		if (!layer_masks->access[layer_level])
 			continue;
 
@@ -83,15 +82,12 @@ static int landlock_check_notify_net(
 		    (rule_flags->quiet_masks & BIT(layer_level)))
 			return -EACCES;
 
-		h = domain->hierarchy;
-		for (i = domain->num_layers - 1; i > layer_level; i--)
-			h = h->parent;
-
-		if (!landlock_supervisor_has_notification(h->supervisor))
+		if (!landlock_supervisor_has_notification(
+			    hierarchy->supervisor))
 			return -EACCES;
 
 		if (!notify_supervisor)
-			notify_supervisor = h->supervisor;
+			notify_supervisor = hierarchy->supervisor;
 	}
 
 	if (!notify_supervisor)
