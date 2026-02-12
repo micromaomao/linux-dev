@@ -915,9 +915,8 @@ int main(int argc, char *const argv[], char *const *const envp)
 
 				/*
 				 * Print the denial message.  For FS events,
-				 * fd1/fd2 would normally contain file
-				 * descriptors, but for simplicity we just
-				 * print the access info.
+				 * fd1/fd2 contain file descriptors for the
+				 * target paths.
 				 */
 				if (evt.hdr.type ==
 				    LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS) {
@@ -926,10 +925,8 @@ int main(int argc, char *const argv[], char *const *const envp)
 					const char *pathstr = "(unknown)";
 
 					/*
-					 * Try to resolve fd1 path.
-					 * Currently fd1/fd2 are set to -1
-					 * by the kernel, but this is ready
-					 * for when they are populated.
+					 * Try to resolve fd1 path via
+					 * /proc/self/fd/<n>.
 					 */
 					if (evt.fd1 >= 0) {
 						snprintf(linkbuf,

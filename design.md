@@ -279,9 +279,9 @@ Only one supervisor is notified at a time.  If multiple layers deny access, the 
 
 The notification interface reuses the supervisor ruleset file descriptor.  The following operations are supported:
 
-- **`read(supervisor_fd, buf, size)`**: Reads the next pending event from the event queue.  Returns a `struct landlock_supervise_event` containing the event type, access request, accessor PID, and (for FS events) file descriptors or (for NET events) port number.  Blocks if no events are pending (unless `O_NONBLOCK`).
+- **`read(supervisor_fd, buf, size)`**: Reads the next pending event from the event queue.  Returns a `struct landlock_supervise_event` containing the event type, access request, accessor PID, and (for FS events) O_PATH file descriptors for the target paths, or (for NET events) port number.  For file creation events, the fd points to the parent directory and the `destname` field contains the new filename.  Blocks if no events are pending (unless `O_NONBLOCK`).  The caller must close any received file descriptors.
 
-- **`write(supervisor_fd, buf, size)`**: Writes a `struct landlock_supervise_response` to respond to a previously read event.  The response contains the event's cookie and a decision (`LANDLOCK_SUPERVISE_DECISION_ALLOW` or `LANDLOCK_SUPERVISE_DECISION_DENY`).
+- **`write(supervisor_fd, buf, size)`**: Writes one or more `struct landlock_supervise_response` to respond to previously read events.  Multiple responses can be written in a single write call.  Each response contains the event's cookie and a decision (`LANDLOCK_SUPERVISE_DECISION_ALLOW` or `LANDLOCK_SUPERVISE_DECISION_DENY`).
 
 - **`poll(supervisor_fd, ...)`**: Returns `POLLIN` when events are pending.
 
