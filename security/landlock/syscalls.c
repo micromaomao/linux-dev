@@ -515,10 +515,11 @@ static ssize_t fop_supervisor_write(struct file *const filp,
 		}
 
 		/*
-		 * Always restart the syscall.  The supervisor should have
-		 * updated rules or set the quiet flag before responding.
+		 * Mark event as acknowledged.  The syscall will be
+		 * restarted; the supervisor should have updated rules
+		 * or set the quiet flag before responding.
 		 */
-		event->state = LANDLOCK_SUPERVISE_EVENT_ALLOWED;
+		event->state = LANDLOCK_SUPERVISE_EVENT_ACKNOWLEDGED;
 
 		wake_up_var(event);
 		landlock_put_supervise_event(event);

@@ -589,10 +589,13 @@ static int load_and_apply_config(int config_fd, int supervisor_fd,
 
 /*
  * Watch for config file changes using inotify.
+ * Before returning the fd, checks that the file size is stable (not being
+ * written to) by comparing sizes 100ms apart.
  */
 static int wait_config_file(const char *config_path, int inotify_fd, bool init)
 {
 	int watchd, fd;
+	struct stat st1, st2;
 
 	while (true) {
 		watchd = inotify_add_watch(inotify_fd, config_path,
@@ -623,9 +626,23 @@ static int wait_config_file(const char *config_path, int inotify_fd, bool init)
 			inotify_rm_watch(inotify_fd, watchd);
 			perror("Failed to open config file for watching");
 			return -1;
-		} else {
-			return fd;
 		}
+
+		/*
+		 * Wait for file size to stabilize.  This avoids
+		 * reading a partially-written config file.
+		 */
+		if (fstat(fd, &st1) == 0) {
+			usleep(100000);
+			if (fstat(fd, &st2) == 0 &&
+			    st1.st_size != st2.st_size) {
+				close(fd);
+				inotify_rm_watch(inotify_fd, watchd);
+				continue;
+			}
+		}
+
+		return fd;
 	}
 }
 
@@ -905,13 +922,15 @@ int main(int argc, char *const argv[], char *const *const envp)
 				     PATH_MAX];
 			struct landlock_supervise_event *evt =
 				(struct landlock_supervise_event *)evt_buf;
+			const char *suggest_path = NULL;
+			bool suggest_ro = false;
 
 			len = read(supervisor_fd, evt_buf, sizeof(evt_buf));
 			if (len > 0) {
 				if (evt->hdr.type ==
 				    LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS) {
-					char fd1path[PATH_MAX];
-					char fd2path[PATH_MAX];
+					char fd1path[PATH_MAX + NAME_MAX + 2];
+					char fd2path[PATH_MAX + NAME_MAX + 2];
 					char linkbuf[64];
 					const char *path1str = NULL;
 					const char *path2str = NULL;
@@ -926,7 +945,7 @@ int main(int argc, char *const argv[], char *const *const envp)
 							 evt->fd1);
 						ssize_t rlen = readlink(
 							linkbuf, fd1path,
-							sizeof(fd1path) - 1);
+							sizeof(fd1path) - NAME_MAX - 2);
 						if (rlen > 0) {
 							fd1path[rlen] = '\0';
 							path1str = fd1path;
@@ -942,7 +961,7 @@ int main(int argc, char *const argv[], char *const *const envp)
 							 evt->fd2);
 						ssize_t rlen = readlink(
 							linkbuf, fd2path,
-							sizeof(fd2path) - 1);
+							sizeof(fd2path) - NAME_MAX - 2);
 						if (rlen > 0) {
 							fd2path[rlen] = '\0';
 							path2str = fd2path;
@@ -950,39 +969,38 @@ int main(int argc, char *const argv[], char *const *const envp)
 						close(evt->fd2);
 					}
 
-					/* Check for destname */
+					/* Check for destname and append to the appropriate path buffer */
 					if (evt->hdr.length >
 					    offsetof(struct landlock_supervise_event,
-						     destname))
+						     destname)) {
 						destname = evt->destname;
+						if ((ar & LANDLOCK_ACCESS_FS_REFER) &&
+						    path2str) {
+							/* rename/link: destname goes to fd2 path */
+							strcat(fd2path, "/");
+							strcat(fd2path, destname);
+						} else if (path1str) {
+							/* create/delete: destname goes to fd1 path */
+							strcat(fd1path, "/");
+							strcat(fd1path, destname);
+						}
+					}
 
 					/* Log different messages depending on access type */
 					if ((ar & LANDLOCK_ACCESS_FS_REFER) &&
 					    path1str && path2str) {
-						/* rename or link across dirs */
-						if (destname)
-							fprintf(stderr,
-								"Supervisor: rename %s/%s to %s denied\n",
-								path1str,
-								destname,
-								path2str);
-						else if (path2str)
-							fprintf(stderr,
-								"Supervisor: rename %s to %s denied\n",
-								path1str,
-								path2str);
-						else
-							fprintf(stderr,
-								"Supervisor: refer access to %s denied\n",
-								path1str);
+						fprintf(stderr,
+							"Supervisor: rename %s to %s denied\n",
+							path1str,
+							path2str);
+						suggest_path = path1str;
 					} else if (ar &
 						   LANDLOCK_ACCESS_FS_MAKE_DIR) {
 						fprintf(stderr,
-							"Supervisor: create dir %s/%s denied\n",
+							"Supervisor: create dir %s denied\n",
 							path1str ? path1str :
-								   "(unknown)",
-							destname ? destname :
 								   "(unknown)");
+						suggest_path = path1str;
 					} else if (ar &
 						   (LANDLOCK_ACCESS_FS_MAKE_REG |
 						    LANDLOCK_ACCESS_FS_MAKE_CHAR |
@@ -991,66 +1009,69 @@ int main(int argc, char *const argv[], char *const *const envp)
 						    LANDLOCK_ACCESS_FS_MAKE_SOCK |
 						    LANDLOCK_ACCESS_FS_MAKE_SYM)) {
 						fprintf(stderr,
-							"Supervisor: create file %s/%s denied\n",
+							"Supervisor: create file %s denied\n",
 							path1str ? path1str :
-								   "(unknown)",
-							destname ? destname :
 								   "(unknown)");
+						suggest_path = path1str;
 					} else if (ar &
 						   (LANDLOCK_ACCESS_FS_REMOVE_FILE |
 						    LANDLOCK_ACCESS_FS_REMOVE_DIR)) {
 						fprintf(stderr,
-							"Supervisor: delete %s/%s denied\n",
+							"Supervisor: delete %s denied\n",
 							path1str ? path1str :
-								   "(unknown)",
-							destname ? destname :
 								   "(unknown)");
+						suggest_path = path1str;
 					} else if (ar &
 						   LANDLOCK_ACCESS_FS_READ_FILE) {
 						if (ar &
-						    LANDLOCK_ACCESS_FS_WRITE_FILE)
+						    LANDLOCK_ACCESS_FS_WRITE_FILE) {
 							fprintf(stderr,
 								"Supervisor: read+write access to %s denied\n",
 								path1str ?
 									path1str :
 									"(unknown)");
-						else
+							suggest_path = path1str;
+						} else {
 							fprintf(stderr,
 								"Supervisor: read access to %s denied\n",
 								path1str ?
 									path1str :
 									"(unknown)");
+							suggest_path = path1str;
+							suggest_ro = true;
+						}
 					} else if (ar &
 						   LANDLOCK_ACCESS_FS_WRITE_FILE) {
 						fprintf(stderr,
 							"Supervisor: write access to %s denied\n",
 							path1str ? path1str :
 								   "(unknown)");
+						suggest_path = path1str;
 					} else if (ar &
 						   LANDLOCK_ACCESS_FS_EXECUTE) {
 						fprintf(stderr,
 							"Supervisor: execute access to %s denied\n",
 							path1str ? path1str :
 								   "(unknown)");
+						suggest_path = path1str;
+						suggest_ro = true;
 					} else if (ar &
 						   LANDLOCK_ACCESS_FS_READ_DIR) {
 						fprintf(stderr,
 							"Supervisor: read dir %s denied\n",
 							path1str ? path1str :
 								   "(unknown)");
+						suggest_path = path1str;
+						suggest_ro = true;
 					} else {
 						fprintf(stderr,
-							"Supervisor: unknown access: %llu on fd1=%s fd2=%s%s%s denied\n",
+							"Supervisor: unknown access: %llu on fd1=%s fd2=%s denied\n",
 							(unsigned long long)ar,
 							path1str ? path1str :
 								   "(none)",
 							path2str ? path2str :
-								   "(none)",
-							destname ?
-								" destname=" :
-								"",
-							destname ? destname :
-								   "");
+								   "(none)");
+						suggest_path = path1str;
 					}
 				} else if (evt->hdr.type ==
 					   LANDLOCK_SUPERVISE_EVENT_TYPE_NET_ACCESS) {
@@ -1060,11 +1081,49 @@ int main(int argc, char *const argv[], char *const *const envp)
 				}
 
 				/*
-				 * Acknowledge the event.  The syscall will be
-				 * restarted.  If we want to allow it, we should
-				 * update rules before responding; if we want to
-				 * deny it, set the quiet flag on the path.
+				 * Print a hint about how to resolve the denial,
+				 * then wait for a config file change before
+				 * sending the response.
 				 */
+				if (suggest_path) {
+					fprintf(stderr,
+						"Add one of the following to %s to continue:\n",
+						config_path);
+					fprintf(stderr,
+						"    quiet %s\n",
+						suggest_path);
+					if (suggest_ro)
+						fprintf(stderr,
+							"    ro %s\n",
+							suggest_path);
+					else
+						fprintf(stderr,
+							"    rw %s\n",
+							suggest_path);
+				} else {
+					fprintf(stderr,
+						"Update %s to continue.\n",
+						config_path);
+				}
+
+				/* Wait for config file change before responding */
+				config_fd = wait_config_file(config_path,
+							     inotify_fd,
+							     false);
+				if (config_fd >= 0) {
+					if (load_and_apply_config(
+						    config_fd, supervisor_fd,
+						    &tracked,
+						    ruleset_attr
+							    .handled_access_fs) <
+					    0) {
+						/* Log error but still respond */
+						fprintf(stderr,
+							"Supervisor: Failed to reload config\n");
+					}
+				}
+
+				/* Now acknowledge the event */
 				{
 					struct landlock_supervise_response resp = {
 						.length = sizeof(resp),
