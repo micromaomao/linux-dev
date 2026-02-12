@@ -311,7 +311,9 @@ int landlock_commit_supervisor(struct landlock_ruleset *ruleset)
  * the supervisor responds, then releases resources.
  */
 struct landlock_supervise_wait {
+	/** @twork: Callback head for task_work_add(). */
 	struct callback_head twork;
+	/** @event: The notification event to wait on. */
 	struct landlock_supervise_event_kernel *event;
 };
 
@@ -369,13 +371,17 @@ int landlock_queue_supervisor_notification(
 	if (!supervisor || !supervisor->notification_enabled)
 		return -EINVAL;
 
-	event = kzalloc(sizeof(*event), GFP_KERNEL);
-	if (!event)
+	/*
+	 * Allocate both structures before initializing either, so failure
+	 * cleanup is a simple kfree without needing to release resources.
+	 */
+	wait = kzalloc(sizeof(*wait), GFP_KERNEL);
+	if (!wait)
 		return -ENOMEM;
 
-	wait = kzalloc(sizeof(*wait), GFP_KERNEL);
-	if (!wait) {
-		kfree(event);
+	event = kzalloc(sizeof(*event), GFP_KERNEL);
+	if (!event) {
+		kfree(wait);
 		return -ENOMEM;
 	}
 
