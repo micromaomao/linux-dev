@@ -565,7 +565,7 @@ static __poll_t fop_supervisor_poll(struct file *filp,
 
 	spin_lock(&supervisor->notification_lock);
 	if (!list_empty(&supervisor->event_queue))
-		mask |= POLLIN | POLLRDNORM;
+		mask |= EPOLLIN | EPOLLRDNORM;
 	spin_unlock(&supervisor->notification_lock);
 
 	return mask;
