@@ -377,14 +377,15 @@ The event flow for a denied access in a supervised layer with notification enabl
    - If the layer's quiet flag is set for this access (via `LANDLOCK_ADD_RULE_QUIET`), the access is denied immediately without notification.
    - If the layer's supervisor does not have notification enabled, the access is denied immediately (with audit logging).
 3. If all denying layers have notification-enabled supervisors, an event is queued to the youngest denying layer's supervisor.
-4. The LSM hook returns `-ERESTARTNOINTR`, causing the syscall to restart after the supervisor responds.
+4. The LSM hook calls `restart_syscall()`, which sets `TIF_SIGPENDING` and returns `-ERESTARTNOINTR`, causing the kernel to restart the syscall.
 
-To avoid DoS issues from blocking inside LSM hooks while holding inode locks, the notification mechanism uses `-ERESTARTNOINTR` combined with a task_work callback.  The hook does not block; instead:
+To avoid DoS issues from blocking inside LSM hooks while holding inode locks, the notification mechanism does not block in the hook.  Instead:
 1. The event is queued to the supervisor's event queue.
-2. The hook returns `-ERESTARTNOINTR` to restart the syscall.
-3. A task_work (executed before returning to user space) waits for the supervisor to make a decision.
-4. If the supervisor allows the request, it should update the domain's rules accordingly (via the mutable domain mechanism).  The syscall then restarts and the updated rules should allow the access.
-5. If the supervisor denies the request, the task_work sets a flag and the restarted syscall returns `-EPERM`.
+2. The hook returns via `restart_syscall()` to restart the syscall.
+3. The supervisor reads the event, updates rules or sets the quiet flag as desired, then writes a response.
+4. On response, the syscall is always restarted.  If the supervisor updated rules to allow the access, the restarted syscall succeeds.  If the supervisor set the quiet flag on the path, the restarted syscall denies without further notification.  If the supervisor did nothing, the event is queued again on the next restart.
+
+The supervisor cannot directly deny a request outright; it can only acknowledge the notification and allow the syscall to restart.  This avoids the complexity of setting a syscall return value in an architecture-agnostic way.  In the future, direct deny support may be added as an extension.
 
 Only one supervisor is notified at a time.  If multiple layers deny access, the youngest (most recently added) layer's supervisor is notified first.  If it allows access (by updating rules), the next restart of the syscall will check remaining denying layers.
 
@@ -392,14 +393,14 @@ Only one supervisor is notified at a time.  If multiple layers deny access, the 
 
 The notification interface reuses the supervisor ruleset file descriptor.  The following operations are supported:
 
-- **`read(supervisor_fd, buf, size)`**: Reads the next pending event from the event queue.  Returns a `struct landlock_supervise_event` containing the event type, access request, accessor PID, and (for FS events) O_PATH file descriptors for the target paths, or (for NET events) port number.  For file creation events, the fd points to the parent directory and the `destname` field contains the new filename.  Blocks if no events are pending (unless `O_NONBLOCK`).  The caller must close any received file descriptors.
+- **`read(supervisor_fd, buf, size)`**: Reads the next pending event from the event queue.  Returns a `struct landlock_supervise_event` containing the event type, access request, accessor PID, and (for FS events) O_PATH file descriptors for the target paths, or (for NET events) port number.  For directory operations (create, delete, rename, link), the fd points to the parent directory and the `destname` field contains the target filename.  Blocks if no events are pending (unless `O_NONBLOCK`).  The caller must close any received file descriptors.
 
-- **`write(supervisor_fd, buf, size)`**: Writes one or more `struct landlock_supervise_response` to respond to previously read events.  Multiple responses can be written in a single write call.  Each response contains the event's cookie and a decision (`LANDLOCK_SUPERVISE_DECISION_ALLOW` or `LANDLOCK_SUPERVISE_DECISION_DENY`).
+- **`write(supervisor_fd, buf, size)`**: Writes one or more `struct landlock_supervise_response` to respond to previously read events.  Multiple responses can be written in a single write call.  Each response contains the event's cookie (no decision field — the syscall is always restarted).
 
 - **`poll(supervisor_fd, ...)`**: Returns `POLLIN` when events are pending.
 
 Event types:
-- `LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS` (1): Filesystem access denial.
+- `LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS` (1): Filesystem access denial.  For directory operations, the event includes child dentry paths: mkdir/mknod/symlink pass the (new) child dentry; unlink/rmdir pass the existing child dentry.
 - `LANDLOCK_SUPERVISE_EVENT_TYPE_NET_ACCESS` (2): Network access denial.
 
 ### Interaction with Quiet Flag
@@ -410,11 +411,14 @@ The quiet flag (set via `LANDLOCK_ADD_RULE_QUIET` on rules where `quiet_access_*
 
 This allows a supervisor to selectively suppress notifications for known-denied paths (e.g., `/proc`) where denials are expected and should not trigger interactive decisions.
 
+If the supervisor wants to deny an access without being notified about it again (and without granting access), it should set the quiet flag on the denied object before responding.
+
 ### Implementation Notes
 
 - The `struct landlock_supervisor` is extended with notification state: an event queue, a notified events list, a spinlock, a wait queue for polling, and a `notification_enabled` flag.
 - Events are represented by `struct landlock_supervise_event_kernel` which holds references to paths and PIDs.
 - The notification check logic is implemented in helper functions (`landlock_check_notify_fs` in fs.c and `landlock_check_notify_net` in net.c) that iterate denying layers and queue events.
+- For directory operations, `current_check_access_path` passes the child dentry and `child_is_new` flag to `landlock_check_notify_fs`, which constructs full paths for the supervisor event.
 - Scope-related denials and mount operations do not trigger notifications.
 - When the last reference to a supervisor is dropped (all supervised domains and the supervisor fd are closed), any pending events are automatically denied.
 
@@ -423,6 +427,6 @@ This allows a supervisor to selectively suppress notifications for known-denied 
 The `samples/landlock/supervisor_sandboxer.c` sample has been extended to demonstrate the notification mechanism:
 - Creates the supervisor with `LANDLOCK_CREATE_SUPERVISOR_NOTIFICATION`.
 - Uses `poll()` to monitor both the config file (inotify) and the supervisor fd for events.
-- When a notification event is received, prints a message like "Supervisor: read access to /path denied".
-- Denies all notification requests outright (the supervisor could also allow them by updating rules and responding with ALLOW).
+- When a notification event is received, prints access-specific messages (e.g., "create dir /path/child denied", "read access to /path denied", "delete /path/child denied", "rename /path/child to /path2/child2 denied").
+- Acknowledges all notification events (the syscall will be restarted; the supervisor could update rules or set quiet flags before responding to change the outcome).
 - Supports a `quiet` config line (e.g., `quiet /tmp`) that sets the quiet flag on a path, suppressing notifications for that path.  Removing the quiet line from the config removes the quiet flag.
