@@ -17,6 +17,7 @@
 #include <linux/compiler_types.h>
 #include <linux/dcache.h>
 #include <linux/err.h>
+#include <linux/errno.h>
 #include <linux/falloc.h>
 #include <linux/fs.h>
 #include <linux/init.h>
@@ -1022,6 +1023,88 @@ jump_up:
 	return allowed_parent1 && allowed_parent2;
 }
 
+/**
+ * landlock_check_notify_fs - Check if denied access should trigger notification
+ *
+ * @domain: The domain that denied access.
+ * @layer_masks: Layer masks showing which layers still deny access.
+ * @rule_flags: Collected rule flags for quiet determination.
+ * @path: The path being accessed (for FS events).
+ * @access_request: The denied access rights.
+ *
+ * Iterates denied layers in reverse (youngest first).  If all denying layers
+ * have notification-enabled supervisors (and none are quiet), queues an event
+ * to the youngest layer's supervisor.
+ *
+ * Returns:
+ * - 0 if a notification was queued (caller should return -ERESTARTNOINTR)
+ * - -EACCES if notification cannot be sent (normal denial)
+ */
+static int landlock_check_notify_fs(
+	const struct landlock_ruleset *const domain,
+	const struct layer_access_masks *const layer_masks,
+	const struct collected_rule_flags *const rule_flags,
+	const struct path *const path,
+	const access_mask_t access_request)
+{
+	ssize_t layer_level;
+	const struct landlock_hierarchy *hierarchy;
+	struct landlock_supervisor *notify_supervisor = NULL;
+	int ret;
+
+	if (!domain || !domain->hierarchy)
+		return -EACCES;
+
+	/*
+	 * Walk layers from youngest (highest index) to oldest.
+	 * Find the youngest layer that denies access.
+	 */
+	hierarchy = domain->hierarchy;
+	for (layer_level = domain->num_layers - 1; layer_level >= 0;
+	     layer_level--) {
+		if (!layer_masks->access[layer_level])
+			continue;
+
+		/* This layer denies access. */
+
+		/* Check if quiet flag suppresses notification. */
+		if (rule_flags &&
+		    (rule_flags->quiet_masks & BIT(layer_level)))
+			return -EACCES;
+
+		/* Find the hierarchy node for this layer. */
+		{
+			const struct landlock_hierarchy *h =
+				domain->hierarchy;
+			ssize_t i;
+
+			for (i = domain->num_layers - 1; i > layer_level; i--)
+				h = h->parent;
+
+			if (!landlock_supervisor_has_notification(
+				    h->supervisor))
+				return -EACCES;
+
+			/* Record the youngest denying layer's supervisor. */
+			if (!notify_supervisor)
+				notify_supervisor = h->supervisor;
+		}
+	}
+
+	if (!notify_supervisor)
+		return -EACCES;
+
+	/* Queue notification to the youngest denying supervisor. */
+	ret = landlock_queue_supervisor_notification(
+		notify_supervisor,
+		LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS, access_request, path,
+		NULL, false, false, 0);
+	if (ret)
+		return -EACCES;
+
+	return 0;
+}
+
 static int current_check_access_path(const struct path *const path,
 				     access_mask_t access_request)
 {
@@ -1044,6 +1127,11 @@ static int current_check_access_path(const struct path *const path,
 				       &layer_masks, &rule_flags, &request,
 				       NULL, 0, NULL, NULL, NULL, NULL))
 		return 0;
+
+	/* Check if we should notify a supervisor instead of denying. */
+	if (!landlock_check_notify_fs(subject->domain, &layer_masks,
+				      &rule_flags, path, access_request))
+		return -ERESTARTNOINTR;
 
 	request.rule_flags = rule_flags;
 	landlock_log_denial(subject, &request);
@@ -1798,6 +1886,12 @@ static int hook_file_open(struct file *const file)
 
 	if (access_mask_subset(open_access_request, allowed_access))
 		return 0;
+
+	/* Check if we should notify a supervisor instead of denying. */
+	if (!landlock_check_notify_fs(subject->domain, &layer_masks,
+				      &rule_flags, &file->f_path,
+				      open_access_request))
+		return -ERESTARTNOINTR;
 
 	/* Sets access to reflect the actual request. */
 	request.access = open_access_request;

@@ -21,12 +21,14 @@
 #include <linux/limits.h>
 #include <linux/mount.h>
 #include <linux/path.h>
+#include <linux/poll.h>
 #include <linux/sched.h>
 #include <linux/security.h>
 #include <linux/stddef.h>
 #include <linux/syscalls.h>
 #include <linux/types.h>
 #include <linux/uaccess.h>
+#include <linux/wait.h>
 #include <uapi/linux/landlock.h>
 
 #include "cred.h"
@@ -160,6 +162,189 @@ static const struct file_operations ruleset_fops = {
 };
 
 /**
+ * fop_supervisor_read - Read notification events from supervisor fd
+ *
+ * Reads the next pending event from the supervisor's event queue.
+ * If notification is not enabled, returns -EINVAL.
+ * If no events are pending, returns -EAGAIN (for non-blocking) or blocks.
+ */
+static ssize_t fop_supervisor_read(struct file *const filp,
+				   char __user *const buf, const size_t size,
+				   loff_t *const ppos)
+{
+	struct landlock_ruleset *ruleset = filp->private_data;
+	struct landlock_supervisor *supervisor;
+	struct landlock_supervise_event_kernel *event;
+	struct landlock_supervise_event uev;
+	size_t event_size;
+
+	if (!ruleset || !ruleset->supervisor)
+		return -EINVAL;
+
+	supervisor = ruleset->supervisor;
+	if (!supervisor->notification_enabled)
+		return -EINVAL;
+
+	spin_lock(&supervisor->notification_lock);
+	if (list_empty(&supervisor->event_queue)) {
+		spin_unlock(&supervisor->notification_lock);
+		if (filp->f_flags & O_NONBLOCK)
+			return -EAGAIN;
+
+		if (wait_event_interruptible(supervisor->poll_wq,
+					     !list_empty(&supervisor->event_queue)))
+			return -ERESTARTSYS;
+
+		spin_lock(&supervisor->notification_lock);
+		if (list_empty(&supervisor->event_queue)) {
+			spin_unlock(&supervisor->notification_lock);
+			return -EAGAIN;
+		}
+	}
+
+	event = list_first_entry(&supervisor->event_queue,
+				 struct landlock_supervise_event_kernel, node);
+
+	/* Calculate event size (header + fixed fields, no variable part yet). */
+	event_size = sizeof(struct landlock_supervise_event_hdr) +
+		     sizeof(__u64) + sizeof(__kernel_pid_t);
+	switch (event->type) {
+	case LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS:
+		event_size += sizeof(int) * 2; /* fd1 + fd2 */
+		break;
+	case LANDLOCK_SUPERVISE_EVENT_TYPE_NET_ACCESS:
+		event_size += sizeof(__u16); /* port */
+		break;
+	}
+
+	if (size < event_size) {
+		spin_unlock(&supervisor->notification_lock);
+		return -EINVAL;
+	}
+
+	list_del_init(&event->node);
+	event->state = LANDLOCK_SUPERVISE_EVENT_NOTIFIED;
+	list_add_tail(&event->node, &supervisor->notified_events);
+	spin_unlock(&supervisor->notification_lock);
+
+	memset(&uev, 0, sizeof(uev));
+	uev.hdr.type = event->type;
+	uev.hdr.length = event_size;
+	uev.hdr.cookie = event->event_id;
+	uev.access_request = event->access_request;
+	uev.accessor = pid_vnr(event->accessor);
+
+	switch (event->type) {
+	case LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS:
+		/* For now, we don't pass fds; set to -1. */
+		uev.fd1 = -1;
+		uev.fd2 = -1;
+		break;
+	case LANDLOCK_SUPERVISE_EVENT_TYPE_NET_ACCESS:
+		uev.port = event->port;
+		break;
+	}
+
+	if (copy_to_user(buf, &uev, event_size))
+		return -EFAULT;
+
+	return event_size;
+}
+
+/**
+ * fop_supervisor_write - Write notification response to supervisor fd
+ *
+ * Processes a response from the supervisor for a previously read event.
+ * If notification is not enabled, returns -EINVAL.
+ */
+static ssize_t fop_supervisor_write(struct file *const filp,
+				    const char __user *const buf,
+				    const size_t size, loff_t *const ppos)
+{
+	struct landlock_ruleset *ruleset = filp->private_data;
+	struct landlock_supervisor *supervisor;
+	struct landlock_supervise_response resp;
+	struct landlock_supervise_event_kernel *event, *tmp;
+	bool found = false;
+
+	if (!ruleset || !ruleset->supervisor)
+		return -EINVAL;
+
+	supervisor = ruleset->supervisor;
+	if (!supervisor->notification_enabled)
+		return -EINVAL;
+
+	if (size < sizeof(resp))
+		return -EINVAL;
+
+	if (copy_from_user(&resp, buf, sizeof(resp)))
+		return -EFAULT;
+
+	if (resp.length < sizeof(resp))
+		return -EINVAL;
+
+	if (resp._reserved != 0)
+		return -EINVAL;
+
+	if (resp.decision != LANDLOCK_SUPERVISE_DECISION_DENY &&
+	    resp.decision != LANDLOCK_SUPERVISE_DECISION_ALLOW)
+		return -EINVAL;
+
+	spin_lock(&supervisor->notification_lock);
+	list_for_each_entry_safe(event, tmp, &supervisor->notified_events,
+				 node) {
+		if (event->event_id == resp.cookie) {
+			list_del_init(&event->node);
+			found = true;
+			break;
+		}
+	}
+	spin_unlock(&supervisor->notification_lock);
+
+	if (!found)
+		return -ENOENT;
+
+	if (resp.decision == LANDLOCK_SUPERVISE_DECISION_ALLOW)
+		event->state = LANDLOCK_SUPERVISE_EVENT_ALLOWED;
+	else
+		event->state = LANDLOCK_SUPERVISE_EVENT_DENIED;
+
+	/* Drop the queue's reference. */
+	landlock_put_supervise_event(event);
+
+	return sizeof(resp);
+}
+
+/**
+ * fop_supervisor_poll - Poll for pending notification events
+ */
+static __poll_t fop_supervisor_poll(struct file *filp,
+				    struct poll_table_struct *wait)
+{
+	struct landlock_ruleset *ruleset = filp->private_data;
+	struct landlock_supervisor *supervisor;
+	__poll_t ret = 0;
+
+	if (!ruleset || !ruleset->supervisor)
+		return EPOLLERR;
+
+	supervisor = ruleset->supervisor;
+	if (!supervisor->notification_enabled)
+		return EPOLLERR;
+
+	poll_wait(filp, &supervisor->poll_wq, wait);
+
+	spin_lock(&supervisor->notification_lock);
+	if (!list_empty(&supervisor->event_queue))
+		ret |= EPOLLIN | EPOLLRDNORM;
+	/* Always writable for responses. */
+	ret |= EPOLLOUT | EPOLLWRNORM;
+	spin_unlock(&supervisor->notification_lock);
+
+	return ret;
+}
+
+/**
  * fop_supervisor_ioctl - Handle ioctl calls on supervisor rulesets
  *
  * @filp: The supervisor ruleset file.
@@ -218,8 +403,9 @@ static long fop_supervisor_ioctl(struct file *filp, unsigned int cmd,
 
 static const struct file_operations supervisor_ruleset_fops = {
 	.release = fop_ruleset_release,
-	.read = fop_dummy_read,
-	.write = fop_dummy_write,
+	.read = fop_supervisor_read,
+	.write = fop_supervisor_write,
+	.poll = fop_supervisor_poll,
 	.unlocked_ioctl = fop_supervisor_ioctl,
 	/* We don't take pointer argument, so no need to compat_ptr_ioctl */
 	.compat_ioctl = fop_supervisor_ioctl,
@@ -297,8 +483,14 @@ SYSCALL_DEFINE3(landlock_create_ruleset,
 		return landlock_errata;
 	}
 
-	/* Only SUPERVISOR flag is valid for ruleset creation */
-	if (flags & ~LANDLOCK_CREATE_RULESET_SUPERVISOR)
+	/* Only SUPERVISOR and NOTIFICATION flags are valid for ruleset creation */
+	if (flags & ~(LANDLOCK_CREATE_RULESET_SUPERVISOR |
+		      LANDLOCK_CREATE_SUPERVISOR_NOTIFICATION))
+		return -EINVAL;
+
+	/* NOTIFICATION requires SUPERVISOR */
+	if ((flags & LANDLOCK_CREATE_SUPERVISOR_NOTIFICATION) &&
+	    !(flags & LANDLOCK_CREATE_RULESET_SUPERVISOR))
 		return -EINVAL;
 
 	is_supervisor = !!(flags & LANDLOCK_CREATE_RULESET_SUPERVISOR);
@@ -358,6 +550,8 @@ SYSCALL_DEFINE3(landlock_create_ruleset,
 			landlock_put_ruleset(ruleset);
 			return PTR_ERR(supervisor);
 		}
+		if (flags & LANDLOCK_CREATE_SUPERVISOR_NOTIFICATION)
+			supervisor->notification_enabled = true;
 		ruleset->supervisor = supervisor;
 		fops = &supervisor_ruleset_fops;
 	} else {

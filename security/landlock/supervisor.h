@@ -9,10 +9,16 @@
 #define _SECURITY_LANDLOCK_SUPERVISOR_H
 
 #include <linux/bug.h>
+#include <linux/list.h>
 #include <linux/mutex.h>
+#include <linux/path.h>
+#include <linux/pid.h>
 #include <linux/rcupdate.h>
 #include <linux/refcount.h>
+#include <linux/spinlock.h>
+#include <linux/wait.h>
 
+#include "access.h"
 #include "ruleset.h"
 
 /**
@@ -41,6 +47,32 @@ struct landlock_supervisor {
 	 * The old ruleset is freed after an RCU grace period.
 	 */
 	struct landlock_ruleset __rcu *committed_ruleset;
+	/**
+	 * @notification_enabled: Whether this supervisor wants to receive
+	 * denial notification events.  Set when the supervisor is created
+	 * with LANDLOCK_CREATE_SUPERVISOR_NOTIFICATION.
+	 */
+	bool notification_enabled;
+	/**
+	 * @notification_lock: Protects the event queue and notified list.
+	 */
+	spinlock_t notification_lock;
+	/**
+	 * @event_queue: List of pending events waiting to be read.
+	 */
+	struct list_head event_queue;
+	/**
+	 * @notified_events: Events that have been read but not responded to.
+	 */
+	struct list_head notified_events;
+	/**
+	 * @poll_wq: Wait queue for poll/select on the supervisor fd.
+	 */
+	struct wait_queue_head poll_wq;
+	/**
+	 * @next_event_id: Next cookie value for events.
+	 */
+	u32 next_event_id;
 };
 
 struct landlock_supervisor *landlock_create_supervisor(void);
@@ -104,5 +136,96 @@ landlock_get_supervisor_committed_ruleset(struct landlock_supervisor *supervisor
 
 	return committed;
 }
+
+enum landlock_supervise_event_state {
+	LANDLOCK_SUPERVISE_EVENT_NEW,
+	LANDLOCK_SUPERVISE_EVENT_NOTIFIED,
+	LANDLOCK_SUPERVISE_EVENT_ALLOWED,
+	LANDLOCK_SUPERVISE_EVENT_DENIED,
+};
+
+/**
+ * struct landlock_supervise_event_kernel - Kernel-side supervisor event
+ */
+struct landlock_supervise_event_kernel {
+	/** @node: List node for event_queue or notified_events. */
+	struct list_head node;
+	/** @usage: Reference count. */
+	refcount_t usage;
+	/** @state: Current state of this event. */
+	enum landlock_supervise_event_state state;
+	/** @event_id: Cookie value for matching responses. */
+	u32 event_id;
+
+	/** @type: Type of the event (FS or NET). */
+	landlock_supervise_event_type_t type;
+	/** @access_request: Denied access rights bitmask. */
+	access_mask_t access_request;
+	/** @accessor: PID of the accessing task. */
+	struct pid *accessor;
+	union {
+		struct {
+			/** @target_1: First path target. */
+			struct path target_1;
+			/** @target_2: Second path target (rename/link). */
+			struct path target_2;
+			/** @target_1_is_new: Target 1 is a new file. */
+			u8 target_1_is_new : 1;
+			/** @target_2_is_new: Target 2 is a new file. */
+			u8 target_2_is_new : 1;
+		};
+		struct {
+			/** @port: Network port. */
+			__u16 port;
+		};
+	};
+};
+
+#define LANDLOCK_SUPERVISE_EVENT_HANDLED(event)                \
+	((event)->state == LANDLOCK_SUPERVISE_EVENT_ALLOWED || \
+	 (event)->state == LANDLOCK_SUPERVISE_EVENT_DENIED)
+
+static inline void landlock_get_supervise_event(
+	struct landlock_supervise_event_kernel *const event)
+{
+	refcount_inc(&event->usage);
+}
+
+static inline void landlock_put_supervise_event(
+	struct landlock_supervise_event_kernel *const event)
+{
+	if (refcount_dec_and_test(&event->usage)) {
+		switch (event->type) {
+		case LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS:
+			if (event->target_1.dentry)
+				path_put(&event->target_1);
+			if (event->target_2.dentry)
+				path_put(&event->target_2);
+			break;
+		case LANDLOCK_SUPERVISE_EVENT_TYPE_NET_ACCESS:
+			break;
+		}
+		put_pid(event->accessor);
+		kfree(event);
+	}
+}
+
+DEFINE_FREE(landlock_put_supervise_event,
+	    struct landlock_supervise_event_kernel *,
+	    if (_T) landlock_put_supervise_event(_T))
+
+static inline bool
+landlock_supervisor_has_notification(const struct landlock_supervisor *supervisor)
+{
+	return supervisor && supervisor->notification_enabled;
+}
+
+int landlock_queue_supervisor_notification(
+	struct landlock_supervisor *supervisor,
+	const landlock_supervise_event_type_t type,
+	const access_mask_t access_request,
+	const struct path *path1, const struct path *path2,
+	const bool path1_new, const bool path2_new,
+	const __u16 port);
 
 #endif /* _SECURITY_LANDLOCK_SUPERVISOR_H */
