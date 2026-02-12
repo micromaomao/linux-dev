@@ -973,8 +973,10 @@ int main(int argc, char *const argv[], char *const *const envp)
 
 					/* Check for destname and append to the appropriate path buffer */
 					if (evt->hdr.length >
-					    offsetof(struct landlock_supervise_event,
-						     destname)) {
+						    offsetof(
+							    struct landlock_supervise_event,
+							    destname) &&
+					    evt->destname[0] != '\0') {
 						destname = evt->destname;
 						if ((ar & LANDLOCK_ACCESS_FS_REFER) &&
 						    path2str) {
@@ -1113,6 +1115,14 @@ int main(int argc, char *const argv[], char *const *const envp)
 				}
 
 				/* Wait for config file change before responding */
+				len = read(inotify_fd, buf, sizeof(buf));
+				if (child_exited)
+					break;
+				if (len < 0 && errno != EAGAIN) {
+					perror("read inotify");
+					break;
+				}
+				/* Re-open and setup inotify */
 				config_fd = wait_config_file(config_path,
 							     inotify_fd,
 							     false);
