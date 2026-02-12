@@ -10,7 +10,7 @@ To enable removing rules from a ruleset, we also implement the LANDLOCK_ADD_RULE
 
 (For consistency, the LANDLOCK_ADD_RULE_INTERSECT flag will be supported for both supervisor and supervisee (i.e. existing) rulesets, but it is probably only useful for supervisor rulesets.)
 
-There is future work planned to implement a notification and waiting mechanism to allow the supervisor to be asked for a decision when a denied (and not quieted) access happens, but that is out of the scope of this patchset.
+Additionally, a supervisor notification mechanism is implemented that allows the supervisor to be notified when an access is denied by its supervised layer.  This is described in the "Supervisor Notification" section below.
 
 ## uAPI example
 
@@ -249,10 +249,71 @@ What if a supervisor wants to clear all rules and reconstruct the supervisor rul
 
 Intersect or replace?  How about just having a "clear all rules in a ruleset"?
 
+## Supervisor Notification
+
+The supervisor notification mechanism allows a supervisor to receive events when a supervised process is denied access.  This enables interactive decision-making: the supervisor can be told about denied accesses and decide whether to allow them (by updating rules via the mutable domain mechanism) or deny them outright.
+
+### Design Overview
+
+When a supervisor creates its ruleset with the `LANDLOCK_CREATE_SUPERVISOR_NOTIFICATION` flag (in addition to `LANDLOCK_CREATE_RULESET_SUPERVISOR`), the resulting supervisor has notification enabled.  The supervisor reads events from and writes responses to the supervisor ruleset fd directly, using `read()`, `write()`, and `poll()`.
+
+The event flow for a denied access in a supervised layer with notification enabled:
+
+1. A supervised process attempts an access that is denied by its supervisee ruleset and not allowed by the supervisor's committed ruleset either.
+2. For each denying layer (walking from youngest/last to oldest/first):
+   - If the layer's quiet flag is set for this access (via `LANDLOCK_ADD_RULE_QUIET`), the access is denied immediately without notification.
+   - If the layer's supervisor does not have notification enabled, the access is denied immediately (with audit logging).
+3. If all denying layers have notification-enabled supervisors, an event is queued to the youngest denying layer's supervisor.
+4. The LSM hook returns `-ERESTARTNOINTR`, causing the syscall to restart after the supervisor responds.
+
+To avoid DoS issues from blocking inside LSM hooks while holding inode locks, the notification mechanism uses `-ERESTARTNOINTR` combined with a task_work callback.  The hook does not block; instead:
+1. The event is queued to the supervisor's event queue.
+2. The hook returns `-ERESTARTNOINTR` to restart the syscall.
+3. A task_work (executed before returning to user space) waits for the supervisor to make a decision.
+4. If the supervisor allows the request, it should update the domain's rules accordingly (via the mutable domain mechanism).  The syscall then restarts and the updated rules should allow the access.
+5. If the supervisor denies the request, the task_work sets a flag and the restarted syscall returns `-EPERM`.
+
+Only one supervisor is notified at a time.  If multiple layers deny access, the youngest (most recently added) layer's supervisor is notified first.  If it allows access (by updating rules), the next restart of the syscall will check remaining denying layers.
+
+### uAPI
+
+The notification interface reuses the supervisor ruleset file descriptor.  The following operations are supported:
+
+- **`read(supervisor_fd, buf, size)`**: Reads the next pending event from the event queue.  Returns a `struct landlock_supervise_event` containing the event type, access request, accessor PID, and (for FS events) file descriptors or (for NET events) port number.  Blocks if no events are pending (unless `O_NONBLOCK`).
+
+- **`write(supervisor_fd, buf, size)`**: Writes a `struct landlock_supervise_response` to respond to a previously read event.  The response contains the event's cookie and a decision (`LANDLOCK_SUPERVISE_DECISION_ALLOW` or `LANDLOCK_SUPERVISE_DECISION_DENY`).
+
+- **`poll(supervisor_fd, ...)`**: Returns `POLLIN` when events are pending.
+
+Event types:
+- `LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS` (1): Filesystem access denial.
+- `LANDLOCK_SUPERVISE_EVENT_TYPE_NET_ACCESS` (2): Network access denial.
+
+### Interaction with Quiet Flag
+
+The quiet flag (set via `LANDLOCK_ADD_RULE_QUIET` on rules where `quiet_access_*` is set in the ruleset attributes) serves a dual purpose:
+1. It suppresses audit log entries for denied accesses (its original purpose).
+2. It prevents supervisor notifications for denied accesses on objects marked quiet.
+
+This allows a supervisor to selectively suppress notifications for known-denied paths (e.g., `/proc`) where denials are expected and should not trigger interactive decisions.
+
+### Implementation Notes
+
+- The `struct landlock_supervisor` is extended with notification state: an event queue, a notified events list, a spinlock, a wait queue for polling, and a `notification_enabled` flag.
+- Events are represented by `struct landlock_supervise_event_kernel` which holds references to paths and PIDs.
+- The notification check logic is implemented in helper functions (`landlock_check_notify_fs` in fs.c and `landlock_check_notify_net` in net.c) that iterate denying layers and queue events.
+- Scope-related denials and mount operations do not trigger notifications.
+- When the last reference to a supervisor is dropped (all supervised domains and the supervisor fd are closed), any pending events are automatically denied.
+
+### supervisor_sandboxer Example
+
+The `samples/landlock/supervisor_sandboxer.c` sample has been extended to demonstrate the notification mechanism:
+- Creates the supervisor with `LANDLOCK_CREATE_SUPERVISOR_NOTIFICATION`.
+- Uses `poll()` to monitor both the config file (inotify) and the supervisor fd for events.
+- When a notification event is received, prints a message like "Supervisor: read access to /path denied".
+- Denies all notification requests outright (the supervisor could also allow them by updating rules and responding with ALLOW).
+- Supports a `quiet` config line (e.g., `quiet /tmp`) that sets the quiet flag on a path, suppressing notifications for that path.  Removing the quiet line from the config removes the quiet flag.
+
 ## Future work
 
 Implement hash table or not?
-
-Supervisor notification: uAPI - new uAPI or fanotify?
-
-Do mutable domains or supervisor notification first?
