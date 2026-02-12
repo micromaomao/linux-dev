@@ -76,6 +76,27 @@ static inline int landlock_restrict_self(const int ruleset_fd,
 #define LANDLOCK_ADD_RULE_INTERSECT (1U << 2)
 #endif
 
+#ifndef LANDLOCK_ADD_RULE_QUIET
+#define LANDLOCK_ADD_RULE_QUIET (1U << 0)
+#endif
+
+#ifndef LANDLOCK_CREATE_SUPERVISOR_NOTIFICATION
+#define LANDLOCK_CREATE_SUPERVISOR_NOTIFICATION (1U << 3)
+#endif
+
+#ifndef LANDLOCK_SUPERVISE_DECISION_DENY
+#define LANDLOCK_SUPERVISE_DECISION_DENY 0
+#endif
+
+#ifndef LANDLOCK_SUPERVISE_DECISION_ALLOW
+#define LANDLOCK_SUPERVISE_DECISION_ALLOW 1
+#endif
+
+#ifndef LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS
+#define LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS 1
+#define LANDLOCK_SUPERVISE_EVENT_TYPE_NET_ACCESS 2
+#endif
+
 #ifndef LANDLOCK_IOC_MAGIC
 #define LANDLOCK_IOC_MAGIC 'L'
 #endif
@@ -123,6 +144,7 @@ static inline int landlock_restrict_self(const int ruleset_fd,
  * @pathfd: An O_PATH fd that we keep open until it is removed from the
  *          ruleset in a future config load, after which we set it to -1.
  * @should_keep: Marker to determine which rules are removed during reload.
+ * @is_quiet: Whether this rule has the quiet flag set.
  * @pathname: Pathname as originally given in the config file (dynamically
  *            allocated).
  */
@@ -130,6 +152,7 @@ struct rule_entry {
 	__u64 access;
 	int pathfd;
 	bool should_keep;
+	bool is_quiet;
 	char *pathname;
 };
 
@@ -260,18 +283,25 @@ static void sigchld_handler(int sig)
 
 /**
  * parse_access_type() - Parse access type from config.
- * @access_type: String like "ro" or "rw".
+ * @access_type: String like "ro", "rw", or "quiet".
  * @access: Output access mask.
+ * @is_quiet: Output flag, set to true if access_type is "quiet".
  *
  * Return: 0 on success, -1 on error.
  */
-static int parse_access_type(const char *access_type, __u64 *access)
+static int parse_access_type(const char *access_type, __u64 *access,
+			     bool *is_quiet)
 {
+	*is_quiet = false;
 	if (strcmp(access_type, "ro") == 0) {
 		*access = ACCESS_FS_ROUGHLY_READ;
 		return 0;
 	} else if (strcmp(access_type, "rw") == 0) {
 		*access = ACCESS_FS_ROUGHLY_READ | ACCESS_FS_ROUGHLY_WRITE;
+		return 0;
+	} else if (strcmp(access_type, "quiet") == 0) {
+		*access = 0;
+		*is_quiet = true;
 		return 0;
 	}
 	return -1;
@@ -316,6 +346,7 @@ static int load_and_apply_config(int config_fd, int supervisor_fd,
 		char access_type[16];
 		char path[PATH_MAX];
 		__u64 new_access;
+		bool is_quiet;
 		int n;
 		struct stat statbuf;
 		struct rule_entry *entry;
@@ -330,7 +361,7 @@ static int load_and_apply_config(int config_fd, int supervisor_fd,
 			continue;
 		}
 
-		if (parse_access_type(access_type, &new_access) < 0) {
+		if (parse_access_type(access_type, &new_access, &is_quiet) < 0) {
 			fprintf(stderr, "Unknown access type: %s\n",
 				access_type);
 			continue;
@@ -344,11 +375,59 @@ static int load_and_apply_config(int config_fd, int supervisor_fd,
 			entry->should_keep = true;
 
 			/* Restrict file access rights for non-directories */
-			if (fstat(entry->pathfd, &statbuf) == 0 &&
+			if (!is_quiet && fstat(entry->pathfd, &statbuf) == 0 &&
 			    !S_ISDIR(statbuf.st_mode))
 				new_access &= ACCESS_FILE;
 
-			if (entry->access != new_access) {
+			/* Handle quiet flag changes */
+			if (is_quiet != entry->is_quiet) {
+				struct landlock_path_beneath_attr path_beneath = {
+					.parent_fd = entry->pathfd,
+					.allowed_access = 0,
+				};
+				__u32 flags = is_quiet ? LANDLOCK_ADD_RULE_QUIET : 0;
+
+				if (is_quiet) {
+					/* Adding quiet flag */
+					if (landlock_add_rule(
+						    supervisor_fd,
+						    LANDLOCK_RULE_PATH_BENEATH,
+						    &path_beneath, flags) < 0) {
+						fprintf(stderr,
+							"Error setting quiet on %s: %s\n",
+							path, strerror(errno));
+					} else {
+						fprintf(stderr,
+							"supervisor: Set quiet for %s\n",
+							path);
+					}
+				}
+				/* Removing quiet: re-add the rule without quiet flag */
+				if (!is_quiet && entry->is_quiet) {
+					path_beneath.allowed_access = new_access;
+					/* Intersect with 0 to remove, then re-add without quiet */
+					struct landlock_path_beneath_attr zero_attr = {
+						.parent_fd = entry->pathfd,
+						.allowed_access = 0,
+					};
+					landlock_add_rule(supervisor_fd,
+							  LANDLOCK_RULE_PATH_BENEATH,
+							  &zero_attr,
+							  LANDLOCK_ADD_RULE_INTERSECT);
+					if (new_access) {
+						landlock_add_rule(
+							supervisor_fd,
+							LANDLOCK_RULE_PATH_BENEATH,
+							&path_beneath, 0);
+					}
+					fprintf(stderr,
+						"supervisor: Removed quiet for %s\n",
+						path);
+				}
+				entry->is_quiet = is_quiet;
+			}
+
+			if (!is_quiet && entry->access != new_access) {
 				struct landlock_path_beneath_attr path_beneath = {
 					.parent_fd = entry->pathfd,
 					.allowed_access = new_access,
@@ -405,6 +484,7 @@ static int load_and_apply_config(int config_fd, int supervisor_fd,
 			struct rule_entry new_entry;
 			struct landlock_path_beneath_attr path_beneath;
 			int pathfd;
+			__u32 add_flags = is_quiet ? LANDLOCK_ADD_RULE_QUIET : 0;
 
 			pathfd = open(path, O_PATH | O_CLOEXEC);
 			if (pathfd < 0) {
@@ -423,12 +503,13 @@ static int load_and_apply_config(int config_fd, int supervisor_fd,
 			}
 
 			/* Restrict file access rights for non-directories */
-			if (!S_ISDIR(statbuf.st_mode))
+			if (!is_quiet && !S_ISDIR(statbuf.st_mode))
 				new_access &= ACCESS_FILE;
 
 			new_entry.access = new_access;
 			new_entry.pathfd = pathfd;
 			new_entry.should_keep = true;
+			new_entry.is_quiet = is_quiet;
 			new_entry.pathname = strdup(path);
 			if (!new_entry.pathname) {
 				fprintf(stderr, "Out of memory\n");
@@ -441,16 +522,26 @@ static int load_and_apply_config(int config_fd, int supervisor_fd,
 
 			if (landlock_add_rule(supervisor_fd,
 					      LANDLOCK_RULE_PATH_BENEATH,
-					      &path_beneath, 0) < 0) {
+					      &path_beneath, add_flags) < 0) {
 				fprintf(stderr,
-					"Error adding access on %s: landlock_add_rule failed: %s\n",
+					"Error adding %s%s on %s: landlock_add_rule failed: %s\n",
+					is_quiet ? "quiet" : "",
+					is_quiet ? "" : "access",
 					path, strerror(errno));
 			} else {
-				fprintf(stderr,
-					"supervisor: Added %s access for %s\n",
-					access_to_string(new_access, access_buf,
-							 sizeof(access_buf)),
-					path);
+				if (is_quiet) {
+					fprintf(stderr,
+						"supervisor: Set quiet for %s\n",
+						path);
+				} else {
+					fprintf(stderr,
+						"supervisor: Added %s access for %s\n",
+						access_to_string(new_access,
+								 access_buf,
+								 sizeof(access_buf)),
+						path);
+				}
+			}
 			}
 
 			tracked_ruleset_insert(tracked, &new_entry);
@@ -555,13 +646,16 @@ static void print_usage(const char *prog)
 		"\n"
 		"Run <command> in a Landlock sandbox with rules from <config_file>.\n"
 		"The sandboxer monitors the config file and reloads rules on changes.\n"
+		"When access is denied, the supervisor receives a notification and\n"
+		"prints a message to stderr.\n"
 		"\n"
 		"Config file format (one rule per line):\n"
 		"  <access_type> <path>\n"
 		"\n"
 		"Where access_type is one of:\n"
-		"  ro  - read-only access\n"
-		"  rw  - read-write access\n"
+		"  ro    - read-only access\n"
+		"  rw    - read-write access\n"
+		"  quiet - suppress denial notifications for this path\n"
 		"\n"
 		"Lines starting with # are comments.\n"
 		"\n"
@@ -571,7 +665,9 @@ static void print_usage(const char *prog)
 		"  ro /lib\n"
 		"  ro /etc\n"
 		"  # Allow read-write access to tmp\n"
-		"  rw /tmp\n",
+		"  rw /tmp\n"
+		"  # Suppress notifications for /proc\n"
+		"  quiet /proc\n",
 		prog);
 }
 
@@ -622,6 +718,7 @@ int main(int argc, char *const argv[], char *const *const envp)
 
 	struct landlock_ruleset_attr ruleset_attr = {
 		.handled_access_fs = ACCESS_FS_ROUGHLY_READ | ACCESS_FS_ROUGHLY_WRITE,
+		.quiet_access_fs = ACCESS_FS_ROUGHLY_READ | ACCESS_FS_ROUGHLY_WRITE,
 	};
 
 	if (argc < 3) {
@@ -685,10 +782,11 @@ int main(int argc, char *const argv[], char *const *const envp)
 			abi, LANDLOCK_ABI_LAST);
 	}
 
-	/* Create supervisor ruleset */
+	/* Create supervisor ruleset with notification support */
 	supervisor_fd =
 		landlock_create_ruleset(&ruleset_attr, sizeof(ruleset_attr),
-					LANDLOCK_CREATE_RULESET_SUPERVISOR);
+					LANDLOCK_CREATE_RULESET_SUPERVISOR |
+						LANDLOCK_CREATE_SUPERVISOR_NOTIFICATION);
 	if (supervisor_fd < 0) {
 		perror("Failed to create supervisor ruleset");
 		return 1;
@@ -781,36 +879,125 @@ int main(int argc, char *const argv[], char *const *const envp)
 	close(supervisee_fd);
 
 	fprintf(stderr, "Supervisor: Child process started (PID %d)\n", child);
-	fprintf(stderr, "Supervisor: Monitoring config file for changes...\n");
+	fprintf(stderr, "Supervisor: Monitoring config file and events...\n");
 
-	/* Monitor for file changes and child exit */
+	/* Monitor for file changes, supervisor events, and child exit */
 	while (!child_exited) {
+		struct pollfd pfds[2];
+		int nfds;
 		char buf[sizeof(struct inotify_event) + NAME_MAX + 1];
 		ssize_t len;
 
+		pfds[0].fd = inotify_fd;
+		pfds[0].events = POLLIN;
+		pfds[0].revents = 0;
+		pfds[1].fd = supervisor_fd;
+		pfds[1].events = POLLIN;
+		pfds[1].revents = 0;
+
+		nfds = poll(pfds, 2, -1);
 		if (child_exited)
 			break;
-		/* Drain inotify events */
-		len = read(inotify_fd, buf, sizeof(buf));
-		if (child_exited)
-			break;
-		if (len < 0 && errno != EAGAIN) {
-			perror("read inotify");
+		if (nfds < 0) {
+			if (errno == EINTR)
+				continue;
+			perror("poll");
 			break;
 		}
 
-		fprintf(stderr,
-			"\nSupervisor: Config file changed, reloading rules...\n");
+		/* Handle supervisor notification events */
+		if (pfds[1].revents & POLLIN) {
+			struct landlock_supervise_event evt;
 
-		config_fd = wait_config_file(config_path, inotify_fd, false);
-		if (config_fd < 0) {
-			break;
+			len = read(supervisor_fd, &evt, sizeof(evt));
+			if (len > 0) {
+				char access_buf[32];
+
+				/*
+				 * Print the denial message.  For FS events,
+				 * fd1/fd2 would normally contain file
+				 * descriptors, but for simplicity we just
+				 * print the access info.
+				 */
+				if (evt.hdr.type ==
+				    LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS) {
+					char fdpath[PATH_MAX];
+					char linkbuf[64];
+					const char *pathstr = "(unknown)";
+
+					/* Try to resolve fd1 path */
+					if (evt.fd1 >= 0) {
+						snprintf(linkbuf,
+							 sizeof(linkbuf),
+							 "/proc/self/fd/%d",
+							 evt.fd1);
+						len = readlink(linkbuf, fdpath,
+							       sizeof(fdpath) -
+								       1);
+						if (len > 0) {
+							fdpath[len] = '\0';
+							pathstr = fdpath;
+						}
+						close(evt.fd1);
+					}
+					if (evt.fd2 >= 0)
+						close(evt.fd2);
+
+					fprintf(stderr,
+						"Supervisor: %s access to %s denied\n",
+						access_to_string(
+							evt.access_request,
+							access_buf,
+							sizeof(access_buf)),
+						pathstr);
+				} else if (evt.hdr.type ==
+					   LANDLOCK_SUPERVISE_EVENT_TYPE_NET_ACCESS) {
+					fprintf(stderr,
+						"Supervisor: network access to port %u denied\n",
+						(unsigned int)evt.port);
+				}
+
+				/* Deny the request outright */
+				{
+					struct landlock_supervise_response resp = {
+						.length = sizeof(resp),
+						.decision =
+							LANDLOCK_SUPERVISE_DECISION_DENY,
+						.cookie = evt.hdr.cookie,
+					};
+
+					if (write(supervisor_fd, &resp,
+						  sizeof(resp)) < 0) {
+						perror("write response");
+					}
+				}
+			}
 		}
 
-		/* Load and apply new rules */
-		if (load_and_apply_config(config_fd, supervisor_fd, &tracked,
-					  ruleset_attr.handled_access_fs) < 0) {
-			break;
+		/* Handle inotify events */
+		if (pfds[0].revents & POLLIN) {
+			len = read(inotify_fd, buf, sizeof(buf));
+			if (child_exited)
+				break;
+			if (len < 0 && errno != EAGAIN) {
+				perror("read inotify");
+				break;
+			}
+
+			fprintf(stderr,
+				"\nSupervisor: Config file changed, reloading rules...\n");
+
+			config_fd = wait_config_file(config_path, inotify_fd,
+						     false);
+			if (config_fd < 0)
+				break;
+
+			/* Load and apply new rules */
+			if (load_and_apply_config(config_fd, supervisor_fd,
+						  &tracked,
+						  ruleset_attr.handled_access_fs) <
+			    0)
+				break;
 		}
 	}
 
