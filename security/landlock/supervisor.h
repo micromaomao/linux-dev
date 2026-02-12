@@ -140,7 +140,7 @@ landlock_get_supervisor_committed_ruleset(struct landlock_supervisor *supervisor
 enum landlock_supervise_event_state {
 	LANDLOCK_SUPERVISE_EVENT_NEW,
 	LANDLOCK_SUPERVISE_EVENT_NOTIFIED,
-	LANDLOCK_SUPERVISE_EVENT_ALLOWED,
+	LANDLOCK_SUPERVISE_EVENT_ACKNOWLEDGED,
 	LANDLOCK_SUPERVISE_EVENT_DENIED,
 };
 
@@ -181,8 +181,8 @@ struct landlock_supervise_event_kernel {
 	};
 };
 
-#define LANDLOCK_SUPERVISE_EVENT_HANDLED(event)                \
-	((event)->state == LANDLOCK_SUPERVISE_EVENT_ALLOWED || \
+#define LANDLOCK_SUPERVISE_EVENT_HANDLED(event)                       \
+	((event)->state == LANDLOCK_SUPERVISE_EVENT_ACKNOWLEDGED || \
 	 (event)->state == LANDLOCK_SUPERVISE_EVENT_DENIED)
 
 static inline void landlock_get_supervise_event(
