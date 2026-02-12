@@ -570,21 +570,21 @@ struct landlock_supervise_event {
 	};
 };
 
-/* clang-format off */
-#define LANDLOCK_SUPERVISE_DECISION_DENY		0
-#define LANDLOCK_SUPERVISE_DECISION_ALLOW		1
-/* clang-format on */
-
 /**
  * struct landlock_supervise_response - Response to a supervisor notification
+ *
+ * The supervisor writes this structure back to the supervisor fd to
+ * acknowledge a previously read event.  The syscall that triggered the
+ * event is always restarted after the response; the supervisor should
+ * update rules (via the mutable domain mechanism) or set the quiet flag
+ * on the denied object before responding if it wants to change the
+ * outcome.
  */
 struct landlock_supervise_response {
 	/** @length: Size of this structure. */
 	__u16 length;
-	/** @decision: Whether to allow the request. */
-	__u8 decision;
 	/** @_reserved: Reserved, must be zero. */
-	__u8 _reserved;
+	__u16 _reserved;
 	/** @cookie: Cookie previously received in the request. */
 	__u32 cookie;
 };

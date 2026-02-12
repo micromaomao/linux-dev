@@ -10,6 +10,7 @@
 #include <linux/in.h>
 #include <linux/lsm_audit.h>
 #include <linux/net.h>
+#include <linux/sched/signal.h>
 #include <linux/socket.h>
 #include <net/ipv6.h>
 
@@ -55,7 +56,7 @@ int landlock_append_net_rule(struct landlock_ruleset *const ruleset,
  * @port: The network port being accessed.
  *
  * Returns:
- * - 0 if a notification was queued (caller should return -ERESTARTNOINTR)
+ * - 0 if a notification was queued (caller should return restart_syscall())
  * - -EACCES if notification cannot be sent (normal denial)
  */
 static int landlock_check_notify_net(
@@ -280,7 +281,7 @@ static int current_check_access_socket(struct socket *const sock,
 	if (!landlock_check_notify_net(subject->domain, &layer_masks,
 				       &rule_flags, access_request,
 				       ntohs(port)))
-		return -ERESTARTNOINTR;
+		return restart_syscall();
 
 	landlock_log_denial(
 		subject,
