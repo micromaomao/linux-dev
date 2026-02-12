@@ -404,12 +404,13 @@ static int load_and_apply_config(int config_fd, int supervisor_fd,
 				}
 				/* Removing quiet: re-add the rule without quiet flag */
 				if (!is_quiet && entry->is_quiet) {
-					path_beneath.allowed_access = new_access;
-					/* Intersect with 0 to remove, then re-add without quiet */
 					struct landlock_path_beneath_attr zero_attr = {
 						.parent_fd = entry->pathfd,
 						.allowed_access = 0,
 					};
+
+					path_beneath.allowed_access = new_access;
+					/* Intersect with 0 to remove, then re-add without quiet */
 					landlock_add_rule(supervisor_fd,
 							  LANDLOCK_RULE_PATH_BENEATH,
 							  &zero_attr,
@@ -541,7 +542,6 @@ static int load_and_apply_config(int config_fd, int supervisor_fd,
 								 sizeof(access_buf)),
 						path);
 				}
-			}
 			}
 
 			tracked_ruleset_insert(tracked, &new_entry);
@@ -925,7 +925,12 @@ int main(int argc, char *const argv[], char *const *const envp)
 					char linkbuf[64];
 					const char *pathstr = "(unknown)";
 
-					/* Try to resolve fd1 path */
+					/*
+					 * Try to resolve fd1 path.
+					 * Currently fd1/fd2 are set to -1
+					 * by the kernel, but this is ready
+					 * for when they are populated.
+					 */
 					if (evt.fd1 >= 0) {
 						snprintf(linkbuf,
 							 sizeof(linkbuf),
