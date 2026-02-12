@@ -329,8 +329,11 @@ static void landlock_supervise_wait_work(struct callback_head *twork)
 		container_of(twork, struct landlock_supervise_wait, twork);
 	struct landlock_supervise_event_kernel *event = wait->event;
 
-	/* Block until the supervisor responds or the supervisor is freed. */
-	wait_var_event(event, LANDLOCK_SUPERVISE_EVENT_HANDLED(event));
+	/* Block until the supervisor responds, the supervisor is freed,
+	 * or the task is killed.
+	 */
+	wait_var_event_killable(event,
+				LANDLOCK_SUPERVISE_EVENT_HANDLED(event));
 
 	landlock_put_supervise_event(event);
 	kfree(wait);
