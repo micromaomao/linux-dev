@@ -435,3 +435,7 @@ The `samples/landlock/supervisor_sandboxer.c` sample has been extended to demons
 - When a notification event is received, prints access-specific messages (e.g., "create dir /path/child denied", "read access to /path denied", "delete /path/child denied", "rename /path/child to /path2/child2 denied").
 - Acknowledges all notification events (the syscall will be restarted; the supervisor could update rules or set quiet flags before responding to change the outcome).
 - Supports a `quiet` config line (e.g., `quiet /tmp`) that sets the quiet flag on a path, suppressing notifications for that path.  Removing the quiet line from the config removes the quiet flag.
+
+## Problems
+
+When the supervisor is killed, the child should have all its pending events denied and should no longer be able to generate notifications, but currently since it has a ref to the supervisor, this is not the case.
