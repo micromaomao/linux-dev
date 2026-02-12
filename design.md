@@ -381,9 +381,12 @@ The event flow for a denied access in a supervised layer with notification enabl
 
 To avoid DoS issues from blocking inside LSM hooks while holding inode locks, the notification mechanism does not block in the hook.  Instead:
 1. The event is queued to the supervisor's event queue.
-2. The hook returns via `restart_syscall()` to restart the syscall.
-3. The supervisor reads the event, updates rules or sets the quiet flag as desired, then writes a response.
-4. On response, the syscall is always restarted.  If the supervisor updated rules to allow the access, the restarted syscall succeeds.  If the supervisor set the quiet flag on the path, the restarted syscall denies without further notification.  If the supervisor did nothing, the event is queued again on the next restart.
+2. A `task_work` callback is installed on the calling task (via `task_work_add` with `TWA_RESUME`).  This callback will run before the task returns to user space.
+3. The hook returns via `restart_syscall()` to cause the syscall to restart.
+4. Before returning to user space, the `task_work` callback runs and blocks the task (via `wait_var_event`) until the supervisor responds to the event.
+5. The supervisor reads the event, updates rules or sets the quiet flag as desired, then writes a response.
+6. The response wakes up the waiting task (via `wake_up_var`).  The task_work callback completes and the syscall is restarted.
+7. On restart, if the supervisor updated rules to allow the access, the restarted syscall succeeds.  If the supervisor set the quiet flag on the path, the restarted syscall denies without further notification.  If the supervisor did nothing, the event is queued again on the next restart.
 
 The supervisor cannot directly deny a request outright; it can only acknowledge the notification and allow the syscall to restart.  This avoids the complexity of setting a syscall return value in an architecture-agnostic way.  In the future, direct deny support may be added as an extension.  However, this is non-trivial because `-ERESTARTNOINTR` causes the kernel to re-execute the same syscall from the top, and there is no guarantee that the restarted syscall will hit the same Landlock hook or access the same path.  For example, the denied file might be removed between the denial and the restart, causing the syscall to fail with `-ENOENT` before Landlock even runs; or a different file might be accessed on the next attempt.  A naïve "pending denial" flag stored in the task struct would not be able to distinguish whether the restarted syscall is still accessing the same object.  A possible approach would be to store the pending denial along with enough context to identify the original request (e.g., the syscall number, the dentry/inode, and the access mask), then only apply the cached denial if the restarted hook matches exactly; otherwise, clear the stale pending denial and proceed normally.  This adds complexity but would avoid the infinite-loop problem of always restarting when the supervisor wants to deny.
 
@@ -416,11 +419,13 @@ If the supervisor wants to deny an access without being notified about it again 
 ### Implementation Notes
 
 - The `struct landlock_supervisor` is extended with notification state: an event queue, a notified events list, a spinlock, a wait queue for polling, and a `notification_enabled` flag.
-- Events are represented by `struct landlock_supervise_event_kernel` which holds references to paths and PIDs.
+- Events are represented by `struct landlock_supervise_event_kernel` which holds references to paths and PIDs.  Each event has a refcount: one reference for the queue/list, and one for the task_work waiter.
+- When an event is queued, `landlock_queue_supervisor_notification()` installs a `task_work` callback (via `task_work_add` with `TWA_RESUME`) that blocks the calling task using `wait_var_event()` until the event is acknowledged or denied.  This ensures the task does not spin on syscall restart before the supervisor has responded.
+- The supervisor's `fop_supervisor_write()` handler sets the event state and calls `wake_up_var()` to unblock the waiting task.
+- When the supervisor is freed (last reference dropped), all pending/notified events are denied with `wake_up_var()` to unblock any waiting tasks.
 - The notification check logic is implemented in helper functions (`landlock_check_notify_fs` in fs.c and `landlock_check_notify_net` in net.c) that iterate denying layers and queue events.
 - For directory operations, `current_check_access_path` passes the child dentry and `child_is_new` flag to `landlock_check_notify_fs`, which constructs full paths for the supervisor event.
 - Scope-related denials and mount operations do not trigger notifications.
-- When the last reference to a supervisor is dropped (all supervised domains and the supervisor fd are closed), any pending events are automatically denied.
 
 ### supervisor_sandboxer Example
 
