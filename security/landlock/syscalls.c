@@ -229,7 +229,7 @@ static ssize_t fop_supervisor_read(struct file *const filp,
 	struct landlock_supervisor *supervisor;
 	struct landlock_supervise_event_kernel *event = NULL;
 	bool found = false;
-	struct landlock_supervise_event *user_event;
+	struct landlock_supervise_event user_event;
 	size_t destname_size = 0, event_size = 0;
 	const size_t dest_offset =
 		offsetof(struct landlock_supervise_event, destname);
@@ -314,21 +314,21 @@ retry:
 	}
 
 	event_size = ALIGN(dest_offset + destname_size,
-			   __alignof__(typeof(*user_event)));
+			   __alignof__(typeof(user_event)));
 
 	if (event_size > size) {
 		ret = -EINVAL;
 		goto fail_readd_event;
 	}
 
-	/* Stack-allocate the fixed-size user event structure. */
-	user_event = &(struct landlock_supervise_event){};
+	/* Zero-initialize the fixed-size user event structure. */
+	memset(&user_event, 0, sizeof(user_event));
 
-	user_event->hdr.type = event->type;
-	user_event->hdr.length = event_size;
-	user_event->hdr.cookie = event->event_id;
-	user_event->access_request = event->access_request;
-	user_event->accessor = pid_vnr(event->accessor);
+	user_event.hdr.type = event->type;
+	user_event.hdr.length = event_size;
+	user_event.hdr.cookie = event->event_id;
+	user_event.access_request = event->access_request;
+	user_event.accessor = pid_vnr(event->accessor);
 
 	/* Set up the appropriate file descriptors based on the type */
 	if (event->type == LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS) {
@@ -370,14 +370,14 @@ retry:
 			}
 		}
 	} else if (event->type == LANDLOCK_SUPERVISE_EVENT_TYPE_NET_ACCESS) {
-		user_event->port = event->port;
+		user_event.port = event->port;
 	}
 
-	user_event->fd1 = fd1;
-	user_event->fd2 = fd2;
+	user_event.fd1 = fd1;
+	user_event.fd2 = fd2;
 
 	/* Non-variable-sized part */
-	if (copy_to_user(buf, user_event, dest_offset)) {
+	if (copy_to_user(buf, &user_event, dest_offset)) {
 		ret = -EFAULT;
 		goto fail_readd_event;
 	}
