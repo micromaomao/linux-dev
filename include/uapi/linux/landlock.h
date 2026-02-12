@@ -110,6 +110,7 @@ struct landlock_ruleset_attr {
 #define LANDLOCK_CREATE_RULESET_VERSION			(1U << 0)
 #define LANDLOCK_CREATE_RULESET_ERRATA			(1U << 1)
 #define LANDLOCK_CREATE_RULESET_SUPERVISOR		(1U << 2)
+#define LANDLOCK_CREATE_SUPERVISOR_NOTIFICATION		(1U << 3)
 /* clang-format on */
 
 /**
@@ -493,5 +494,99 @@ struct landlock_net_port_attr {
  */
 #define LANDLOCK_IOC_MAGIC			'L'
 #define LANDLOCK_IOCTL_GET_SUPERVISEE_RULESET	_IO(LANDLOCK_IOC_MAGIC, 0x20)
+
+/**
+ * DOC: supervisor_notification
+ *
+ * Supervisor Notification
+ * ~~~~~~~~~~~~~~~~~~~~~~~
+ *
+ * When a supervised layer has notification enabled via
+ * %LANDLOCK_CREATE_SUPERVISOR_NOTIFICATION, denial events are sent to the
+ * supervisor instead of being immediately denied.  The supervisor reads
+ * events from the supervisor ruleset fd and writes responses.
+ */
+
+typedef __u16 landlock_supervise_event_type_t;
+/* clang-format off */
+#define LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS		1
+#define LANDLOCK_SUPERVISE_EVENT_TYPE_NET_ACCESS		2
+/* clang-format on */
+
+/**
+ * struct landlock_supervise_event_hdr - Header for supervisor notification events
+ */
+struct landlock_supervise_event_hdr {
+	/**
+	 * @type: Type of the event.
+	 */
+	landlock_supervise_event_type_t type;
+	/**
+	 * @length: Length of the entire struct landlock_supervise_event
+	 * including this header.
+	 */
+	__u16 length;
+	/**
+	 * @cookie: Opaque identifier to be included in the response.
+	 */
+	__u32 cookie;
+};
+
+/**
+ * struct landlock_supervise_event - Supervisor notification event
+ */
+struct landlock_supervise_event {
+	/** @hdr: Event header. */
+	struct landlock_supervise_event_hdr hdr;
+	/** @access_request: Bitmask of denied access rights. */
+	__u64 access_request;
+	/** @accessor: PID of the accessing task. */
+	__kernel_pid_t accessor;
+	union {
+		struct {
+			/**
+			 * @fd1: An open file descriptor for the file or
+			 * the parent directory being accessed.  Must be
+			 * closed by the reader.  If this points to a parent
+			 * directory, @destname will contain the target
+			 * filename.
+			 */
+			int fd1;
+			/**
+			 * @fd2: For link or rename, a second fd.
+			 * -1 if unused.
+			 */
+			int fd2;
+			/**
+			 * @destname: Filename for file creation target.
+			 * Variable length, NULL-terminated with padding.
+			 */
+			char destname[];
+		};
+		struct {
+			/** @port: Network port in host endianness. */
+			__u16 port;
+		};
+	};
+};
+
+/* clang-format off */
+#define LANDLOCK_SUPERVISE_DECISION_DENY		0
+#define LANDLOCK_SUPERVISE_DECISION_ALLOW		1
+/* clang-format on */
+
+/**
+ * struct landlock_supervise_response - Response to a supervisor notification
+ */
+struct landlock_supervise_response {
+	/** @length: Size of this structure. */
+	__u16 length;
+	/** @decision: Whether to allow the request. */
+	__u8 decision;
+	/** @_reserved: Reserved, must be zero. */
+	__u8 _reserved;
+	/** @cookie: Cookie previously received in the request. */
+	__u32 cookie;
+};
 
 #endif /* _UAPI_LINUX_LANDLOCK_H */
