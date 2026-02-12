@@ -229,7 +229,7 @@ static ssize_t fop_supervisor_read(struct file *const filp,
 	struct landlock_supervisor *supervisor;
 	struct landlock_supervise_event_kernel *event = NULL;
 	bool found = false;
-	struct landlock_supervise_event *user_event = NULL;
+	struct landlock_supervise_event *user_event;
 	size_t destname_size = 0, event_size = 0;
 	const size_t dest_offset =
 		offsetof(struct landlock_supervise_event, destname);
@@ -290,16 +290,17 @@ retry:
 	if (event->type == LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS) {
 		struct dentry *dest_dentry;
 
-		if (WARN_ON(event->target_1_is_new &&
-			    event->target_2_is_new)) {
+		if (WARN_ON_ONCE(event->target_1_is_new &&
+				 event->target_2_is_new)) {
 			ret = -EAGAIN;
 			goto fail_deny;
 		}
 
 		/*
-		 * Get destname out here so that we know the event's size.
-		 * We separate the lifetime of destname away from the
-		 * kernel event so we can move the copy outside of lock.
+		 * Extract the destination filename before we release the
+		 * event, so we know the total event size for the user copy.
+		 * The destname pointer remains valid because we hold a
+		 * reference to the event's path.
 		 */
 		if (event->target_1.dentry && event->target_1_is_new) {
 			dest_dentry = event->target_1.dentry;
@@ -320,13 +321,8 @@ retry:
 		goto fail_readd_event;
 	}
 
-	/* We will copy the destname directly to user buffer */
-	user_event =
-		kzalloc(sizeof(struct landlock_supervise_event), GFP_KERNEL);
-	if (!user_event) {
-		ret = -ENOMEM;
-		goto fail_readd_event;
-	}
+	/* Stack-allocate the fixed-size user event structure. */
+	user_event = &(struct landlock_supervise_event){};
 
 	user_event->hdr.type = event->type;
 	user_event->hdr.length = event_size;
@@ -443,7 +439,6 @@ free:
 		if (fd2 >= 0)
 			close_fd(fd2);
 	}
-	kfree(user_event);
 	return ret;
 }
 
@@ -452,6 +447,8 @@ free:
  *
  * Processes one or more responses from the supervisor for previously read
  * events.  Multiple responses can be written in a single write call.
+ * The syscall is always restarted after the response; the supervisor should
+ * update rules or set the quiet flag before responding to change the outcome.
  * If notification is not enabled, returns -EINVAL.
  */
 static ssize_t fop_supervisor_write(struct file *const filp,
@@ -484,6 +481,9 @@ static ssize_t fop_supervisor_write(struct file *const filp,
 		if (response.length != sizeof(response))
 			return -EINVAL;
 
+		if (response._reserved != 0)
+			return -EINVAL;
+
 		spin_lock(&supervisor->notification_lock);
 
 		/* Find the event with matching cookie */
@@ -514,16 +514,11 @@ static ssize_t fop_supervisor_write(struct file *const filp,
 			continue;
 		}
 
-		if (response.decision == LANDLOCK_SUPERVISE_DECISION_ALLOW)
-			event->state = LANDLOCK_SUPERVISE_EVENT_ALLOWED;
-		else if (response.decision ==
-			 LANDLOCK_SUPERVISE_DECISION_DENY)
-			event->state = LANDLOCK_SUPERVISE_EVENT_DENIED;
-		else {
-			pr_warn("Invalid supervise event decision: %u\n",
-				response.decision);
-			goto fail_re_add;
-		}
+		/*
+		 * Always restart the syscall.  The supervisor should have
+		 * updated rules or set the quiet flag before responding.
+		 */
+		event->state = LANDLOCK_SUPERVISE_EVENT_ALLOWED;
 
 		wake_up_var(event);
 		landlock_put_supervise_event(event);
@@ -532,12 +527,6 @@ static ssize_t fop_supervisor_write(struct file *const filp,
 		bytes_processed += sizeof(response);
 	}
 	goto ret;
-
-fail_re_add:
-	spin_lock(&supervisor->notification_lock);
-	list_add(&event->node, &supervisor->notified_events);
-	event = NULL;
-	spin_unlock(&supervisor->notification_lock);
 
 ret:
 	WARN_ON(event);
