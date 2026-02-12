@@ -259,11 +259,15 @@ static int insert_rule(struct landlock_ruleset *const ruleset,
 				return -EINVAL;
 			if (WARN_ON_ONCE(this->layers[0].level != 0))
 				return -EINVAL;
-			if (intersect)
+			if (intersect) {
 				this->layers[0].access &= (*layers)[0].access;
-			else
+				this->layers[0].flags.quiet &=
+					(*layers)[0].flags.quiet;
+			} else {
 				this->layers[0].access |= (*layers)[0].access;
-			this->layers[0].flags.quiet |= (*layers)[0].flags.quiet;
+				this->layers[0].flags.quiet |=
+					(*layers)[0].flags.quiet;
+			}
 			return 0;
 		}
 
