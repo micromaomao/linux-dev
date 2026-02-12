@@ -314,6 +314,12 @@ The `samples/landlock/supervisor_sandboxer.c` sample has been extended to demons
 - Denies all notification requests outright (the supervisor could also allow them by updating rules and responding with ALLOW).
 - Supports a `quiet` config line (e.g., `quiet /tmp`) that sets the quiet flag on a path, suppressing notifications for that path.  Removing the quiet line from the config removes the quiet flag.
 
+## To consider
+
+Supervisor notification: uAPI - new uAPI or fanotify?
+
+Do mutable domains or supervisor notification first?
+
 ## Future work
 
 Implement hash table or not?
