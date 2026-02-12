@@ -2,7 +2,7 @@ Implement the supervisor notification mechanism as alluded to in design.md.  The
 
 ## Previous implementation
 
-Earlier, I implemented a supervisor mechanism without mutable domains support in the "landlock-supervise" branch which you can check via `git fetch --depth=11 origin landlock-supervise landlock-supervise-base` then `git log landlock-supervise-base..landlock-supervise` then `git show` individual commits, or you can use git show commit:file to view individual changed files, or you can visit this PR: @micromaomao/linux-dev/pull/2 which is the same as the landlock-supervise branch - up to you.
+Earlier, I implemented a supervisor mechanism without mutable domains support in the "landlock-supervise" branch which you can check via `git fetch --depth=11 origin landlock-supervise landlock-supervise-base` then `git log landlock-supervise-base..landlock-supervise` then `git show` individual commits, or you can use git show 9dc2b112c4be1aadff612b226c603db66ef79955:file to view individual changed files (9dc2b112c4be1aadff612b226c603db66ef79955 is the last commit in that PR. Of course you still need to fetch the branch with --depth=11 to read it).
 
 ## What I want
 
@@ -52,6 +52,8 @@ void landlock_supervise_wait_work() {
 
 To make this design easier, we only wait for one supervisor at a time. If, for example, layer 1 and 2 both deny the request and they are both supervised layers, send a notification to layer 2 first and return from the hook. If it allows access, the next restart of this syscall will end up calling layer 1's supervisor.
 
+Since Landlock has many different hooks, we should create a function to do as much of the common supervisor related work as possible, and call it in e.g. is_access_to_paths_allowed() and other places (and net) if necessary. Remember to refer to the old landlock-supervise implementation. We don't have to notify scope related denials, or attempted mounts. Also don't worry about selftests for now.
+
 ## Additional changes
 
 Please also add the detailed design for the supervisor notification feature (the one you implemented) to design.md.
@@ -63,4 +65,4 @@ Please also extend supervisor_sandboxer.c in this way:
 - Accept a new "access" called "quiet" which doesn't grant any access, just sets the quiet flag on a file/dir. e.g. a line in the config can say `quiet /tmp`
 - Remove the quiet flag if this line is later removed, like how we remove access.
 
-Please also try to update documentations
+Please also try to update documentations.
