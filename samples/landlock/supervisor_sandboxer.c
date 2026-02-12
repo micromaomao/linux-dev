@@ -375,7 +375,7 @@ static int load_and_apply_config(int config_fd, int supervisor_fd,
 			entry->should_keep = true;
 
 			/* Restrict file access rights for non-directories */
-			if (!is_quiet && fstat(entry->pathfd, &statbuf) == 0 &&
+			if (fstat(entry->pathfd, &statbuf) == 0 &&
 			    !S_ISDIR(statbuf.st_mode))
 				new_access &= ACCESS_FILE;
 
@@ -383,16 +383,17 @@ static int load_and_apply_config(int config_fd, int supervisor_fd,
 			if (is_quiet != entry->is_quiet) {
 				struct landlock_path_beneath_attr path_beneath = {
 					.parent_fd = entry->pathfd,
-					.allowed_access = 0,
+					.allowed_access = new_access,
 				};
-				__u32 flags = is_quiet ? LANDLOCK_ADD_RULE_QUIET : 0;
 
 				if (is_quiet) {
 					/* Adding quiet flag */
 					if (landlock_add_rule(
 						    supervisor_fd,
 						    LANDLOCK_RULE_PATH_BENEATH,
-						    &path_beneath, flags) < 0) {
+						    &path_beneath,
+						    LANDLOCK_ADD_RULE_QUIET) <
+					    0) {
 						fprintf(stderr,
 							"Error setting quiet on %s: %s\n",
 							path, strerror(errno));
@@ -400,35 +401,29 @@ static int load_and_apply_config(int config_fd, int supervisor_fd,
 						fprintf(stderr,
 							"supervisor: Set quiet for %s\n",
 							path);
+						entry->access |= new_access;
 					}
-				}
-				/* Removing quiet: re-add the rule without quiet flag */
-				if (!is_quiet && entry->is_quiet) {
-					struct landlock_path_beneath_attr zero_attr = {
-						.parent_fd = entry->pathfd,
-						.allowed_access = 0,
-					};
-
-					path_beneath.allowed_access = new_access;
-					/* Intersect with 0 to remove, then re-add without quiet */
-					landlock_add_rule(supervisor_fd,
-							  LANDLOCK_RULE_PATH_BENEATH,
-							  &zero_attr,
-							  LANDLOCK_ADD_RULE_INTERSECT);
-					if (new_access) {
-						landlock_add_rule(
-							supervisor_fd,
-							LANDLOCK_RULE_PATH_BENEATH,
-							&path_beneath, 0);
+				} else {
+					if (landlock_add_rule(
+						    supervisor_fd,
+						    LANDLOCK_RULE_PATH_BENEATH,
+						    &path_beneath,
+						    LANDLOCK_ADD_RULE_INTERSECT) <
+					    0) {
+						fprintf(stderr,
+							"Error removing quiet on %s: %s\n",
+							path, strerror(errno));
+					} else {
+						fprintf(stderr,
+							"supervisor: Removed quiet for %s\n",
+							path);
+						entry->access &= new_access;
 					}
-					fprintf(stderr,
-						"supervisor: Removed quiet for %s\n",
-						path);
 				}
 				entry->is_quiet = is_quiet;
 			}
 
-			if (!is_quiet && entry->access != new_access) {
+			if (entry->access != new_access) {
 				struct landlock_path_beneath_attr path_beneath = {
 					.parent_fd = entry->pathfd,
 					.allowed_access = new_access,
@@ -457,13 +452,16 @@ static int load_and_apply_config(int config_fd, int supervisor_fd,
 				}
 				if ((new_access | entry->access) !=
 				    new_access) {
+					int flag = LANDLOCK_ADD_RULE_INTERSECT;
+
+					/* Keep quiet flags */
+					if (entry->is_quiet)
+						flag |= LANDLOCK_ADD_RULE_QUIET;
 					/* Removing access - use intersect */
 					if (landlock_add_rule(
 						    supervisor_fd,
 						    LANDLOCK_RULE_PATH_BENEATH,
-						    &path_beneath,
-						    LANDLOCK_ADD_RULE_INTERSECT) <
-					    0) {
+						    &path_beneath, flag) < 0) {
 						fprintf(stderr,
 							"Error removing access on %s: landlock_add_rule failed: %s\n",
 							path, strerror(errno));
