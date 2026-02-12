@@ -243,20 +243,24 @@ static ssize_t fop_supervisor_read(struct file *const filp,
 		uev.port = event->port;
 		break;
 	}
-	spin_unlock(&supervisor->notification_lock);
-
-	if (copy_to_user(buf, &uev, event_size))
-		return -EFAULT;
-
 	/*
-	 * Move event from queue to notified list only after successful
-	 * delivery to userspace.
+	 * Move event to notified list before copy_to_user.  If copy
+	 * fails, re-add to queue head for retry.
 	 */
-	spin_lock(&supervisor->notification_lock);
 	list_del_init(&event->node);
 	event->state = LANDLOCK_SUPERVISE_EVENT_NOTIFIED;
 	list_add_tail(&event->node, &supervisor->notified_events);
 	spin_unlock(&supervisor->notification_lock);
+
+	if (copy_to_user(buf, &uev, event_size)) {
+		/* Re-add to queue for retry */
+		spin_lock(&supervisor->notification_lock);
+		list_del_init(&event->node);
+		event->state = LANDLOCK_SUPERVISE_EVENT_NEW;
+		list_add(&event->node, &supervisor->event_queue);
+		spin_unlock(&supervisor->notification_lock);
+		return -EFAULT;
+	}
 
 	return event_size;
 }
