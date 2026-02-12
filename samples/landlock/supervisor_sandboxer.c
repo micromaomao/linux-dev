@@ -945,7 +945,7 @@ int main(int argc, char *const argv[], char *const *const envp)
 							 evt->fd1);
 						ssize_t rlen = readlink(
 							linkbuf, fd1path,
-							sizeof(fd1path) - NAME_MAX - 2);
+							PATH_MAX - 1);
 						if (rlen > 0) {
 							fd1path[rlen] = '\0';
 							path1str = fd1path;
@@ -961,7 +961,7 @@ int main(int argc, char *const argv[], char *const *const envp)
 							 evt->fd2);
 						ssize_t rlen = readlink(
 							linkbuf, fd2path,
-							sizeof(fd2path) - NAME_MAX - 2);
+							PATH_MAX - 1);
 						if (rlen > 0) {
 							fd2path[rlen] = '\0';
 							path2str = fd2path;
@@ -977,12 +977,16 @@ int main(int argc, char *const argv[], char *const *const envp)
 						if ((ar & LANDLOCK_ACCESS_FS_REFER) &&
 						    path2str) {
 							/* rename/link: destname goes to fd2 path */
-							strcat(fd2path, "/");
-							strcat(fd2path, destname);
+							strncat(fd2path, "/",
+								sizeof(fd2path) - strlen(fd2path) - 1);
+							strncat(fd2path, destname,
+								sizeof(fd2path) - strlen(fd2path) - 1);
 						} else if (path1str) {
 							/* create/delete: destname goes to fd1 path */
-							strcat(fd1path, "/");
-							strcat(fd1path, destname);
+							strncat(fd1path, "/",
+								sizeof(fd1path) - strlen(fd1path) - 1);
+							strncat(fd1path, destname,
+								sizeof(fd1path) - strlen(fd1path) - 1);
 						}
 					}
 
