@@ -1046,7 +1046,8 @@ jump_up:
  * dentries.
  *
  * Returns:
- * - 0 if a notification was queued (caller should return restart_syscall())
+ * - 0 if a notification was queued (caller should return -EPERM and let
+ *   task_work handle the actual return value)
  * - -EACCES if notification cannot be sent (normal denial)
  */
 static int landlock_check_notify_fs(
@@ -1163,11 +1164,17 @@ static int current_check_access_path(const struct path *const path,
 				       NULL, 0, NULL, NULL, NULL, NULL))
 		return 0;
 
-	/* Check if we should notify a supervisor instead of denying. */
+	/* Check if we should notify a supervisor. */
 	if (!landlock_check_notify_fs(subject->domain, &layer_masks,
 				      &rule_flags, path, access_request,
-				      child, NULL, child_is_new, false))
-		return restart_syscall();
+				      child, NULL, child_is_new, false)) {
+		/*
+		 * Notification queued. Return -EPERM now; the task_work
+		 * callback will set the appropriate return value (restart
+		 * or custom ret_code) before returning to userspace.
+		 */
+		return -EPERM;
+	}
 
 	request.rule_flags = rule_flags;
 	landlock_log_denial(subject, &request);
@@ -1929,12 +1936,18 @@ static int hook_file_open(struct file *const file)
 	if (access_mask_subset(open_access_request, allowed_access))
 		return 0;
 
-	/* Check if we should notify a supervisor instead of denying. */
+	/* Check if we should notify a supervisor. */
 	if (!landlock_check_notify_fs(subject->domain, &layer_masks,
 				      &rule_flags, &file->f_path,
 				      open_access_request,
-				      NULL, NULL, false, false))
-		return restart_syscall();
+				      NULL, NULL, false, false)) {
+		/*
+		 * Notification queued. Return -EPERM now; the task_work
+		 * callback will set the appropriate return value (restart
+		 * or custom ret_code) before returning to userspace.
+		 */
+		return -EPERM;
+	}
 
 	/* Sets access to reflect the actual request. */
 	request.access = open_access_request;

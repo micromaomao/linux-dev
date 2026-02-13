@@ -277,7 +277,17 @@ To avoid DoS issues from blocking inside LSM hooks while holding inode locks, th
 6. The response wakes up the waiting task (via `wake_up_var`).  The task_work callback completes and the syscall is restarted.
 7. On restart, if the supervisor updated rules to allow the access, the restarted syscall succeeds.  If the supervisor set the quiet flag on the path, the restarted syscall denies without further notification.  If the supervisor did nothing, the event is queued again on the next restart.
 
-The supervisor cannot directly deny a request outright; it can only acknowledge the notification and allow the syscall to restart.  This avoids the complexity of setting a syscall return value in an architecture-agnostic way.  In the future, direct deny support may be added as an extension.  However, this is non-trivial because `-ERESTARTNOINTR` causes the kernel to re-execute the same syscall from the top, and there is no guarantee that the restarted syscall will hit the same Landlock hook or access the same path.  For example, the denied file might be removed between the denial and the restart, causing the syscall to fail with `-ENOENT` before Landlock even runs; or a different file might be accessed on the next attempt.  A naïve "pending denial" flag stored in the task struct would not be able to distinguish whether the restarted syscall is still accessing the same object.  A possible approach would be to store the pending denial along with enough context to identify the original request (e.g., the syscall number, the dentry/inode, and the access mask), then only apply the cached denial if the restarted hook matches exactly; otherwise, clear the stale pending denial and proceed normally.  This adds complexity but would avoid the infinite-loop problem of always restarting when the supervisor wants to deny.
+The supervisor can directly deny a request or provide a custom return value using `syscall_set_return_value()`.  The response structure includes a `ret_code` field and a `flags` field.  When `LANDLOCK_SUPERVISE_RETCODE` is set in `flags`, the syscall return value is set to `ret_code` instead of restarting.  This allows the supervisor maximum flexibility: it can deny with -EPERM, allow by creating resources on behalf of the sandboxed process and returning 0, or return any other appropriate error code.
+
+When a supervisor notification is queued:
+1. The LSM hook returns -EPERM immediately (without blocking).
+2. A `task_work` callback is installed to wait for the supervisor response.
+3. Before the task returns to userspace, the `task_work` runs and blocks until the supervisor responds.
+4. Based on the response flags:
+   - If `LANDLOCK_SUPERVISE_RETCODE` is set: `syscall_set_return_value(current, current_pt_regs(), ret_code, 0)` is called to set the return value.
+   - Otherwise: `syscall_set_return_value(current, current_pt_regs(), restart_syscall(), 0)` is called to restart the syscall.
+
+The use of `syscall_set_return_value()` provides an architecture-agnostic way to set the syscall return value from the task_work context, avoiding the complexities of attempting to set return values while holding locks in the LSM hook.  When restarting is needed (the default behavior), `restart_syscall()` is called only at the point where we know we need to restart, which sets the `TIF_SIGPENDING` flag; `syscall_set_return_value()` then ensures the syscall returns -ERESTARTNOINTR.
 
 Only one supervisor is notified at a time.  If multiple layers deny access, the youngest (most recently added) layer's supervisor is notified first.  If it allows access (by updating rules), the next restart of the syscall will check remaining denying layers.
 
@@ -287,7 +297,7 @@ The notification interface reuses the supervisor ruleset file descriptor.  The f
 
 - **`read(supervisor_fd, buf, size)`**: Reads the next pending event from the event queue.  Returns a `struct landlock_supervise_event` containing the event type, access request, accessor PID, and (for FS events) O_PATH file descriptors for the target paths, or (for NET events) port number.  For directory operations (create, delete, rename, link), the fd points to the parent directory and the `destname` field contains the target filename.  Blocks if no events are pending (unless `O_NONBLOCK`).  The caller must close any received file descriptors.
 
-- **`write(supervisor_fd, buf, size)`**: Writes one or more `struct landlock_supervise_response` to respond to previously read events.  Multiple responses can be written in a single write call.  Each response contains the event's cookie (no decision field — the syscall is always restarted).
+- **`write(supervisor_fd, buf, size)`**: Writes one or more `struct landlock_supervise_response` to respond to previously read events.  Multiple responses can be written in a single write call.  Each response contains the event's cookie, optional flags, and an optional return code.  If `LANDLOCK_SUPERVISE_RETCODE` is set in `flags`, the syscall return value is set to `ret_code`; otherwise, the syscall is restarted (default behavior).
 
 - **`poll(supervisor_fd, ...)`**: Returns `POLLIN` when events are pending.
 
