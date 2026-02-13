@@ -14,6 +14,7 @@
 #include <linux/ptrace.h>
 #include <linux/rcupdate.h>
 #include <linux/refcount.h>
+#include <linux/sched/task_stack.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/task_work.h>
