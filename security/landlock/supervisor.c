@@ -7,10 +7,17 @@
 
 #include <linux/err.h>
 #include <linux/errno.h>
+#include <linux/list.h>
 #include <linux/mutex.h>
+#include <linux/path.h>
+#include <linux/pid.h>
 #include <linux/rcupdate.h>
 #include <linux/refcount.h>
 #include <linux/slab.h>
+#include <linux/spinlock.h>
+#include <linux/task_work.h>
+#include <linux/wait.h>
+#include <linux/wait_bit.h>
 
 #include "ruleset.h"
 #include "supervisor.h"
@@ -33,6 +40,12 @@ struct landlock_supervisor *landlock_create_supervisor(void)
 	mutex_init(&supervisor->lock);
 	refcount_set(&supervisor->usage, 1);
 	RCU_INIT_POINTER(supervisor->committed_ruleset, NULL);
+	supervisor->notification_enabled = false;
+	spin_lock_init(&supervisor->notification_lock);
+	INIT_LIST_HEAD(&supervisor->event_queue);
+	INIT_LIST_HEAD(&supervisor->notified_events);
+	init_waitqueue_head(&supervisor->poll_wq);
+	supervisor->next_event_id = 1;
 
 	return supervisor;
 }
@@ -40,8 +53,27 @@ struct landlock_supervisor *landlock_create_supervisor(void)
 static void free_supervisor(struct landlock_supervisor *supervisor)
 {
 	struct landlock_ruleset *committed;
+	struct landlock_supervise_event_kernel *event, *tmp;
 
 	WARN_ON_ONCE(!supervisor);
+
+	/* Deny all pending and notified events. */
+	spin_lock(&supervisor->notification_lock);
+	list_for_each_entry_safe(event, tmp, &supervisor->event_queue, node) {
+		list_del_init(&event->node);
+		event->state = LANDLOCK_SUPERVISE_EVENT_DENIED;
+		wake_up_var(event);
+		landlock_put_supervise_event(event);
+	}
+	list_for_each_entry_safe(event, tmp, &supervisor->notified_events,
+				 node) {
+		list_del_init(&event->node);
+		event->state = LANDLOCK_SUPERVISE_EVENT_DENIED;
+		wake_up_var(event);
+		landlock_put_supervise_event(event);
+	}
+	spin_unlock(&supervisor->notification_lock);
+
 	/*
 	 * If we get here, we have to be the last reference owner, and thus
 	 * nobody else can be trying to update or read us committed_ruleset,
@@ -267,6 +299,148 @@ int landlock_commit_supervisor(struct landlock_ruleset *ruleset)
 	if (old_committed) {
 		synchronize_rcu();
 		landlock_put_ruleset(old_committed);
+	}
+
+	return 0;
+}
+
+/**
+ * struct landlock_supervise_wait - Task work data for waiting on supervisor
+ *
+ * Allocated per notification event; the task_work callback blocks until
+ * the supervisor responds, then releases resources.
+ */
+struct landlock_supervise_wait {
+	/** @twork: Callback head for task_work_add(). */
+	struct callback_head twork;
+	/** @event: The notification event to wait on. */
+	struct landlock_supervise_event_kernel *event;
+};
+
+/**
+ * landlock_supervise_wait_work - Task work callback to wait for supervisor
+ *
+ * Runs before the task returns to user space.  Blocks until the supervisor
+ * acknowledges or denies the event, then drops the event reference.
+ */
+static void landlock_supervise_wait_work(struct callback_head *twork)
+{
+	struct landlock_supervise_wait *wait =
+		container_of(twork, struct landlock_supervise_wait, twork);
+	struct landlock_supervise_event_kernel *event = wait->event;
+
+	/* Block until the supervisor responds, the supervisor is freed,
+	 * or the task is killed.
+	 */
+	wait_var_event_killable(event,
+				LANDLOCK_SUPERVISE_EVENT_HANDLED(event));
+
+	landlock_put_supervise_event(event);
+	kfree(wait);
+}
+
+/**
+ * landlock_queue_supervisor_notification - Queue a notification event
+ *
+ * @supervisor: The supervisor to notify.
+ * @type: Event type (FS or NET).
+ * @access_request: The denied access rights.
+ * @path1: First path target (may be NULL for net events).
+ * @path2: Second path target for rename/link (may be NULL).
+ * @path1_new: Whether path1 is a new file.
+ * @path2_new: Whether path2 is a new file.
+ * @port: Network port (only for NET events).
+ *
+ * Creates a notification event, adds it to the supervisor's event queue, and
+ * installs a task_work callback that blocks the calling task (before it
+ * returns to user space) until the supervisor responds.  This avoids blocking
+ * inside the LSM hook (where inode locks may be held) while still preventing
+ * the task from looping on syscall restart before the supervisor has a chance
+ * to respond.
+ *
+ * Returns: 0 on success, negative error code on failure.
+ */
+int landlock_queue_supervisor_notification(
+	struct landlock_supervisor *supervisor,
+	const landlock_supervise_event_type_t type,
+	const access_mask_t access_request,
+	const struct path *path1, const struct path *path2,
+	const bool path1_new, const bool path2_new,
+	const __u16 port)
+{
+	struct landlock_supervise_event_kernel *event;
+	struct landlock_supervise_wait *wait;
+
+	if (!supervisor || !supervisor->notification_enabled)
+		return -EINVAL;
+
+	/*
+	 * Allocate both structures before initializing either, so failure
+	 * cleanup is a simple kfree without needing to release resources.
+	 */
+	wait = kzalloc(sizeof(*wait), GFP_KERNEL);
+	if (!wait)
+		return -ENOMEM;
+
+	event = kzalloc(sizeof(*event), GFP_KERNEL);
+	if (!event) {
+		kfree(wait);
+		return -ENOMEM;
+	}
+
+	INIT_LIST_HEAD(&event->node);
+	/*
+	 * Two refs: one for the queue/list, one for the task_work waiter.
+	 * The queue/list ref is dropped when the supervisor reads + responds.
+	 * The task_work ref is dropped after the wait completes.
+	 */
+	refcount_set(&event->usage, 2);
+	event->state = LANDLOCK_SUPERVISE_EVENT_NEW;
+	event->type = type;
+	event->access_request = access_request;
+	event->accessor = get_task_pid(current, PIDTYPE_PID);
+
+	switch (type) {
+	case LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS:
+		if (path1) {
+			event->target_1 = *path1;
+			path_get(&event->target_1);
+		}
+		if (path2) {
+			event->target_2 = *path2;
+			path_get(&event->target_2);
+		}
+		event->target_1_is_new = path1_new;
+		event->target_2_is_new = path2_new;
+		break;
+	case LANDLOCK_SUPERVISE_EVENT_TYPE_NET_ACCESS:
+		event->port = port;
+		break;
+	}
+
+	spin_lock(&supervisor->notification_lock);
+	event->event_id = supervisor->next_event_id++;
+	list_add_tail(&event->node, &supervisor->event_queue);
+	spin_unlock(&supervisor->notification_lock);
+
+	wake_up_interruptible(&supervisor->poll_wq);
+
+	/*
+	 * Install a task_work that will block the task before it returns
+	 * to user space, waiting for the supervisor to respond.  This
+	 * ensures the task doesn't loop on syscall restart before the
+	 * supervisor has had a chance to update rules or set quiet flags.
+	 */
+	wait->event = event;
+	init_task_work(&wait->twork, landlock_supervise_wait_work);
+	if (task_work_add(current, &wait->twork, TWA_RESUME)) {
+		/*
+		 * Task is exiting — the event is already queued and will
+		 * be cleaned up when the supervisor is freed.  Drop the
+		 * task_work ref.
+		 */
+		landlock_put_supervise_event(event);
+		kfree(wait);
 	}
 
 	return 0;
