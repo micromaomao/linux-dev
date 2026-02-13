@@ -481,7 +481,8 @@ static ssize_t fop_supervisor_write(struct file *const filp,
 		if (response.length != sizeof(response))
 			return -EINVAL;
 
-		if (response._reserved != 0)
+		/* Validate flags - only LANDLOCK_SUPERVISE_RETCODE is allowed */
+		if (response.flags & ~LANDLOCK_SUPERVISE_RETCODE)
 			return -EINVAL;
 
 		spin_lock(&supervisor->notification_lock);
@@ -515,9 +516,16 @@ static ssize_t fop_supervisor_write(struct file *const filp,
 		}
 
 		/*
-		 * Mark event as acknowledged.  The syscall will be
-		 * restarted; the supervisor should have updated rules
-		 * or set the quiet flag before responding.
+		 * Store the response data in the event structure so the
+		 * task_work callback can use it.
+		 */
+		event->response_ret_code = response.ret_code;
+		event->response_flags = response.flags;
+
+		/*
+		 * Mark event as acknowledged.  If LANDLOCK_SUPERVISE_RETCODE
+		 * is set, the syscall will return response.ret_code; otherwise,
+		 * the syscall will be restarted.
 		 */
 		event->state = LANDLOCK_SUPERVISE_EVENT_ACKNOWLEDGED;
 
