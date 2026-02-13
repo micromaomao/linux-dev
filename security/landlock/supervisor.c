@@ -345,9 +345,13 @@ static void landlock_supervise_wait_work(struct callback_head *twork)
 
 	/* Set the syscall return value based on the supervisor's response. */
 	if (event->response_flags & LANDLOCK_SUPERVISE_RETCODE) {
-		/* Supervisor specified a return code. */
+		/*
+		 * Supervisor specified a return code. The ret_code field is u8,
+		 * but represents a signed error code. Sign-extend from s8 to long
+		 * to properly handle negative error codes like -EPERM (stored as 0xF1).
+		 */
 		syscall_set_return_value(current, regs,
-					 (long)(signed char)event->response_ret_code,
+					 (long)(s8)event->response_ret_code,
 					 0);
 	} else {
 		/* Default behavior: restart the syscall. */
