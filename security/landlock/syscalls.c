@@ -17,16 +17,21 @@
 #include <linux/dcache.h>
 #include <linux/err.h>
 #include <linux/errno.h>
+#include <linux/fdtable.h>
+#include <linux/file.h>
 #include <linux/fs.h>
 #include <linux/limits.h>
 #include <linux/mount.h>
 #include <linux/path.h>
+#include <linux/poll.h>
 #include <linux/sched.h>
 #include <linux/security.h>
 #include <linux/stddef.h>
 #include <linux/syscalls.h>
 #include <linux/types.h>
 #include <linux/uaccess.h>
+#include <linux/wait.h>
+#include <linux/wait_bit.h>
 #include <uapi/linux/landlock.h>
 
 #include "cred.h"
@@ -160,6 +165,403 @@ static const struct file_operations ruleset_fops = {
 };
 
 /**
+ * p_parent - Get the parent path of a given path.
+ *
+ * @p: The path whose parent is needed.
+ *
+ * Lifetime of the return value is tied to @p (no extra ref taken).
+ */
+static struct path p_parent(struct path p)
+{
+	struct path parent_path = { .mnt = p.mnt,
+				    .dentry = p.dentry->d_parent };
+	return parent_path;
+}
+
+/**
+ * supervise_fs_fd_open_install - Open an O_PATH fd for a supervisor target
+ *
+ * @path: The path to open an fd for.
+ *
+ * Opens an O_PATH file descriptor for @path and installs it in the current
+ * process's file descriptor table.  Used to pass target file references to
+ * the supervisor process when reporting notification events.
+ *
+ * Returns: The file descriptor number on success, or a negative error code.
+ */
+static int supervise_fs_fd_open_install(struct path *path)
+{
+	int fd;
+	struct file *f;
+
+	fd = get_unused_fd_flags(O_CLOEXEC);
+	if (fd < 0) {
+		pr_warn("get_unused_fd_flags: %pe\n", ERR_PTR(fd));
+		return fd;
+	}
+	f = dentry_open(path, O_PATH | O_CLOEXEC, current_cred());
+	if (IS_ERR(f)) {
+		pr_warn("Failed to open fd in supervisor: %ld\n", PTR_ERR(f));
+		put_unused_fd(fd);
+		return PTR_ERR(f);
+	}
+	fd_install(fd, f);
+	return fd;
+}
+
+/**
+ * fop_supervisor_read - Read notification events from supervisor fd
+ *
+ * Reads the next pending event from the supervisor's event queue.
+ * If notification is not enabled, returns -EINVAL.
+ * If no events are pending, returns -EAGAIN (for non-blocking) or blocks.
+ *
+ * For FS events, opens O_PATH file descriptors for the target paths and
+ * passes them to userspace.  For file creation events (target_X_is_new),
+ * the fd points to the parent directory and the new filename is placed
+ * in the destname field.
+ */
+static ssize_t fop_supervisor_read(struct file *const filp,
+				   char __user *const buf, const size_t size,
+				   loff_t *const ppos)
+{
+	struct landlock_ruleset *ruleset = filp->private_data;
+	struct landlock_supervisor *supervisor;
+	struct landlock_supervise_event_kernel *event = NULL;
+	bool found = false;
+	struct landlock_supervise_event user_event;
+	size_t destname_size = 0, event_size = 0;
+	const size_t dest_offset =
+		offsetof(struct landlock_supervise_event, destname);
+	const char *destname = NULL; /* Lifetime tied to event */
+	int fd1 = -1, fd2 = -1, ret = 0;
+	bool nonblock = filp->f_flags & O_NONBLOCK;
+	struct path parent_path;
+
+	if (!ruleset || !ruleset->supervisor)
+		return -EINVAL;
+
+	supervisor = ruleset->supervisor;
+	if (!supervisor->notification_enabled)
+		return -EINVAL;
+
+	if (size < sizeof(struct landlock_supervise_event))
+		return -EINVAL;
+
+retry:
+	spin_lock(&supervisor->notification_lock);
+
+	/*
+	 * Find the first new event (but really, all events in this
+	 * list should be new).
+	 */
+	list_for_each_entry(event, &supervisor->event_queue, node) {
+		if (event->state == LANDLOCK_SUPERVISE_EVENT_NEW) {
+			found = true;
+			break;
+		}
+	}
+
+	if (!found) {
+		spin_unlock(&supervisor->notification_lock);
+		if (nonblock)
+			return -EAGAIN;
+
+		/*
+		 * Wait for events to be added to the queue.
+		 * Not sure if we can call list_empty() without the lock
+		 * here, hence true.
+		 */
+		ret = wait_event_interruptible(supervisor->poll_wq, true);
+		if (ret)
+			return ret;
+
+		goto retry;
+	}
+
+	/*
+	 * We take the event out of the list and let other readers
+	 * carry on.  We take over the event's ownership from the
+	 * list (hence no get/put).
+	 */
+	list_del(&event->node);
+	spin_unlock(&supervisor->notification_lock);
+
+	if (event->type == LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS) {
+		struct dentry *dest_dentry;
+
+		if (WARN_ON_ONCE(event->target_1_is_new &&
+				 event->target_2_is_new)) {
+			ret = -EAGAIN;
+			goto fail_deny;
+		}
+
+		/*
+		 * Extract the destination filename before we release the
+		 * event, so we know the total event size for the user copy.
+		 * The destname pointer remains valid because we hold a
+		 * reference to the event's path.
+		 */
+		if (event->target_1.dentry && event->target_1_is_new) {
+			dest_dentry = event->target_1.dentry;
+			destname = (char *)dest_dentry->d_name.name;
+			destname_size = dest_dentry->d_name.len + 1;
+		} else if (event->target_2.dentry && event->target_2_is_new) {
+			dest_dentry = event->target_2.dentry;
+			destname = (char *)dest_dentry->d_name.name;
+			destname_size = dest_dentry->d_name.len + 1;
+		}
+	}
+
+	event_size = ALIGN(dest_offset + destname_size,
+			   __alignof__(typeof(user_event)));
+
+	if (event_size > size) {
+		ret = -EINVAL;
+		goto fail_readd_event;
+	}
+
+	/* Zero-initialize the fixed-size user event structure. */
+	memset(&user_event, 0, sizeof(user_event));
+
+	user_event.hdr.type = event->type;
+	user_event.hdr.length = event_size;
+	user_event.hdr.cookie = event->event_id;
+	user_event.access_request = event->access_request;
+	user_event.accessor = pid_vnr(event->accessor);
+
+	/* Set up the appropriate file descriptors based on the type */
+	if (event->type == LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS) {
+		if (event->target_1.dentry) {
+			if (event->target_1_is_new) {
+				parent_path = p_parent(event->target_1);
+				fd1 = supervise_fs_fd_open_install(
+					&parent_path);
+				if (fd1 < 0) {
+					ret = fd1;
+					goto fail_deny_or_readd;
+				}
+			} else {
+				fd1 = supervise_fs_fd_open_install(
+					&event->target_1);
+				if (fd1 < 0) {
+					ret = fd1;
+					goto fail_deny_or_readd;
+				}
+			}
+		}
+
+		if (event->target_2.dentry) {
+			if (event->target_2_is_new) {
+				parent_path = p_parent(event->target_2);
+				fd2 = supervise_fs_fd_open_install(
+					&parent_path);
+				if (fd2 < 0) {
+					ret = fd2;
+					goto fail_deny_or_readd;
+				}
+			} else {
+				fd2 = supervise_fs_fd_open_install(
+					&event->target_2);
+				if (fd2 < 0) {
+					ret = fd2;
+					goto fail_deny_or_readd;
+				}
+			}
+		}
+	} else if (event->type == LANDLOCK_SUPERVISE_EVENT_TYPE_NET_ACCESS) {
+		user_event.port = event->port;
+	}
+
+	user_event.fd1 = fd1;
+	user_event.fd2 = fd2;
+
+	/* Non-variable-sized part */
+	if (copy_to_user(buf, &user_event, dest_offset)) {
+		ret = -EFAULT;
+		goto fail_readd_event;
+	}
+
+	/* destname */
+	if (destname && destname_size > 0) {
+		if (copy_to_user(buf + dest_offset, destname, destname_size)) {
+			ret = -EFAULT;
+			goto fail_readd_event;
+		}
+	}
+
+	/* Zero out any padding bytes */
+	if (event_size > dest_offset + destname_size) {
+		size_t padding_len = event_size - dest_offset - destname_size;
+
+		if (clear_user(buf + dest_offset + destname_size,
+			       padding_len)) {
+			ret = -EFAULT;
+			goto fail_readd_event;
+		}
+	}
+
+	ret = event_size;
+	event->state = LANDLOCK_SUPERVISE_EVENT_NOTIFIED;
+	/* No decision yet, don't wake up! */
+	spin_lock(&supervisor->notification_lock);
+	list_add(&event->node, &supervisor->notified_events);
+	event = NULL;
+	spin_unlock(&supervisor->notification_lock);
+	goto free;
+
+fail_deny_or_readd:
+	if (ret == -EINTR)
+		goto fail_readd_event;
+	else
+		goto fail_deny;
+
+fail_readd_event:
+	WARN_ON(event->state != LANDLOCK_SUPERVISE_EVENT_NEW);
+	spin_lock(&supervisor->notification_lock);
+	list_add(&event->node, &supervisor->event_queue);
+	event = NULL;
+	spin_unlock(&supervisor->notification_lock);
+	goto free;
+
+fail_deny:
+	event->state = LANDLOCK_SUPERVISE_EVENT_DENIED;
+	wake_up_var(event);
+	landlock_put_supervise_event(event);
+	event = NULL;
+	goto free;
+
+free:
+	WARN_ON(event);
+	if (ret < 0) {
+		if (fd1 >= 0)
+			close_fd(fd1);
+		if (fd2 >= 0)
+			close_fd(fd2);
+	}
+	return ret;
+}
+
+/**
+ * fop_supervisor_write - Write notification responses to supervisor fd
+ *
+ * Processes one or more responses from the supervisor for previously read
+ * events.  Multiple responses can be written in a single write call.
+ * The syscall is always restarted after the response; the supervisor should
+ * update rules or set the quiet flag before responding to change the outcome.
+ * If notification is not enabled, returns -EINVAL.
+ */
+static ssize_t fop_supervisor_write(struct file *const filp,
+				    const char __user *const buf,
+				    const size_t size, loff_t *const ppos)
+{
+	struct landlock_ruleset *ruleset = filp->private_data;
+	struct landlock_supervisor *supervisor;
+	struct landlock_supervise_response response;
+	struct landlock_supervise_event_kernel *event;
+	size_t bytes_processed = 0;
+	bool found;
+
+	if (!ruleset || !ruleset->supervisor)
+		return -EINVAL;
+
+	supervisor = ruleset->supervisor;
+	if (!supervisor->notification_enabled)
+		return -EINVAL;
+
+	/* We need at least one complete response */
+	if (size < sizeof(response))
+		return -EINVAL;
+
+	while (bytes_processed + sizeof(response) <= size) {
+		if (copy_from_user(&response, buf + bytes_processed,
+				   sizeof(response)))
+			return -EFAULT;
+
+		if (response.length != sizeof(response))
+			return -EINVAL;
+
+		if (response._reserved != 0)
+			return -EINVAL;
+
+		spin_lock(&supervisor->notification_lock);
+
+		/* Find the event with matching cookie */
+		found = false;
+		list_for_each_entry(event, &supervisor->notified_events,
+				    node) {
+			if (event->event_id == response.cookie) {
+				found = true;
+				break;
+			}
+		}
+
+		if (!found) {
+			spin_unlock(&supervisor->notification_lock);
+			pr_warn("Unknown supervise event cookie: %u\n",
+				response.cookie);
+			event = NULL;
+			goto ret;
+		}
+
+		list_del(&event->node);
+		spin_unlock(&supervisor->notification_lock);
+
+		if (WARN_ON(LANDLOCK_SUPERVISE_EVENT_HANDLED(event))) {
+			bytes_processed += sizeof(response);
+			landlock_put_supervise_event(event);
+			event = NULL;
+			continue;
+		}
+
+		/*
+		 * Mark event as acknowledged.  The syscall will be
+		 * restarted; the supervisor should have updated rules
+		 * or set the quiet flag before responding.
+		 */
+		event->state = LANDLOCK_SUPERVISE_EVENT_ACKNOWLEDGED;
+
+		wake_up_var(event);
+		landlock_put_supervise_event(event);
+		event = NULL;
+
+		bytes_processed += sizeof(response);
+	}
+	goto ret;
+
+ret:
+	WARN_ON(event);
+	return bytes_processed > 0 ? bytes_processed : -EINVAL;
+}
+
+/**
+ * fop_supervisor_poll - Poll for pending notification events
+ */
+static __poll_t fop_supervisor_poll(struct file *filp,
+				    struct poll_table_struct *wait)
+{
+	struct landlock_ruleset *ruleset = filp->private_data;
+	struct landlock_supervisor *supervisor;
+	__poll_t mask = 0;
+
+	if (!ruleset || !ruleset->supervisor)
+		return EPOLLERR;
+
+	supervisor = ruleset->supervisor;
+	if (!supervisor->notification_enabled)
+		return EPOLLERR;
+
+	poll_wait(filp, &supervisor->poll_wq, wait);
+
+	spin_lock(&supervisor->notification_lock);
+	if (!list_empty(&supervisor->event_queue))
+		mask |= EPOLLIN | EPOLLRDNORM;
+	spin_unlock(&supervisor->notification_lock);
+
+	return mask;
+}
+
+/**
  * fop_supervisor_ioctl - Handle ioctl calls on supervisor rulesets
  *
  * @filp: The supervisor ruleset file.
@@ -218,8 +620,9 @@ static long fop_supervisor_ioctl(struct file *filp, unsigned int cmd,
 
 static const struct file_operations supervisor_ruleset_fops = {
 	.release = fop_ruleset_release,
-	.read = fop_dummy_read,
-	.write = fop_dummy_write,
+	.read = fop_supervisor_read,
+	.write = fop_supervisor_write,
+	.poll = fop_supervisor_poll,
 	.unlocked_ioctl = fop_supervisor_ioctl,
 	/* We don't take pointer argument, so no need to compat_ptr_ioctl */
 	.compat_ioctl = fop_supervisor_ioctl,
@@ -297,8 +700,14 @@ SYSCALL_DEFINE3(landlock_create_ruleset,
 		return landlock_errata;
 	}
 
-	/* Only SUPERVISOR flag is valid for ruleset creation */
-	if (flags & ~LANDLOCK_CREATE_RULESET_SUPERVISOR)
+	/* Only SUPERVISOR and NOTIFICATION flags are valid for ruleset creation */
+	if (flags & ~(LANDLOCK_CREATE_RULESET_SUPERVISOR |
+		      LANDLOCK_CREATE_SUPERVISOR_NOTIFICATION))
+		return -EINVAL;
+
+	/* NOTIFICATION requires SUPERVISOR */
+	if ((flags & LANDLOCK_CREATE_SUPERVISOR_NOTIFICATION) &&
+	    !(flags & LANDLOCK_CREATE_RULESET_SUPERVISOR))
 		return -EINVAL;
 
 	is_supervisor = !!(flags & LANDLOCK_CREATE_RULESET_SUPERVISOR);
@@ -358,6 +767,8 @@ SYSCALL_DEFINE3(landlock_create_ruleset,
 			landlock_put_ruleset(ruleset);
 			return PTR_ERR(supervisor);
 		}
+		if (flags & LANDLOCK_CREATE_SUPERVISOR_NOTIFICATION)
+			supervisor->notification_enabled = true;
 		ruleset->supervisor = supervisor;
 		fops = &supervisor_ruleset_fops;
 	} else {

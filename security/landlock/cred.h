@@ -20,6 +20,8 @@
 #include "ruleset.h"
 #include "setup.h"
 
+struct landlock_supervise_event_kernel;
+
 /**
  * struct landlock_cred_security - Credential security blob
  *
@@ -34,6 +36,14 @@ struct landlock_cred_security {
 	 * @domain: Immutable ruleset enforced on a task.
 	 */
 	struct landlock_ruleset *domain;
+
+	/**
+	 * @pending_supervise_event: When non-NULL, the current task is waiting
+	 * for a supervisor decision.  The task_work callback will wait on this
+	 * event and then set the syscall return value.  This is per-thread
+	 * state and is not copied on credential duplication.
+	 */
+	struct landlock_supervise_event_kernel *pending_supervise_event;
 
 #ifdef CONFIG_AUDIT
 	/**
@@ -73,6 +83,8 @@ static inline void landlock_cred_copy(struct landlock_cred_security *dst,
 	landlock_put_ruleset(dst->domain);
 
 	*dst = *src;
+	/* Pending events are per-thread and must not be inherited. */
+	dst->pending_supervise_event = NULL;
 
 	landlock_get_ruleset(src->domain);
 }
