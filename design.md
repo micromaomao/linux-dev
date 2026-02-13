@@ -249,6 +249,8 @@ What if a supervisor wants to clear all rules and reconstruct the supervisor rul
 
 Intersect or replace?  How about just having a "clear all rules in a ruleset"?
 
+Implement hash table or not?
+
 ## Supervisor Notification
 
 The supervisor notification mechanism allows a supervisor to receive events when a supervised process is denied access.  This enables interactive decision-making: the supervisor can be told about denied accesses and decide whether to allow them (by updating rules via the mutable domain mechanism) or deny them outright.
@@ -329,10 +331,6 @@ When the supervisor is killed, the child should have all its pending events deni
 
 ## To consider
 
-Supervisor notification: uAPI - new uAPI or fanotify?
-
-Do mutable domains or supervisor notification first?
+Supervisor notification: uAPI - new uAPI, fanotify, or seccomp-unotify?
 
 ## Future work
-
-Implement hash table or not?
