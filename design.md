@@ -277,7 +277,7 @@ To avoid DoS issues from blocking inside LSM hooks while holding inode locks, th
 6. The response wakes up the waiting task (via `wake_up_var`).  The task_work callback completes and the syscall is restarted.
 7. On restart, if the supervisor updated rules to allow the access, the restarted syscall succeeds.  If the supervisor set the quiet flag on the path, the restarted syscall denies without further notification.  If the supervisor did nothing, the event is queued again on the next restart.
 
-The supervisor can directly deny a request or provide a custom return value using `syscall_set_return_value()`.  The response structure includes a `ret_code` field and a `flags` field.  When `LANDLOCK_SUPERVISE_RETCODE` is set in `flags`, the syscall return value is set to `ret_code` instead of restarting.  This allows the supervisor maximum flexibility: it can deny with -EPERM, allow by creating resources on behalf of the sandboxed process and returning 0, or return any other appropriate error code.
+The supervisor can directly deny a request or provide a custom return value using `syscall_set_return_value()`.  The response structure includes a `ret_code` field (an `__s64` to match seccomp-unotify's flexibility) and a `flags` field.  When `LANDLOCK_SUPERVISE_RETCODE` is set in `flags`, the syscall return value is set to `ret_code` instead of restarting.  This allows the supervisor maximum flexibility: it can deny with -EPERM, allow by creating resources on behalf of the sandboxed process and returning 0, or return any other appropriate value.
 
 When a supervisor notification is queued:
 1. The LSM hook returns -EPERM immediately (without blocking).
