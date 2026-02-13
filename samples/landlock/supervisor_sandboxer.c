@@ -97,6 +97,10 @@ static inline int landlock_restrict_self(const int ruleset_fd,
 #define LANDLOCK_IOCTL_GET_SUPERVISEE_RULESET _IO(LANDLOCK_IOC_MAGIC, 0x20)
 #endif
 
+#ifndef LANDLOCK_SUPERVISE_RETCODE
+#define LANDLOCK_SUPERVISE_RETCODE (1U << 0)
+#endif
+
 /* clang-format off */
 
 #define ACCESS_FS_ROUGHLY_READ ( \
@@ -651,12 +655,12 @@ static int wait_config_file(const char *config_path, int inotify_fd, bool init)
 static void print_usage(const char *prog)
 {
 	fprintf(stderr,
-		"Usage: %s <config_file> <command> [args...]\n"
+		"Usage: %s <config_file> <denials_log_file> <command> [args...]\n"
 		"\n"
 		"Run <command> in a Landlock sandbox with rules from <config_file>.\n"
 		"The sandboxer monitors the config file and reloads rules on changes.\n"
-		"When access is denied, the supervisor receives a notification and\n"
-		"prints a message to stderr.\n"
+		"When access is denied, the supervisor logs it to <denials_log_file>\n"
+		"and immediately denies the request with -EPERM.\n"
 		"\n"
 		"Config file format (one rule per line):\n"
 		"  <access_type> <path>\n"
@@ -678,6 +682,65 @@ static void print_usage(const char *prog)
 		"  # Suppress notifications for /proc\n"
 		"  quiet /proc\n",
 		prog);
+}
+
+/**
+ * log_denial_to_file - Log a denial to the denials log file
+ *
+ * @log_path: Path to the denials log file
+ * @message: Comment message describing the denial
+ * @path: Path that was denied
+ * @is_ro: Whether to log as "ro" (true) or "rw" (false)
+ *
+ * Opens the log file in append mode, takes a lock, writes two lines
+ * (a comment and the rule), then closes the file.
+ */
+static void log_denial_to_file(const char *log_path, const char *message,
+			       const char *path, bool is_ro)
+{
+	int fd;
+	FILE *fp;
+	struct flock lock;
+
+	if (!log_path || !message || !path)
+		return;
+
+	fd = open(log_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+	if (fd < 0) {
+		fprintf(stderr, "Supervisor: Failed to open denials log: %s\n",
+			strerror(errno));
+		return;
+	}
+
+	/* Take an exclusive lock on the file */
+	memset(&lock, 0, sizeof(lock));
+	lock.l_type = F_WRLCK;
+	lock.l_whence = SEEK_SET;
+	lock.l_start = 0;
+	lock.l_len = 0; /* Lock entire file */
+
+	if (fcntl(fd, F_SETLKW, &lock) < 0) {
+		fprintf(stderr, "Supervisor: Failed to lock denials log: %s\n",
+			strerror(errno));
+		close(fd);
+		return;
+	}
+
+	fp = fdopen(fd, "a");
+	if (!fp) {
+		fprintf(stderr, "Supervisor: Failed to fdopen denials log: %s\n",
+			strerror(errno));
+		close(fd);
+		return;
+	}
+
+	/* Write the comment and rule */
+	fprintf(fp, "# %s\n", message);
+	fprintf(fp, "%s %s\n", is_ro ? "ro" : "rw", path);
+	fflush(fp);
+
+	/* File is unlocked and closed when fp is closed */
+	fclose(fp);
 }
 
 /**
@@ -716,6 +779,7 @@ static int wait_for_child(pid_t child)
 int main(int argc, char *const argv[], char *const *const envp)
 {
 	const char *config_path;
+	const char *denials_log_path;
 	const char *cmd_path;
 	char *const *cmd_argv;
 	int supervisor_fd, supervisee_fd;
@@ -730,14 +794,15 @@ int main(int argc, char *const argv[], char *const *const envp)
 		.quiet_access_fs = ACCESS_FS_ROUGHLY_READ | ACCESS_FS_ROUGHLY_WRITE,
 	};
 
-	if (argc < 3) {
+	if (argc < 4) {
 		print_usage(argv[0]);
 		return 1;
 	}
 
 	config_path = argv[1];
-	cmd_path = argv[2];
-	cmd_argv = argv + 2;
+	denials_log_path = argv[2];
+	cmd_path = argv[3];
+	cmd_argv = argv + 3;
 
 	tracked_ruleset_init(&tracked);
 
@@ -924,11 +989,13 @@ int main(int argc, char *const argv[], char *const *const envp)
 				     PATH_MAX];
 			struct landlock_supervise_event *evt =
 				(struct landlock_supervise_event *)evt_buf;
-			const char *suggest_path = NULL;
-			bool suggest_ro = false;
 
 			len = read(supervisor_fd, evt_buf, sizeof(evt_buf));
 			if (len > 0) {
+				const char *log_message = NULL;
+				const char *log_path_str = NULL;
+				bool log_is_ro = false;
+
 				if (evt->hdr.type ==
 				    LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS) {
 					char fd1path[PATH_MAX + NAME_MAX + 2];
@@ -994,21 +1061,31 @@ int main(int argc, char *const argv[], char *const *const envp)
 						}
 					}
 
-					/* Log different messages depending on access type */
+					/* Determine the message and log info based on access type */
 					if ((ar & LANDLOCK_ACCESS_FS_REFER) &&
 					    path1str && path2str) {
+						static char rename_msg[PATH_MAX * 2 + 50];
+						snprintf(rename_msg, sizeof(rename_msg),
+							 "rename %s to %s denied",
+							 path1str, path2str);
+						log_message = rename_msg;
+						log_path_str = path1str;
+						log_is_ro = false;
 						fprintf(stderr,
-							"Supervisor: rename %s to %s denied\n",
-							path1str,
-							path2str);
-						suggest_path = path1str;
+							"Supervisor: %s\n",
+							log_message);
 					} else if (ar &
 						   LANDLOCK_ACCESS_FS_MAKE_DIR) {
+						static char msg[PATH_MAX + 30];
+						snprintf(msg, sizeof(msg),
+							 "create dir %s denied",
+							 path1str ? path1str : "(unknown)");
+						log_message = msg;
+						log_path_str = path1str;
+						log_is_ro = false;
 						fprintf(stderr,
-							"Supervisor: create dir %s denied\n",
-							path1str ? path1str :
-								   "(unknown)");
-						suggest_path = path1str;
+							"Supervisor: %s\n",
+							log_message);
 					} else if (ar &
 						   (LANDLOCK_ACCESS_FS_MAKE_REG |
 						    LANDLOCK_ACCESS_FS_MAKE_CHAR |
@@ -1016,70 +1093,104 @@ int main(int argc, char *const argv[], char *const *const envp)
 						    LANDLOCK_ACCESS_FS_MAKE_FIFO |
 						    LANDLOCK_ACCESS_FS_MAKE_SOCK |
 						    LANDLOCK_ACCESS_FS_MAKE_SYM)) {
+						static char msg[PATH_MAX + 30];
+						snprintf(msg, sizeof(msg),
+							 "create file %s denied",
+							 path1str ? path1str : "(unknown)");
+						log_message = msg;
+						log_path_str = path1str;
+						log_is_ro = false;
 						fprintf(stderr,
-							"Supervisor: create file %s denied\n",
-							path1str ? path1str :
-								   "(unknown)");
-						suggest_path = path1str;
+							"Supervisor: %s\n",
+							log_message);
 					} else if (ar &
 						   (LANDLOCK_ACCESS_FS_REMOVE_FILE |
 						    LANDLOCK_ACCESS_FS_REMOVE_DIR)) {
+						static char msg[PATH_MAX + 30];
+						snprintf(msg, sizeof(msg),
+							 "delete %s denied",
+							 path1str ? path1str : "(unknown)");
+						log_message = msg;
+						log_path_str = path1str;
+						log_is_ro = false;
 						fprintf(stderr,
-							"Supervisor: delete %s denied\n",
-							path1str ? path1str :
-								   "(unknown)");
-						suggest_path = path1str;
+							"Supervisor: %s\n",
+							log_message);
 					} else if (ar &
 						   LANDLOCK_ACCESS_FS_READ_FILE) {
 						if (ar &
 						    LANDLOCK_ACCESS_FS_WRITE_FILE) {
+							static char msg[PATH_MAX + 40];
+							snprintf(msg, sizeof(msg),
+								 "read+write access to %s denied",
+								 path1str ? path1str : "(unknown)");
+							log_message = msg;
+							log_path_str = path1str;
+							log_is_ro = false;
 							fprintf(stderr,
-								"Supervisor: read+write access to %s denied\n",
-								path1str ?
-									path1str :
-									"(unknown)");
-							suggest_path = path1str;
+								"Supervisor: %s\n",
+								log_message);
 						} else {
+							static char msg[PATH_MAX + 30];
+							snprintf(msg, sizeof(msg),
+								 "read access to %s denied",
+								 path1str ? path1str : "(unknown)");
+							log_message = msg;
+							log_path_str = path1str;
+							log_is_ro = true;
 							fprintf(stderr,
-								"Supervisor: read access to %s denied\n",
-								path1str ?
-									path1str :
-									"(unknown)");
-							suggest_path = path1str;
-							suggest_ro = true;
+								"Supervisor: %s\n",
+								log_message);
 						}
 					} else if (ar &
 						   LANDLOCK_ACCESS_FS_WRITE_FILE) {
+						static char msg[PATH_MAX + 30];
+						snprintf(msg, sizeof(msg),
+							 "write access to %s denied",
+							 path1str ? path1str : "(unknown)");
+						log_message = msg;
+						log_path_str = path1str;
+						log_is_ro = false;
 						fprintf(stderr,
-							"Supervisor: write access to %s denied\n",
-							path1str ? path1str :
-								   "(unknown)");
-						suggest_path = path1str;
+							"Supervisor: %s\n",
+							log_message);
 					} else if (ar &
 						   LANDLOCK_ACCESS_FS_EXECUTE) {
+						static char msg[PATH_MAX + 30];
+						snprintf(msg, sizeof(msg),
+							 "execute access to %s denied",
+							 path1str ? path1str : "(unknown)");
+						log_message = msg;
+						log_path_str = path1str;
+						log_is_ro = true;
 						fprintf(stderr,
-							"Supervisor: execute access to %s denied\n",
-							path1str ? path1str :
-								   "(unknown)");
-						suggest_path = path1str;
-						suggest_ro = true;
+							"Supervisor: %s\n",
+							log_message);
 					} else if (ar &
 						   LANDLOCK_ACCESS_FS_READ_DIR) {
+						static char msg[PATH_MAX + 30];
+						snprintf(msg, sizeof(msg),
+							 "read dir %s denied",
+							 path1str ? path1str : "(unknown)");
+						log_message = msg;
+						log_path_str = path1str;
+						log_is_ro = true;
 						fprintf(stderr,
-							"Supervisor: read dir %s denied\n",
-							path1str ? path1str :
-								   "(unknown)");
-						suggest_path = path1str;
-						suggest_ro = true;
+							"Supervisor: %s\n",
+							log_message);
 					} else {
+						static char msg[PATH_MAX * 2 + 100];
+						snprintf(msg, sizeof(msg),
+							 "unknown access: %llu on fd1=%s fd2=%s denied",
+							 (unsigned long long)ar,
+							 path1str ? path1str : "(none)",
+							 path2str ? path2str : "(none)");
+						log_message = msg;
+						log_path_str = path1str;
+						log_is_ro = false;
 						fprintf(stderr,
-							"Supervisor: unknown access: %llu on fd1=%s fd2=%s denied\n",
-							(unsigned long long)ar,
-							path1str ? path1str :
-								   "(none)",
-							path2str ? path2str :
-								   "(none)");
-						suggest_path = path1str;
+							"Supervisor: %s\n",
+							log_message);
 					}
 				} else if (evt->hdr.type ==
 					   LANDLOCK_SUPERVISE_EVENT_TYPE_NET_ACCESS) {
@@ -1088,61 +1199,20 @@ int main(int argc, char *const argv[], char *const *const envp)
 						(unsigned int)evt->port);
 				}
 
-				/*
-				 * Print a hint about how to resolve the denial,
-				 * then wait for a config file change before
-				 * sending the response.
-				 */
-				if (suggest_path) {
-					fprintf(stderr,
-						"Add one of the following to %s to continue:\n",
-						config_path);
-					fprintf(stderr,
-						"    quiet %s\n",
-						suggest_path);
-					if (suggest_ro)
-						fprintf(stderr,
-							"    ro %s\n",
-							suggest_path);
-					else
-						fprintf(stderr,
-							"    rw %s\n",
-							suggest_path);
-				} else {
-					fprintf(stderr,
-						"Update %s to continue.\n",
-						config_path);
+				/* Log the denial to the denials log file */
+				if (log_message && log_path_str) {
+					log_denial_to_file(denials_log_path,
+							   log_message,
+							   log_path_str,
+							   log_is_ro);
 				}
 
-				/* Wait for config file change before responding */
-				len = read(inotify_fd, buf, sizeof(buf));
-				if (child_exited)
-					break;
-				if (len < 0 && errno != EAGAIN) {
-					perror("read inotify");
-					break;
-				}
-				/* Re-open and setup inotify */
-				config_fd = wait_config_file(config_path,
-							     inotify_fd,
-							     false);
-				if (config_fd >= 0) {
-					if (load_and_apply_config(
-						    config_fd, supervisor_fd,
-						    &tracked,
-						    ruleset_attr
-							    .handled_access_fs) <
-					    0) {
-						/* Log error but still respond */
-						fprintf(stderr,
-							"Supervisor: Failed to reload config\n");
-					}
-				}
-
-				/* Now acknowledge the event */
+				/* Immediately deny the request with -EPERM */
 				{
 					struct landlock_supervise_response resp = {
 						.length = sizeof(resp),
+						.ret_code = (unsigned char)(-EPERM),
+						.flags = LANDLOCK_SUPERVISE_RETCODE,
 						.cookie = evt->hdr.cookie,
 					};
 
