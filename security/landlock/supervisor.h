@@ -165,9 +165,9 @@ struct landlock_supervise_event_kernel {
 	struct pid *accessor;
 
 	/** @response_ret_code: Return code from supervisor response. */
-	u8 response_ret_code;
+	s64 response_ret_code;
 	/** @response_flags: Flags from supervisor response. */
-	u8 response_flags;
+	u16 response_flags;
 
 	union {
 		struct {

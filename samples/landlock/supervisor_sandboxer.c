@@ -1211,13 +1211,9 @@ int main(int argc, char *const argv[], char *const *const envp)
 				{
 					struct landlock_supervise_response resp = {
 						.length = sizeof(resp),
-						/*
-						 * Store -EPERM as u8. The kernel will
-						 * sign-extend this back to a negative value.
-						 */
-						.ret_code = (u8)(-EPERM & 0xFF),
 						.flags = LANDLOCK_SUPERVISE_RETCODE,
 						.cookie = evt->hdr.cookie,
+						.ret_code = -EPERM,
 					};
 
 					if (write(supervisor_fd, &resp,

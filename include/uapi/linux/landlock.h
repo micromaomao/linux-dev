@@ -583,12 +583,12 @@ struct landlock_supervise_event {
 struct landlock_supervise_response {
 	/** @length: Size of this structure. */
 	__u16 length;
-	/** @ret_code: Return code to set if LANDLOCK_SUPERVISE_RETCODE is set. */
-	__u8 ret_code;
 	/** @flags: Response flags (e.g., LANDLOCK_SUPERVISE_RETCODE). */
-	__u8 flags;
+	__u16 flags;
 	/** @cookie: Cookie previously received in the request. */
 	__u32 cookie;
+	/** @ret_code: Return code to set if LANDLOCK_SUPERVISE_RETCODE is set. */
+	__s64 ret_code;
 };
 
 /**
