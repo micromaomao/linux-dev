@@ -19,6 +19,7 @@
 #include <poll.h>
 #include <signal.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,6 +32,9 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <stdbool.h>
+
+/* Type aliases for kernel types */
+typedef uint8_t u8;
 
 #if defined(__GLIBC__)
 #include <linux/prctl.h>
@@ -995,7 +999,11 @@ int main(int argc, char *const argv[], char *const *const envp)
 				const char *log_message = NULL;
 				const char *log_path_str = NULL;
 				bool log_is_ro = false;
-				/* Message buffer for building denial messages */
+				/*
+				 * Message buffer for building denial messages.
+				 * Size accounts for two paths (rename), format string,
+				 * and null terminator.
+				 */
 				char msg_buf[PATH_MAX * 2 + 100];
 
 				if (evt->hdr.type ==
@@ -1203,7 +1211,11 @@ int main(int argc, char *const argv[], char *const *const envp)
 				{
 					struct landlock_supervise_response resp = {
 						.length = sizeof(resp),
-						.ret_code = (unsigned char)(-EPERM),
+						/*
+						 * Store -EPERM as u8. The kernel will
+						 * sign-extend this back to a negative value.
+						 */
+						.ret_code = (u8)(-EPERM & 0xFF),
 						.flags = LANDLOCK_SUPERVISE_RETCODE,
 						.cookie = evt->hdr.cookie,
 					};
