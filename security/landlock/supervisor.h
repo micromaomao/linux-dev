@@ -163,12 +163,12 @@ struct landlock_supervise_event_kernel {
 	access_mask_t access_request;
 	/** @accessor: PID of the accessing task. */
 	struct pid *accessor;
-	
+
 	/** @response_ret_code: Return code from supervisor response. */
 	u8 response_ret_code;
 	/** @response_flags: Flags from supervisor response. */
 	u8 response_flags;
-	
+
 	union {
 		struct {
 			/** @target_1: First path target. */

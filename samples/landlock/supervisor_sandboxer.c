@@ -995,6 +995,8 @@ int main(int argc, char *const argv[], char *const *const envp)
 				const char *log_message = NULL;
 				const char *log_path_str = NULL;
 				bool log_is_ro = false;
+				/* Message buffer for building denial messages */
+				char msg_buf[PATH_MAX * 2 + 100];
 
 				if (evt->hdr.type ==
 				    LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS) {
@@ -1064,11 +1066,10 @@ int main(int argc, char *const argv[], char *const *const envp)
 					/* Determine the message and log info based on access type */
 					if ((ar & LANDLOCK_ACCESS_FS_REFER) &&
 					    path1str && path2str) {
-						static char rename_msg[PATH_MAX * 2 + 50];
-						snprintf(rename_msg, sizeof(rename_msg),
+						snprintf(msg_buf, sizeof(msg_buf),
 							 "rename %s to %s denied",
 							 path1str, path2str);
-						log_message = rename_msg;
+						log_message = msg_buf;
 						log_path_str = path1str;
 						log_is_ro = false;
 						fprintf(stderr,
@@ -1076,11 +1077,10 @@ int main(int argc, char *const argv[], char *const *const envp)
 							log_message);
 					} else if (ar &
 						   LANDLOCK_ACCESS_FS_MAKE_DIR) {
-						static char msg[PATH_MAX + 30];
-						snprintf(msg, sizeof(msg),
+						snprintf(msg_buf, sizeof(msg_buf),
 							 "create dir %s denied",
 							 path1str ? path1str : "(unknown)");
-						log_message = msg;
+						log_message = msg_buf;
 						log_path_str = path1str;
 						log_is_ro = false;
 						fprintf(stderr,
@@ -1093,11 +1093,10 @@ int main(int argc, char *const argv[], char *const *const envp)
 						    LANDLOCK_ACCESS_FS_MAKE_FIFO |
 						    LANDLOCK_ACCESS_FS_MAKE_SOCK |
 						    LANDLOCK_ACCESS_FS_MAKE_SYM)) {
-						static char msg[PATH_MAX + 30];
-						snprintf(msg, sizeof(msg),
+						snprintf(msg_buf, sizeof(msg_buf),
 							 "create file %s denied",
 							 path1str ? path1str : "(unknown)");
-						log_message = msg;
+						log_message = msg_buf;
 						log_path_str = path1str;
 						log_is_ro = false;
 						fprintf(stderr,
@@ -1106,11 +1105,10 @@ int main(int argc, char *const argv[], char *const *const envp)
 					} else if (ar &
 						   (LANDLOCK_ACCESS_FS_REMOVE_FILE |
 						    LANDLOCK_ACCESS_FS_REMOVE_DIR)) {
-						static char msg[PATH_MAX + 30];
-						snprintf(msg, sizeof(msg),
+						snprintf(msg_buf, sizeof(msg_buf),
 							 "delete %s denied",
 							 path1str ? path1str : "(unknown)");
-						log_message = msg;
+						log_message = msg_buf;
 						log_path_str = path1str;
 						log_is_ro = false;
 						fprintf(stderr,
@@ -1120,22 +1118,20 @@ int main(int argc, char *const argv[], char *const *const envp)
 						   LANDLOCK_ACCESS_FS_READ_FILE) {
 						if (ar &
 						    LANDLOCK_ACCESS_FS_WRITE_FILE) {
-							static char msg[PATH_MAX + 40];
-							snprintf(msg, sizeof(msg),
+							snprintf(msg_buf, sizeof(msg_buf),
 								 "read+write access to %s denied",
 								 path1str ? path1str : "(unknown)");
-							log_message = msg;
+							log_message = msg_buf;
 							log_path_str = path1str;
 							log_is_ro = false;
 							fprintf(stderr,
 								"Supervisor: %s\n",
 								log_message);
 						} else {
-							static char msg[PATH_MAX + 30];
-							snprintf(msg, sizeof(msg),
+							snprintf(msg_buf, sizeof(msg_buf),
 								 "read access to %s denied",
 								 path1str ? path1str : "(unknown)");
-							log_message = msg;
+							log_message = msg_buf;
 							log_path_str = path1str;
 							log_is_ro = true;
 							fprintf(stderr,
@@ -1144,11 +1140,10 @@ int main(int argc, char *const argv[], char *const *const envp)
 						}
 					} else if (ar &
 						   LANDLOCK_ACCESS_FS_WRITE_FILE) {
-						static char msg[PATH_MAX + 30];
-						snprintf(msg, sizeof(msg),
+						snprintf(msg_buf, sizeof(msg_buf),
 							 "write access to %s denied",
 							 path1str ? path1str : "(unknown)");
-						log_message = msg;
+						log_message = msg_buf;
 						log_path_str = path1str;
 						log_is_ro = false;
 						fprintf(stderr,
@@ -1156,11 +1151,10 @@ int main(int argc, char *const argv[], char *const *const envp)
 							log_message);
 					} else if (ar &
 						   LANDLOCK_ACCESS_FS_EXECUTE) {
-						static char msg[PATH_MAX + 30];
-						snprintf(msg, sizeof(msg),
+						snprintf(msg_buf, sizeof(msg_buf),
 							 "execute access to %s denied",
 							 path1str ? path1str : "(unknown)");
-						log_message = msg;
+						log_message = msg_buf;
 						log_path_str = path1str;
 						log_is_ro = true;
 						fprintf(stderr,
@@ -1168,24 +1162,22 @@ int main(int argc, char *const argv[], char *const *const envp)
 							log_message);
 					} else if (ar &
 						   LANDLOCK_ACCESS_FS_READ_DIR) {
-						static char msg[PATH_MAX + 30];
-						snprintf(msg, sizeof(msg),
+						snprintf(msg_buf, sizeof(msg_buf),
 							 "read dir %s denied",
 							 path1str ? path1str : "(unknown)");
-						log_message = msg;
+						log_message = msg_buf;
 						log_path_str = path1str;
 						log_is_ro = true;
 						fprintf(stderr,
 							"Supervisor: %s\n",
 							log_message);
 					} else {
-						static char msg[PATH_MAX * 2 + 100];
-						snprintf(msg, sizeof(msg),
+						snprintf(msg_buf, sizeof(msg_buf),
 							 "unknown access: %llu on fd1=%s fd2=%s denied",
 							 (unsigned long long)ar,
 							 path1str ? path1str : "(none)",
 							 path2str ? path2str : "(none)");
-						log_message = msg;
+						log_message = msg_buf;
 						log_path_str = path1str;
 						log_is_ro = false;
 						fprintf(stderr,
