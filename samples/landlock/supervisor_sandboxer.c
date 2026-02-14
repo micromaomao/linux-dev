@@ -1234,40 +1234,31 @@ int main(int argc, char *const argv[], char *const *const envp)
 							.parent_fd = path_fd,
 							.allowed_access = ar,
 						};
-						
+						struct landlock_supervise_response resp = {
+							.length = sizeof(resp),
+							.flags = 0,
+							.cookie = evt->hdr.cookie,
+						};
+
 						if (landlock_add_rule(supervisor_fd,
 								      LANDLOCK_RULE_PATH_BENEATH,
 								      &path_beneath, 0) == 0) {
 							fprintf(stderr,
 								"Supervisor: Permissive mode - granted access\n");
-							
+
 							/* Commit the change */
 							landlock_add_rule(supervisor_fd, 0, NULL,
 									  LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR);
-							
-							/* Return success to allow the request */
-							struct landlock_supervise_response resp = {
-								.length = sizeof(resp),
-								.flags = LANDLOCK_SUPERVISE_RETCODE,
-								.cookie = evt->hdr.cookie,
-								.ret_code = 0,
-							};
-							
+
+							/* Let sandbox retry access */
 							if (write(supervisor_fd, &resp, sizeof(resp)) < 0)
 								perror("write response");
 						} else {
 							fprintf(stderr,
 								"Supervisor: Permissive mode - failed to add rule: %s\n",
 								strerror(errno));
-							
-							/* Fall back to restart on error */
-							struct landlock_supervise_response resp = {
-								.length = sizeof(resp),
-								.flags = 0,
-								.cookie = evt->hdr.cookie,
-								.ret_code = 0,
-							};
-							
+
+							/* Let sandbox retry anyway */
 							if (write(supervisor_fd, &resp, sizeof(resp)) < 0)
 								perror("write response");
 						}
@@ -1276,15 +1267,15 @@ int main(int argc, char *const argv[], char *const *const envp)
 						fprintf(stderr,
 							"Supervisor: Permissive mode - failed to open path: %s\n",
 							strerror(errno));
-						
-						/* Can't grant access, restart syscall */
+
+						/* Can't grant access, return -EPERM */
 						struct landlock_supervise_response resp = {
 							.length = sizeof(resp),
-							.flags = 0,
+							.flags = LANDLOCK_SUPERVISE_RETCODE,
 							.cookie = evt->hdr.cookie,
-							.ret_code = 0,
+							.ret_code = -EPERM,
 						};
-						
+
 						if (write(supervisor_fd, &resp, sizeof(resp)) < 0)
 							perror("write response");
 					}
