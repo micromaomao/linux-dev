@@ -659,12 +659,18 @@ static int wait_config_file(const char *config_path, int inotify_fd, bool init)
 static void print_usage(const char *prog)
 {
 	fprintf(stderr,
-		"Usage: %s <config_file> <denials_log_file> <command> [args...]\n"
+		"Usage: %s [--permissive] <config_file> <denials_log_file> <command> [args...]\n"
 		"\n"
 		"Run <command> in a Landlock sandbox with rules from <config_file>.\n"
 		"The sandboxer monitors the config file and reloads rules on changes.\n"
-		"When access is denied, the supervisor logs it to <denials_log_file>\n"
-		"and immediately denies the request with -EPERM.\n"
+		"\n"
+		"Options:\n"
+		"  --permissive  Allow all denied accesses by dynamically adding rules.\n"
+		"                Accesses are still logged to the denials log file.\n"
+		"\n"
+		"When access is denied, the supervisor logs it to <denials_log_file>.\n"
+		"Without --permissive, requests are denied with -EPERM.\n"
+		"With --permissive, the required access is dynamically granted.\n"
 		"\n"
 		"Config file format (one rule per line):\n"
 		"  <access_type> <path>\n"
@@ -792,21 +798,29 @@ int main(int argc, char *const argv[], char *const *const envp)
 	pid_t child;
 	int config_fd;
 	struct tracked_ruleset tracked;
+	bool permissive_mode = false;
+	int arg_offset = 1;
 
 	struct landlock_ruleset_attr ruleset_attr = {
 		.handled_access_fs = ACCESS_FS_ROUGHLY_READ | ACCESS_FS_ROUGHLY_WRITE,
 		.quiet_access_fs = ACCESS_FS_ROUGHLY_READ | ACCESS_FS_ROUGHLY_WRITE,
 	};
 
-	if (argc < 4) {
+	/* Parse --permissive flag if present */
+	if (argc > 1 && strcmp(argv[1], "--permissive") == 0) {
+		permissive_mode = true;
+		arg_offset = 2;
+	}
+
+	if (argc < arg_offset + 3) {
 		print_usage(argv[0]);
 		return 1;
 	}
 
-	config_path = argv[1];
-	denials_log_path = argv[2];
-	cmd_path = argv[3];
-	cmd_argv = argv + 3;
+	config_path = argv[arg_offset];
+	denials_log_path = argv[arg_offset + 1];
+	cmd_path = argv[arg_offset + 2];
+	cmd_argv = argv + arg_offset + 2;
 
 	tracked_ruleset_init(&tracked);
 
@@ -999,6 +1013,7 @@ int main(int argc, char *const argv[], char *const *const envp)
 				const char *log_message = NULL;
 				const char *log_path_str = NULL;
 				bool log_is_ro = false;
+				__u64 ar = 0;  /* Access request - needed for permissive mode */
 				/*
 				 * Message buffer for building denial messages.
 				 * Size accounts for two paths (rename), format string,
@@ -1014,7 +1029,7 @@ int main(int argc, char *const argv[], char *const *const envp)
 					const char *path1str = NULL;
 					const char *path2str = NULL;
 					const char *destname = NULL;
-					__u64 ar = evt->access_request;
+					ar = evt->access_request;
 
 					/* Resolve fd1 path */
 					if (evt->fd1 >= 0) {
@@ -1075,7 +1090,7 @@ int main(int argc, char *const argv[], char *const *const envp)
 					if ((ar & LANDLOCK_ACCESS_FS_REFER) &&
 					    path1str && path2str) {
 						snprintf(msg_buf, sizeof(msg_buf),
-							 "rename %s to %s denied",
+							 "rename %s to %s",
 							 path1str, path2str);
 						log_message = msg_buf;
 						log_path_str = path1str;
@@ -1086,7 +1101,7 @@ int main(int argc, char *const argv[], char *const *const envp)
 					} else if (ar &
 						   LANDLOCK_ACCESS_FS_MAKE_DIR) {
 						snprintf(msg_buf, sizeof(msg_buf),
-							 "create dir %s denied",
+							 "create dir %s",
 							 path1str ? path1str : "(unknown)");
 						log_message = msg_buf;
 						log_path_str = path1str;
@@ -1102,7 +1117,7 @@ int main(int argc, char *const argv[], char *const *const envp)
 						    LANDLOCK_ACCESS_FS_MAKE_SOCK |
 						    LANDLOCK_ACCESS_FS_MAKE_SYM)) {
 						snprintf(msg_buf, sizeof(msg_buf),
-							 "create file %s denied",
+							 "create file %s",
 							 path1str ? path1str : "(unknown)");
 						log_message = msg_buf;
 						log_path_str = path1str;
@@ -1114,7 +1129,7 @@ int main(int argc, char *const argv[], char *const *const envp)
 						   (LANDLOCK_ACCESS_FS_REMOVE_FILE |
 						    LANDLOCK_ACCESS_FS_REMOVE_DIR)) {
 						snprintf(msg_buf, sizeof(msg_buf),
-							 "delete %s denied",
+							 "delete %s",
 							 path1str ? path1str : "(unknown)");
 						log_message = msg_buf;
 						log_path_str = path1str;
@@ -1127,7 +1142,7 @@ int main(int argc, char *const argv[], char *const *const envp)
 						if (ar &
 						    LANDLOCK_ACCESS_FS_WRITE_FILE) {
 							snprintf(msg_buf, sizeof(msg_buf),
-								 "read+write access to %s denied",
+								 "read+write access to %s",
 								 path1str ? path1str : "(unknown)");
 							log_message = msg_buf;
 							log_path_str = path1str;
@@ -1137,7 +1152,7 @@ int main(int argc, char *const argv[], char *const *const envp)
 								log_message);
 						} else {
 							snprintf(msg_buf, sizeof(msg_buf),
-								 "read access to %s denied",
+								 "read access to %s",
 								 path1str ? path1str : "(unknown)");
 							log_message = msg_buf;
 							log_path_str = path1str;
@@ -1149,7 +1164,7 @@ int main(int argc, char *const argv[], char *const *const envp)
 					} else if (ar &
 						   LANDLOCK_ACCESS_FS_WRITE_FILE) {
 						snprintf(msg_buf, sizeof(msg_buf),
-							 "write access to %s denied",
+							 "write access to %s",
 							 path1str ? path1str : "(unknown)");
 						log_message = msg_buf;
 						log_path_str = path1str;
@@ -1160,7 +1175,7 @@ int main(int argc, char *const argv[], char *const *const envp)
 					} else if (ar &
 						   LANDLOCK_ACCESS_FS_EXECUTE) {
 						snprintf(msg_buf, sizeof(msg_buf),
-							 "execute access to %s denied",
+							 "execute access to %s",
 							 path1str ? path1str : "(unknown)");
 						log_message = msg_buf;
 						log_path_str = path1str;
@@ -1171,7 +1186,7 @@ int main(int argc, char *const argv[], char *const *const envp)
 					} else if (ar &
 						   LANDLOCK_ACCESS_FS_READ_DIR) {
 						snprintf(msg_buf, sizeof(msg_buf),
-							 "read dir %s denied",
+							 "read dir %s",
 							 path1str ? path1str : "(unknown)");
 						log_message = msg_buf;
 						log_path_str = path1str;
@@ -1181,7 +1196,7 @@ int main(int argc, char *const argv[], char *const *const envp)
 							log_message);
 					} else {
 						snprintf(msg_buf, sizeof(msg_buf),
-							 "unknown access: %llu on fd1=%s fd2=%s denied",
+							 "unknown access: %llu on fd1=%s fd2=%s",
 							 (unsigned long long)ar,
 							 path1str ? path1str : "(none)",
 							 path2str ? path2str : "(none)");
@@ -1195,7 +1210,7 @@ int main(int argc, char *const argv[], char *const *const envp)
 				} else if (evt->hdr.type ==
 					   LANDLOCK_SUPERVISE_EVENT_TYPE_NET_ACCESS) {
 					fprintf(stderr,
-						"Supervisor: network access to port %u denied\n",
+						"Supervisor: network access to port %u\n",
 						(unsigned int)evt->port);
 				}
 
@@ -1207,8 +1222,74 @@ int main(int argc, char *const argv[], char *const *const envp)
 							   log_is_ro);
 				}
 
-				/* Immediately deny the request with -EPERM */
-				{
+				/* Handle the request based on permissive mode */
+				if (permissive_mode && log_path_str) {
+					/*
+					 * In permissive mode, add the required access
+					 * to the dynamic ruleset and allow the request.
+					 */
+					int path_fd = open(log_path_str, O_PATH | O_CLOEXEC);
+					if (path_fd >= 0) {
+						struct landlock_path_beneath_attr path_beneath = {
+							.parent_fd = path_fd,
+							.allowed_access = ar,
+						};
+						
+						if (landlock_add_rule(supervisor_fd,
+								      LANDLOCK_RULE_PATH_BENEATH,
+								      &path_beneath, 0) == 0) {
+							fprintf(stderr,
+								"Supervisor: Permissive mode - granted access\n");
+							
+							/* Commit the change */
+							landlock_add_rule(supervisor_fd, 0, NULL,
+									  LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR);
+							
+							/* Return success to allow the request */
+							struct landlock_supervise_response resp = {
+								.length = sizeof(resp),
+								.flags = LANDLOCK_SUPERVISE_RETCODE,
+								.cookie = evt->hdr.cookie,
+								.ret_code = 0,
+							};
+							
+							if (write(supervisor_fd, &resp, sizeof(resp)) < 0)
+								perror("write response");
+						} else {
+							fprintf(stderr,
+								"Supervisor: Permissive mode - failed to add rule: %s\n",
+								strerror(errno));
+							
+							/* Fall back to restart on error */
+							struct landlock_supervise_response resp = {
+								.length = sizeof(resp),
+								.flags = 0,
+								.cookie = evt->hdr.cookie,
+								.ret_code = 0,
+							};
+							
+							if (write(supervisor_fd, &resp, sizeof(resp)) < 0)
+								perror("write response");
+						}
+						close(path_fd);
+					} else {
+						fprintf(stderr,
+							"Supervisor: Permissive mode - failed to open path: %s\n",
+							strerror(errno));
+						
+						/* Can't grant access, restart syscall */
+						struct landlock_supervise_response resp = {
+							.length = sizeof(resp),
+							.flags = 0,
+							.cookie = evt->hdr.cookie,
+							.ret_code = 0,
+						};
+						
+						if (write(supervisor_fd, &resp, sizeof(resp)) < 0)
+							perror("write response");
+					}
+				} else {
+					/* Normal mode: deny the request with -EPERM */
 					struct landlock_supervise_response resp = {
 						.length = sizeof(resp),
 						.flags = LANDLOCK_SUPERVISE_RETCODE,
