@@ -34,9 +34,12 @@ feature (all from unprivileged applications):
   and LD_PRELOAD (for the notification part, not for access control).
 - Or in fact, any other uses of LD_PRELOAD for the purpose of finding out
   what files are accessed.
+- For island [3], some sort of denial logging integrated in the tool
+  itself (rather than through kernel audit) and live config reload.
 
 [1]: https://lore.kernel.org/all/cover.1741047969.git.m@maowtm.org/
 [2]: https://github.com/stemjail/stemjail
+[3]: https://github.com/landlock-lsm/island
 
 Background
 ----------
@@ -45,10 +48,10 @@ A while ago I sent a "Landlock supervise" RFC patch series [1], in which I
 proposed to extend Landlock with additional functionality to support
 "interactive" rule enforcement.  In discussion with Mickaël, we decided to
 split this work into 3 stages:  quiet flag, mutable domains, and finally
-supervisor notification.  Relevant discussions are at [3] and in replies
+supervisor notification.  Relevant discussions are at [4] and in replies
 to [1].
 
-The patch for quiet flag [4] has gone through multiple review iterations
+The patch for quiet flag [5] has gone through multiple review iterations
 already.  It is useful on its own, but it was also motivated by the
 eventual use in controlling supervisor notification.
 
@@ -58,7 +61,7 @@ is two fold:
 1. This allows the supervisor to allow access to (large) file hierarchies
    without needing to be woken up again for each access.
 2. Because we cannot block within security_path_mknod and other
-   directory-modification related hooks [5], the proposal was to return
+   directory-modification related hooks [6], the proposal was to return
    immediately from those hooks after queuing the supervisor notification,
    then wait in a separate task_work.  This however means that we cannot
    directly "allow" access (and even if we can, it may introduce TOCTOU
@@ -67,9 +70,9 @@ is two fold:
    allow the required access.
 
 [1]: https://lore.kernel.org/all/cover.1741047969.git.m@maowtm.org/
-[3]: https://github.com/landlock-lsm/linux/issues/44
-[4]: https://lore.kernel.org/all/cover.1766330134.git.m@maowtm.org/
-[5]: https://lore.kernel.org/all/20250311.Ti7bi9ahshuu@digikod.net/
+[4]: https://github.com/landlock-lsm/linux/issues/44
+[5]: https://lore.kernel.org/all/cover.1766330134.git.m@maowtm.org/
+[6]: https://lore.kernel.org/all/20250311.Ti7bi9ahshuu@digikod.net/
 
 
 Proposed changes
@@ -204,7 +207,7 @@ Discussion on LANDLOCK_ADD_RULE_INTERSECT
 -----------------------------------------
 
 This was initially proposed by Mickaël, although now after writing some
-example code against it [6], I'm not 100% sure that it is the most useful
+example code against it [7], I'm not 100% sure that it is the most useful
 uAPI.  For a supervisor based on some sort of config file, it already has
 to track which rules are added to know what to remove, and thus I feel
 that it would be easier (both to use and to implement) to have an API that
@@ -218,7 +221,7 @@ that this might make implementing some other use cases more difficult.
 
 (We can of course implement both)
 
-[6]: https://github.com/micromaomao/linux-dev/blob/94477974c616126762f24cc268967d7f989cc96d/samples/landlock/supervisor_sandboxer.c#L437-L481
+[7]: https://github.com/micromaomao/linux-dev/blob/94477974c616126762f24cc268967d7f989cc96d/samples/landlock/supervisor_sandboxer.c#L437-L481
 
 
 Why require a commit operation?
@@ -228,29 +231,29 @@ This is not a strictly necessary requirement with an rbtree based
 implementation - it can be made thread-safe with RCU while still allowing
 lockless access checks without too much overhead (although the code is
 indeed more tricky to write).  However, there is a possibility that the
-domain lookup might become a hashtable with some future enhancement [7],
+domain lookup might become a hashtable with some future enhancement [8],
 at which point it would be better to have an explicit commit operation to
 avoid rebuilding the hashtable for every landlock_add_rule().  Having a
 commit operation will likely also make some atomicity properties easier to
 achieve, depending on the supervisor's needs.
 
-I've actually previously implemented hashtable domains [8], but after
+I've actually previously implemented hashtable domains [9], but after
 benchmarking it I did not find a very significant performance improvement
-(2.2% with 10 dir depth and 10 rules, 8.6% with 29 depth and 1000 rules) [9]
+(2.2% with 10 dir depth and 10 rules, 8.6% with 29 depth and 1000 rules) [10]
 especially considering the complexity of the changes required.  After
 discussion with Mickaël I've decided to not pursue it for now, but I'm
 open to suggestions.  If Mickaël and Günther are open to taking it, I can
 revive the patch.
 
-[7]: https://github.com/landlock-lsm/linux/issues/1
-[8]: https://lore.kernel.org/all/cover.1751814658.git.m@maowtm.org/
-       Note that the benchmark posted here was inaccurate, due to the
-       relatively high cost of kfunc probes compared to the work required
-       to handle one openat().  For a more proper benchmark, refer to the
-       comment below:
-[9]: https://github.com/landlock-lsm/landlock-test-tools/pull/17#issuecomment-3594121269
-       See specifically the collapsed section "parse-microbench.py
-       base-vm.log arraydomain-vm.log"
+[8]:  https://github.com/landlock-lsm/linux/issues/1
+[9]:  https://lore.kernel.org/all/cover.1751814658.git.m@maowtm.org/
+      Note that the benchmark posted here was inaccurate, due to the
+      relatively high cost of kfunc probes compared to the work required
+      to handle one openat().  For a more proper benchmark, refer to the
+      comment below:
+[10]: https://github.com/landlock-lsm/landlock-test-tools/pull/17#issuecomment-3594121269
+      See specifically the collapsed section "parse-microbench.py
+      base-vm.log arraydomain-vm.log"
 
 
 Proposed implementation
