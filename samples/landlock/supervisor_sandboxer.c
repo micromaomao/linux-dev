@@ -1220,10 +1220,15 @@ int main(int argc, char *const argv[], char *const *const envp)
 					 */
 					int path_fd = open(log_path_str, O_PATH | O_CLOEXEC);
 					if (path_fd >= 0) {
-						struct landlock_path_beneath_attr path_beneath = {
-							.parent_fd = path_fd,
-							.allowed_access = ar,
-						};
+						struct landlock_path_beneath_attr
+							path_beneath = {
+								.parent_fd =
+									path_fd,
+								.allowed_access =
+									log_is_ro ?
+										ACCESS_FS_ROUGHLY_READ :
+										ACCESS_FS_ROUGHLY_WRITE,
+							};
 						struct landlock_supervise_response resp = {
 							.length = sizeof(resp),
 							.flags = 0,
