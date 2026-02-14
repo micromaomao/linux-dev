@@ -574,19 +574,32 @@ struct landlock_supervise_event {
  * struct landlock_supervise_response - Response to a supervisor notification
  *
  * The supervisor writes this structure back to the supervisor fd to
- * acknowledge a previously read event.  The syscall that triggered the
- * event is always restarted after the response; the supervisor should
- * update rules (via the mutable domain mechanism) or set the quiet flag
- * on the denied object before responding if it wants to change the
- * outcome.
+ * respond to a previously read event.  By default (when flags is 0),
+ * the syscall is restarted; the supervisor should update rules or set
+ * the quiet flag before responding to change the outcome.  If
+ * LANDLOCK_SUPERVISE_RETCODE is set in flags, the syscall return value
+ * is set to ret_code instead of restarting.
  */
 struct landlock_supervise_response {
 	/** @length: Size of this structure. */
 	__u16 length;
-	/** @_reserved: Reserved, must be zero. */
-	__u16 _reserved;
+	/** @flags: Response flags (e.g., LANDLOCK_SUPERVISE_RETCODE). */
+	__u16 flags;
 	/** @cookie: Cookie previously received in the request. */
 	__u32 cookie;
+	/** @ret_code: Return code to set if LANDLOCK_SUPERVISE_RETCODE is set. */
+	__s64 ret_code;
 };
+
+/**
+ * LANDLOCK_SUPERVISE_RETCODE - Override syscall return value
+ *
+ * When set in landlock_supervise_response.flags, the supervisor is
+ * requesting that the syscall return value be set to ret_code instead
+ * of restarting the syscall.  This allows the supervisor to deny a
+ * request with a specific error code (e.g., -EPERM) or to provide a
+ * custom return value.
+ */
+#define LANDLOCK_SUPERVISE_RETCODE (1U << 0)
 
 #endif /* _UAPI_LINUX_LANDLOCK_H */

@@ -11,13 +11,17 @@
 #include <linux/mutex.h>
 #include <linux/path.h>
 #include <linux/pid.h>
+#include <linux/ptrace.h>
 #include <linux/rcupdate.h>
 #include <linux/refcount.h>
+#include <linux/sched/task_stack.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/task_work.h>
 #include <linux/wait.h>
 #include <linux/wait_bit.h>
+
+#include <asm/syscall.h>
 
 #include "ruleset.h"
 #include "supervisor.h"
@@ -321,19 +325,36 @@ struct landlock_supervise_wait {
  * landlock_supervise_wait_work - Task work callback to wait for supervisor
  *
  * Runs before the task returns to user space.  Blocks until the supervisor
- * acknowledges or denies the event, then drops the event reference.
+ * responds, then sets the syscall return value based on the response.
+ * If the response has LANDLOCK_SUPERVISE_RETCODE set, the return value is
+ * set to response_ret_code.  Otherwise, restart_syscall() is called to
+ * restart the syscall.
  */
 static void landlock_supervise_wait_work(struct callback_head *twork)
 {
 	struct landlock_supervise_wait *wait =
 		container_of(twork, struct landlock_supervise_wait, twork);
 	struct landlock_supervise_event_kernel *event = wait->event;
+	struct pt_regs *regs = current_pt_regs();
 
 	/* Block until the supervisor responds, the supervisor is freed,
 	 * or the task is killed.
 	 */
 	wait_var_event_killable(event,
 				LANDLOCK_SUPERVISE_EVENT_HANDLED(event));
+
+	/* Set the syscall return value based on the supervisor's response. */
+	if (event->response_flags & LANDLOCK_SUPERVISE_RETCODE) {
+		/*
+		 * Supervisor specified a return code directly.
+		 */
+		syscall_set_return_value(current, regs,
+					 (long)event->response_ret_code,
+					 0);
+	} else {
+		/* Default behavior: restart the syscall. */
+		syscall_set_return_value(current, regs, restart_syscall(), 0);
+	}
 
 	landlock_put_supervise_event(event);
 	kfree(wait);
