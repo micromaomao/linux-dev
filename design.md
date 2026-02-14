@@ -31,15 +31,21 @@ are some additional examples of things we can do with the supervisor
 feature (all from unprivileged applications):
 
 - Implmenting a version of StemJail [2] which does not rely on bind mounts
-  and LD_PRELOAD (for the notification part, not for access control).
-- Or in fact, any other uses of LD_PRELOAD for the purpose of finding out
+  and LD_PRELOAD (for the notification part, not for access control).  Or
+  in fact, any other uses of LD_PRELOAD for the purpose of finding out
   what files are accessed.
-- For island [3], some sort of denial logging integrated in the tool
-  itself (rather than through kernel audit) and live config reload.
+
+- For island [3], some sort of denial logging tied to the context,
+  integrated in the tool itself (rather than through kernel audit) and
+  live config reload.
+
+- Use in a non-security related context, such as automated build
+  dependency tracking.
 
 [1]: https://lore.kernel.org/all/cover.1741047969.git.m@maowtm.org/
 [2]: https://github.com/stemjail/stemjail
 [3]: https://github.com/landlock-lsm/island
+
 
 Background
 ----------
@@ -130,7 +136,9 @@ alternative designs)
 Later on, a supervisor notification mechanism can be implemented to allow
 the supervisor to be notified when an access is denied by its supervised
 layer, but this is not in scope for the "mutable domains" feature on its
-own (although it does make it significantly more useful).
+own (although it does make it significantly more useful).  This will be
+the step after mutable domains, if we keep with the plan previously
+discussed with Mickaël.
 
 
 uAPI example
@@ -266,15 +274,21 @@ struct.  (A future revision may optimize on this to reduce pointer chasing
 when needing to check supervisor rulesets of parent layers.)
 
 One of the main tricky areas of this work is the implementation of
-LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR.  We want two features:
+LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR and the access checks.  We want:
 
-- atomic commit (the supervised program should not "experience" any rule
+- atomic commit: the supervised program should not "experience" any rule
   changes until they are committed, and once it is committed it should see
-  all the changes together)
+  all the changes together
 
 - lockless access checks (even when the supervisee ruleset does not allow
   the access, necessitating checking the supervisor rulesets, this should
   still not involve any locks)
+
+- atomic access checks: an access check should either be completely based
+  on the "old" rules or the "new" rules, even if a commit happens in the
+  middle of a path walk.  This prevents incorrect denials when a commit
+  moves a rule from /a to /a/b when we've just finished checking /a/b and
+  about to check /a.
 
 In order to achieve atomic commit, the supervisor fd cannot actually point
 to (and thus allow editing) the "live" ruleset.  Instead, when a
@@ -285,141 +299,63 @@ supervisor ruleset, and the pointer in the landlock_supervisor is swapped.
 In order to keep access checks lockless (as it is currently), the live
 ruleset pointer needs to be RCU-protected.  To reduce complexity, this
 initial implementation uses synchronize_rcu() directly in the calling
-thread of LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR, and frees the old
+thread of `LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR`, and frees the old
 supervisor ruleset afterwards, but this can be rewritten to use call_rcu()
-in a future iteration if necessary (which will allow quicker commits).
+in a future iteration if necessary (which will allow quicker commits,
+which can be quite impactful if we use this to auto-generate rulesets).
 
 During access checks, for each step of the path walk, after
 landlock_unmask_layers()-ing the supervisee rule, if the access is not
 already allowed, we check for rules in the supervisor ruleset and
 effectively does landlock_unmask_layers() on them too.
 
-To ensure atomicity of access checks with respect to supervisor commits, we pre-capture the supervisor committed ruleset pointers at the start of the path walk (in `is_access_to_paths_allowed`).  Without this, a race condition could occur:
+In order to have atomic access checks, we need to pre-capture the
+supervisor committed ruleset pointers for all layers at the start of the
+path walk (in `is_access_to_paths_allowed`).  Storing this on the stack,
+this takes the space of 16 pointers, hence 128 bytes on 64-bit (I'm keen
+to hear suggestions on how best to mitigate this).  Another effect of this
+"caching" is that in order to be able to release rcu in the path walk
+(which is required for the path_put()), we actually need to take refcount
+on the committed ruleset (and free it at the end of
+is_access_to_paths_allowed).
 
-1. Initially, supervisee ruleset allows access to /a/
-2. An access check for /a/b starts, finds no rules on /a/b, then gets preempted
-3. Supervisor removes the /a rule and adds a rule for /a/b in one commit
-4. The original access check resumes, finds no rules on /a either (seeing the new commit), and incorrectly denies access
+Optional access (truncate and ioctl) handling is also tricky.  There are
+two possible alternatives:
 
-By capturing the committed rulesets into a `struct supervisor_committed_cache` (16 pointers, 128 bytes on 64-bit) at the start, the entire path walk uses a consistent snapshot.  This stack space cost is the tradeoff for atomicity.
+- The allowed optional actions are still entirely determined at file open
+  time.  This likely works in the majority of cases, where truncate (and
+  maybe also ioctl) are given or taken away together with write access.
+  However, this may mean that we need to send an access request
+  notification immediately at open() time if e.g. write access is given
+  but truncate (or ioctl) is not, even if truncate (or ioctl) is not
+  attempted yet, since the supervisor would not be able to allow it later.
+  (or alternatively we can choose to not send this notification, and the
+  supervisor will just have to "know" to add truncate/ioctl rights if
+  required, in advance.)
 
-An alternative approach would be to perform a separate path walk for supervisor rules only if the supervisee walk denies access, but this has drawbacks:
-
-- Path walk is significantly slower than chasing some pointers and doing some extra rb tree searches to check supervisor rules, so this is less efficient.  It will be even less efficient once we switch to a hash table based ruleset implementation, which will reduce the overhead of checking supervisor rules even further.
-- The two path walks can end up walking different paths if a rename happens in the middle.
-- The refer domain check logic would need to be repeated and thus become more complex.
-
-For optional access rights (TRUNCATE, IOCTL_DEV), which are recorded at `open()` time, the supervisor is re-checked at operation time via `check_supervisor_optional_access_recheck()`.  This function reuses `is_access_to_paths_allowed()` to perform a full path walk, ensuring that supervisor rules on parent directories apply to child files.  The re-check also computes updated `deny_masks` and `quiet_optional_accesses` for proper audit logging.  This enables a future notification workflow where the supervisor can add rules in response to access attempts (notifications are not yet implemented).
-
-Here is a diagram of the relevant structures and relationships:
-
-```
-  * landlock_create_ruleset(..., LANDLOCK_CREATE_SUPERVISOR);
-    |
-    +-> fd1: [landlock-ruleset] -+
-                                 |
-        +------------------------v+
-        |struct landlock_ruleset  |
-        |                         |
-      +-+- supervisor             |
-      | |  ...                    |
-      | +-------------------------+
-      |  ^ This is the unmerged (and unmergeable) ruleset
-      |    the supervisor holds a reference to.
-      |
-      | +-----------------------------+
-+-----+->struct landlock_supervisor   <---------------------------------------------------+
-|       |                             |                                                   |
-|     +-+- committed_ruleset          |                                                   |
-|     | |- lock                       |                                                   |
-|     | |- usage                      |                                                   |
-|     | |  ...                        |                                                   |
-| RCU | +-----------------------------+                                                   |
-|     |                                                                                   |
-|     | +------------------------+                                                        |
-|     +->struct landlock_ruleset |                                                        |
-|       |                        |                                                        |
-|       |- supervisor = NULL     |                                                        |
-|       |  ...                   |                                                        |
-|       +------------------------+                                                        |
-|       ^ This "hidden" ruleset contains the "live" supervisor rules.                     |
-|         It won't be modified again (so reads to it can be lock-free).                   |
-|         On a future commit it is replaced by a new copy.                                |
-|                                                                                         |
-| * ioctl(fd, LANDLOCK_IOCTL_GET_SUPERVISEE_RULESET, ...);                                |
-|   |                                                                                     |
-|   +-> fd2: [landlock-ruleset] -+                                                        |
-|                                |                                                        |
-|       +------------------------v+                                                       |
-|       |struct landlock_ruleset  |                                                       |
-|       |                         |                                                       |
-+-------+- supervisor             |                                                       |
-        |  ...                    |                                                       |
-        +-------------------------+                                                       |
-        ^ This is the unmerged supervisee ruleset which can later be                      |
-          passed to landlock_restrict_self().                                             |
-                                                                                          |
-  * landlock_restrict_self(fd2, ...);                                                     |
-    +------------------------+ +-------------------------+  +---------------------------+ |
-    |landlock_cred_security -+->struct landlock_ruleset  |+->struct landlock_hierarchy  | |
-    +------------------------+ |                         || |                           | |
-                               |- supervisor = NULL      || |- parent -> ...            | |
-                               |- hierarchy -------------++ |- supervisor --------------+-+
-                               |  ...                    |  |  ...                      |
-                               +-------------------------+  +---------------------------+
-                               ^ The domain ruleset for a
-                                 supervisor-controlled process.
-```
-
-## Using supervisor_sandboxer
-
-The `samples/landlock/supervisor_sandboxer.c` sample demonstrates a file-based supervisor that reads rules from a configuration file and dynamically reloads them when the file changes.
-
-### Configuration File Format
-
-Each line specifies an access type and path:
-```
-ro /path/to/readonly/dir
-rw /path/to/readwrite/dir
-```
-
-- `ro` grants read and execute access
-- `rw` grants full filesystem access
-
-### Example Usage
-
-```bash
-# Create a configuration file
-$ cat > /tmp/sandbox.conf << EOF
-ro /usr
-ro /lib
-rw /tmp
-EOF
-
-# Run a shell under the supervisor
-$ ./supervisor_sandboxer /tmp/sandbox.conf /bin/sh
-Loaded 3 rules from /tmp/sandbox.conf
-Supervisor committed initial rules
-Child process started with PID 12345
-
-# In another terminal, modify the config to allow /home access
-$ echo "ro /home" >> /tmp/sandbox.conf
-
-# The supervisor detects the change and reloads
-Config file changed, reloading rules...
-Loaded 4 rules from /tmp/sandbox.conf
-Supervisor committed updated rules
-
-# Now the sandboxed process can access /home
-```
-
-The supervisor monitors the configuration file using inotify and atomically commits new rules when changes are detected, demonstrating the dynamic rule update capability.
+- The allowed optional actions are considered to be determined at
+  operation time (even though for a static ruleset it is cached).  This
+  means that for supervised layers, we will always have to re-check their
+  supervisor rulesets, whether or not the access was initially allowed,
+  which will involve doing a path walk.  This does however means that the
+  supervisor can be notified "in the moment" when a truncate (or more
+  likely to be relevant - ioctl) is attempted.
 
 
-## Future work
+Supervisor notification
+-----------------------
 
-Implement hash table or not?
+The above RFC only covers mutable domains.  The natural next stage of this
+work is to send notification to the supervisor on access denials, so that
+it can decide whether to allow the access or not.  For that, there are
+also lots of questions at this stage:
+
+- Should we in fact implement that first?  This means that the supervisor
+  would only be able to find out about denials, but not allow them without
+  a sandbox restart.  We still eventually want the mutable domains, since
+  that makes this a lot more useful, but I can see some use cases for just
+  the notification part, and I can't see a use case for just mutable
+  domains, aside from live reload of landlock-config (but maybe that's
+  already quite useful?).
 
 Supervisor notification: uAPI - new uAPI or fanotify?
-
-Do mutable domains or supervisor notification first?
