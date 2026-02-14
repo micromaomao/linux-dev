@@ -1014,6 +1014,7 @@ int main(int argc, char *const argv[], char *const *const envp)
 				const char *log_path_str = NULL;
 				bool log_is_ro = false;
 				__u64 ar = 0;  /* Access request - needed for permissive mode */
+				int fd1 = -1, fd2 = -1;  /* Event file descriptors */
 				/*
 				 * Message buffer for building denial messages.
 				 * Size accounts for two paths (rename), format string,
@@ -1034,10 +1035,11 @@ int main(int argc, char *const argv[], char *const *const envp)
 
 					/* Resolve fd1 path (directory for create/delete ops) */
 					if (evt->fd1 >= 0) {
+						fd1 = evt->fd1;
 						snprintf(linkbuf,
 							 sizeof(linkbuf),
 							 "/proc/self/fd/%d",
-							 evt->fd1);
+							 fd1);
 						ssize_t rlen = readlink(
 							linkbuf, fd1path,
 							PATH_MAX - 1);
@@ -1045,15 +1047,15 @@ int main(int argc, char *const argv[], char *const *const envp)
 							fd1path[rlen] = '\0';
 							path1str = fd1path;
 						}
-						close(evt->fd1);
 					}
 
 					/* Resolve fd2 path */
 					if (evt->fd2 >= 0) {
+						fd2 = evt->fd2;
 						snprintf(linkbuf,
 							 sizeof(linkbuf),
 							 "/proc/self/fd/%d",
-							 evt->fd2);
+							 fd2);
 						ssize_t rlen = readlink(
 							linkbuf, fd2path,
 							PATH_MAX - 1);
@@ -1061,7 +1063,6 @@ int main(int argc, char *const argv[], char *const *const envp)
 							fd2path[rlen] = '\0';
 							path2str = fd2path;
 						}
-						close(evt->fd2);
 					}
 
 					/* Check for destname and build full path for message */
@@ -1213,64 +1214,92 @@ int main(int argc, char *const argv[], char *const *const envp)
 				}
 
 				/* Handle the request based on permissive mode */
-				if (permissive_mode && log_path_str) {
+				if (permissive_mode && evt->hdr.type ==
+				    LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS) {
 					/*
 					 * In permissive mode, add the required access
 					 * to the dynamic ruleset and allow the request.
 					 */
-					int path_fd = open(log_path_str, O_PATH | O_CLOEXEC);
-					if (path_fd >= 0) {
-						struct landlock_path_beneath_attr
-							path_beneath = {
-								.parent_fd =
-									path_fd,
-								.allowed_access =
-									log_is_ro ?
-										ACCESS_FS_ROUGHLY_READ :
-										ACCESS_FS_ROUGHLY_WRITE,
-							};
-						struct landlock_supervise_response resp = {
-							.length = sizeof(resp),
-							.flags = 0,
-							.cookie = evt->hdr.cookie,
-						};
+					struct landlock_supervise_response resp = {
+						.length = sizeof(resp),
+						.flags = 0,
+						.cookie = evt->hdr.cookie,
+					};
+					bool added_rule = false;
+					__u64 access_to_grant = ar;
 
-						if (landlock_add_rule(supervisor_fd,
-								      LANDLOCK_RULE_PATH_BENEATH,
-								      &path_beneath, 0) == 0) {
-							/* Commit the change */
+					/* For delete operations, we need to grant access to the parent */
+					if (ar & (LANDLOCK_ACCESS_FS_REMOVE_FILE |
+						  LANDLOCK_ACCESS_FS_REMOVE_DIR)) {
+						/* TODO: Get parent of fd1 for delete operations */
+						/* For now, just restart the syscall */
+						fprintf(stderr,
+							"Supervisor: Permissive mode - delete operations not yet supported\n");
+					} else {
+						/* For create/rename/link/read/write, use fd1 (and fd2 for rename/link) */
+						if (fd1 >= 0) {
+							/* Restrict to file access if not a directory */
+							struct stat st;
+							if (fstat(fd1, &st) == 0 && !S_ISDIR(st.st_mode))
+								access_to_grant &= ACCESS_FILE;
+
+							struct landlock_path_beneath_attr path_beneath = {
+								.parent_fd = fd1,
+								.allowed_access = access_to_grant,
+							};
+
+							if (landlock_add_rule(supervisor_fd,
+									      LANDLOCK_RULE_PATH_BENEATH,
+									      &path_beneath, 0) == 0) {
+								added_rule = true;
+							} else {
+								fprintf(stderr,
+									"Supervisor: Permissive mode - failed to add rule for fd1: %s\n",
+									strerror(errno));
+							}
+						}
+
+						/* For rename/link, also grant access to fd2 */
+						if (fd2 >= 0 && (ar & LANDLOCK_ACCESS_FS_REFER)) {
+							struct stat st;
+							__u64 fd2_access = ar;
+							if (fstat(fd2, &st) == 0 && !S_ISDIR(st.st_mode))
+								fd2_access &= ACCESS_FILE;
+
+							struct landlock_path_beneath_attr path_beneath = {
+								.parent_fd = fd2,
+								.allowed_access = fd2_access,
+							};
+
+							if (landlock_add_rule(supervisor_fd,
+									      LANDLOCK_RULE_PATH_BENEATH,
+									      &path_beneath, 0) == 0) {
+								added_rule = true;
+							} else {
+								fprintf(stderr,
+									"Supervisor: Permissive mode - failed to add rule for fd2: %s\n",
+									strerror(errno));
+							}
+						}
+
+						if (added_rule) {
+							/* Commit the changes */
 							landlock_add_rule(supervisor_fd, 0, NULL,
 									  LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR);
-
-							/* Let sandbox retry access */
-							if (write(supervisor_fd, &resp, sizeof(resp)) < 0)
-								perror("write response");
-						} else {
 							fprintf(stderr,
-								"Supervisor: Permissive mode - failed to add rule: %s\n",
-								strerror(errno));
-
-							/* Let sandbox retry anyway */
-							if (write(supervisor_fd, &resp, sizeof(resp)) < 0)
-								perror("write response");
+								"Supervisor: Permissive mode - granted access\n");
 						}
-						close(path_fd);
-					} else {
-						fprintf(stderr,
-							"Supervisor: Permissive mode - failed to open path: %s\n",
-							strerror(errno));
-
-						/* Can't grant access, return -EPERM */
-						struct landlock_supervise_response resp = {
-							.length = sizeof(resp),
-							.flags = LANDLOCK_SUPERVISE_RETCODE,
-							.cookie = evt->hdr.cookie,
-							.ret_code = -EPERM,
-						};
-
-						if (write(supervisor_fd, &resp, sizeof(resp)) < 0)
-							perror("write response");
 					}
+
+					/* Let sandbox retry (or succeed if we granted access) */
+					if (write(supervisor_fd, &resp, sizeof(resp)) < 0)
+						perror("write response");
+
+					/* Close the file descriptors */
+					if (fd1 >= 0)
+						close(fd1);
+					if (fd2 >= 0)
+						close(fd2);
 				} else {
 					/* Normal mode: deny the request with -EPERM */
 					struct landlock_supervise_response resp = {
@@ -1283,6 +1312,14 @@ int main(int argc, char *const argv[], char *const *const envp)
 					if (write(supervisor_fd, &resp,
 						  sizeof(resp)) < 0) {
 						perror("write response");
+					}
+
+					/* Close the file descriptors */
+					if (evt->hdr.type == LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS) {
+						if (fd1 >= 0)
+							close(fd1);
+						if (fd2 >= 0)
+							close(fd2);
 					}
 				}
 			}
