@@ -449,3 +449,10 @@ The `samples/landlock/supervisor_sandboxer.c` sample has been extended to demons
 ## Problems
 
 When the supervisor is killed, the child should have all its pending events denied and should no longer be able to generate notifications, but currently since it has a ref to the supervisor, this is not the case.
+
+## To consider
+
+Supervisor notification: uAPI - new uAPI, fanotify, or seccomp-unotify?
+
+For delete request, should the fd given be the target, or the parent of the target?  The landlock access needs to be on the parent anyway...
+Same for rename request, but in that case we need two destnames.
