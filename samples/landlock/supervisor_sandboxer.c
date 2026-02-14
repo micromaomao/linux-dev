@@ -1243,9 +1243,6 @@ int main(int argc, char *const argv[], char *const *const envp)
 						if (landlock_add_rule(supervisor_fd,
 								      LANDLOCK_RULE_PATH_BENEATH,
 								      &path_beneath, 0) == 0) {
-							fprintf(stderr,
-								"Supervisor: Permissive mode - granted access\n");
-
 							/* Commit the change */
 							landlock_add_rule(supervisor_fd, 0, NULL,
 									  LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR);
