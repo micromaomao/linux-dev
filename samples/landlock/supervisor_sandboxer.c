@@ -1025,13 +1025,14 @@ int main(int argc, char *const argv[], char *const *const envp)
 				    LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS) {
 					char fd1path[PATH_MAX + NAME_MAX + 2];
 					char fd2path[PATH_MAX + NAME_MAX + 2];
+					char fd1path_with_file[PATH_MAX + NAME_MAX + 2];
 					char linkbuf[64];
 					const char *path1str = NULL;
 					const char *path2str = NULL;
 					const char *destname = NULL;
 					ar = evt->access_request;
 
-					/* Resolve fd1 path */
+					/* Resolve fd1 path (directory for create/delete ops) */
 					if (evt->fd1 >= 0) {
 						snprintf(linkbuf,
 							 sizeof(linkbuf),
@@ -1063,7 +1064,7 @@ int main(int argc, char *const argv[], char *const *const envp)
 						close(evt->fd2);
 					}
 
-					/* Check for destname and append to the appropriate path buffer */
+					/* Check for destname and build full path for message */
 					if (evt->hdr.length >
 						    offsetof(
 							    struct landlock_supervise_event,
@@ -1073,16 +1074,23 @@ int main(int argc, char *const argv[], char *const *const envp)
 						if ((ar & LANDLOCK_ACCESS_FS_REFER) &&
 						    path2str) {
 							/* rename/link: destname goes to fd2 path */
-							strncat(fd2path, "/",
-								sizeof(fd2path) - strlen(fd2path) - 1);
-							strncat(fd2path, destname,
-								sizeof(fd2path) - strlen(fd2path) - 1);
+							if (strcmp(fd2path, "/") == 0)
+								snprintf(fd2path, sizeof(fd2path),
+									 "/%s", destname);
+							else
+								snprintf(fd2path, sizeof(fd2path),
+									 "%s/%s", path2str, destname);
+							path2str = fd2path;
 						} else if (path1str) {
-							/* create/delete: destname goes to fd1 path */
-							strncat(fd1path, "/",
-								sizeof(fd1path) - strlen(fd1path) - 1);
-							strncat(fd1path, destname,
-								sizeof(fd1path) - strlen(fd1path) - 1);
+							/* create/delete: build full path for message */
+							if (strcmp(fd1path, "/") == 0)
+								snprintf(fd1path_with_file,
+									 sizeof(fd1path_with_file),
+									 "/%s", destname);
+							else
+								snprintf(fd1path_with_file,
+									 sizeof(fd1path_with_file),
+									 "%s/%s", fd1path, destname);
 						}
 					}
 
@@ -1093,15 +1101,18 @@ int main(int argc, char *const argv[], char *const *const envp)
 							 "rename %s to %s",
 							 path1str, path2str);
 						log_message = msg_buf;
-						log_path_str = path1str;
+						/* Rule should be for the source directory */
+						log_path_str = fd1path;
 						log_is_ro = false;
 					} else if (ar &
 						   LANDLOCK_ACCESS_FS_MAKE_DIR) {
 						snprintf(msg_buf, sizeof(msg_buf),
 							 "create dir %s",
-							 path1str ? path1str : "(unknown)");
+							 destname ? fd1path_with_file :
+								    (path1str ? path1str : "(unknown)"));
 						log_message = msg_buf;
-						log_path_str = path1str;
+						/* Rule should be for the parent directory */
+						log_path_str = destname ? fd1path : path1str;
 						log_is_ro = false;
 					} else if (ar &
 						   (LANDLOCK_ACCESS_FS_MAKE_REG |
@@ -1112,18 +1123,22 @@ int main(int argc, char *const argv[], char *const *const envp)
 						    LANDLOCK_ACCESS_FS_MAKE_SYM)) {
 						snprintf(msg_buf, sizeof(msg_buf),
 							 "create file %s",
-							 path1str ? path1str : "(unknown)");
+							 destname ? fd1path_with_file :
+								    (path1str ? path1str : "(unknown)"));
 						log_message = msg_buf;
-						log_path_str = path1str;
+						/* Rule should be for the parent directory */
+						log_path_str = destname ? fd1path : path1str;
 						log_is_ro = false;
 					} else if (ar &
 						   (LANDLOCK_ACCESS_FS_REMOVE_FILE |
 						    LANDLOCK_ACCESS_FS_REMOVE_DIR)) {
 						snprintf(msg_buf, sizeof(msg_buf),
 							 "delete %s",
-							 path1str ? path1str : "(unknown)");
+							 destname ? fd1path_with_file :
+								    (path1str ? path1str : "(unknown)"));
 						log_message = msg_buf;
-						log_path_str = path1str;
+						/* Rule should be for the parent directory */
+						log_path_str = destname ? fd1path : path1str;
 						log_is_ro = false;
 					} else if (ar &
 						   LANDLOCK_ACCESS_FS_READ_FILE) {
