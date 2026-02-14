@@ -217,12 +217,14 @@ achieve, depending on the supervisor's needs.
 
 I've actually previously implemented [10] a hashtable based ruleset, but
 after benchmarking it I did not find a very significant performance
-improvement (although there is _some_ slight improvement) [11].  After
-discussion with Mickaël I've decided to not pursue it for now, but I'm
-open to suggestions.
+improvement (2.2% with 10 dir depth and 10 rules, 8.6% with 29 depth and
+1000 rules) [11] compared with the complexity of the changes required.
+After discussion with Mickaël I've decided to not pursue it for now, but
+I'm open to suggestions.  If Mickaël and Günther are open to taking it, I
+can revive the patch.
 
 
-[9]: https://github.com/landlock-lsm/linux/issues/1
+[9]:  https://github.com/landlock-lsm/linux/issues/1
 [10]: https://lore.kernel.org/all/cover.1751814658.git.m@maowtm.org/
       Note that the benchmark posted here was inaccurate, due to the
       relatively high cost of kfunc probes compared to the work required
@@ -232,7 +234,9 @@ open to suggestions.
       See specifically the collapsed section "parse-microbench.py
       base-vm.log arraydomain-vm.log"
 
-## Implementation notes
+
+Proposed implementation
+-----------------------
 
 In order to store additional data and locks for the supervisor, we create a new `struct landlock_supervisor`.
 
