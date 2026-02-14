@@ -1,32 +1,54 @@
 Hi,
 
 Recently I have been continuing work on the previously proposed Landlock
-supervise feature (context below).  While I do have some rough PoCs (code
-changes [1] for mutable domains and [2] for supervisor notification,
-scrappy demo video [3]), because of the amount of work involved, I would
-like to get some early feedback on the design before continuing.
+supervise feature (context below).  While I do have some rough PoCs, and
+I'm aware that sometimes code is better than talk, because of the amount
+of work involved, I would like to get some early feedback on the design
+(for mutable domains at this stage) before continuing.
 
-While I would be glad to receive reviews from anyone, Günther, if you are
-not too busy, can you kindly give this a review? A lot of this has already
-been discussed with Mickaël, in fact a large part of this design was from
-his suggestions.
+Scrappy demo (just screencasts):
 
+- user-space implemented "permissive mode":
+    https://fileshare.maowtm.org/landlock-20260214/demo.mp4
+- mutable domains based on a reloadable config file:
+    https://fileshare.maowtm.org/landlock-20260213/demo.mp4
 
-[1]: https://github.com/micromaomao/linux-dev/pull/26/changes
-[2]: https://github.com/micromaomao/linux-dev/pull/27/changes
-[3]: https://fileshare.maowtm.org/landlock-20260214/demo.mp4
+While I would be glad to receive reviews from anyone, Günther, when you
+are not too busy, can you kindly give this a review?  A lot of this has
+already been discussed with Mickaël, in fact a large part of this design
+was from his suggestions.
+
+PoC code used in the above videos are largely generated, somewhat buggy,
+and unreviewed, but they are available:
+
+- mutable domains:
+    https://github.com/micromaomao/linux-dev/pull/26/changes
+- supervisor notification:
+    https://github.com/micromaomao/linux-dev/pull/27/changes
+
+The motivations listed in [1] are still relevant, and to add to that, here
+are some additional examples of things we can do with the supervisor
+feature (all from unprivileged applications):
+
+- Implmenting a version of StemJail [2] which does not rely on bind mounts
+  and LD_PRELOAD (for the notification part, not for access control).
+- Or in fact, any other uses of LD_PRELOAD for the purpose of finding out
+  what files are accessed.
+
+[1]: https://lore.kernel.org/all/cover.1741047969.git.m@maowtm.org/
+[2]: https://github.com/stemjail/stemjail
 
 Background
 ----------
 
-A while ago I sent a "Landlock supervise" RFC patch series [4], in which I
+A while ago I sent a "Landlock supervise" RFC patch series [1], in which I
 proposed to extend Landlock with additional functionality to support
 "interactive" rule enforcement.  In discussion with Mickaël, we decided to
 split this work into 3 stages:  quiet flag, mutable domains, and finally
-supervisor notification.  Relevant discussions are at [5] and in replies
-to [4].
+supervisor notification.  Relevant discussions are at [3] and in replies
+to [1].
 
-The patch for quiet flag [6] has gone through multiple review iterations
+The patch for quiet flag [4] has gone through multiple review iterations
 already.  It is useful on its own, but it was also motivated by the
 eventual use in controlling supervisor notification.
 
@@ -36,7 +58,7 @@ is two fold:
 1. This allows the supervisor to allow access to (large) file hierarchies
    without needing to be woken up again for each access.
 2. Because we cannot block within security_path_mknod and other
-   directory-modification related hooks [7], the proposal was to return
+   directory-modification related hooks [5], the proposal was to return
    immediately from those hooks after queuing the supervisor notification,
    then wait in a separate task_work.  This however means that we cannot
    directly "allow" access (and even if we can, it may introduce TOCTOU
@@ -44,11 +66,10 @@ is two fold:
    has to add additional rules to the (now mutable) domain which will
    allow the required access.
 
-
-[4]: https://lore.kernel.org/all/cover.1741047969.git.m@maowtm.org/
-[5]: https://github.com/landlock-lsm/linux/issues/44
-[6]: https://lore.kernel.org/all/cover.1766330134.git.m@maowtm.org/
-[7]: https://lore.kernel.org/all/20250311.Ti7bi9ahshuu@digikod.net/
+[1]: https://lore.kernel.org/all/cover.1741047969.git.m@maowtm.org/
+[3]: https://github.com/landlock-lsm/linux/issues/44
+[4]: https://lore.kernel.org/all/cover.1766330134.git.m@maowtm.org/
+[5]: https://lore.kernel.org/all/20250311.Ti7bi9ahshuu@digikod.net/
 
 
 Proposed changes
@@ -183,23 +204,21 @@ Discussion on LANDLOCK_ADD_RULE_INTERSECT
 -----------------------------------------
 
 This was initially proposed by Mickaël, although now after writing some
-example code against it [8], I'm not 100% sure that it is the most useful
+example code against it [6], I'm not 100% sure that it is the most useful
 uAPI.  For a supervisor based on some sort of config file, it already has
 to track which rules are added to know what to remove, and thus I feel
 that it would be easier (both to use and to implement) to have an API that
 simply "replaces" a rule, rather than do a bitwise AND on the access.
 
-Another alternative is to have neither intersect nor replace on individual
-rules, but simply have a "clear all rules in this ruleset" flag.  This
-allows the supervisor to not have to track what is already allowed - if it
-reloads the config file, it can simply clear the ruleset, re-add all rules
-based on the config, then commit it.  Although I fear that this might make
-implementing some other use cases more difficult.
+Another alternative is to simply have a "clear all rules in this ruleset"
+flag.  This allows the supervisor to not have to track what is already
+allowed - if it reloads the config file, it can simply clear the ruleset,
+re-add all rules based on the config, then commit it.  Although I worry
+that this might make implementing some other use cases more difficult.
 
 (We can of course implement both)
 
-
-[8]: https://github.com/micromaomao/linux-dev/blob/94477974c616126762f24cc268967d7f989cc96d/samples/landlock/supervisor_sandboxer.c#L437-L481
+[6]: https://github.com/micromaomao/linux-dev/blob/94477974c616126762f24cc268967d7f989cc96d/samples/landlock/supervisor_sandboxer.c#L437-L481
 
 
 Why require a commit operation?
@@ -208,49 +227,69 @@ Why require a commit operation?
 This is not a strictly necessary requirement with an rbtree based
 implementation - it can be made thread-safe with RCU while still allowing
 lockless access checks without too much overhead (although the code is
-indeed a lot more tricky to write).  However, there is a possibility that
-the domain lookup might become a hashtable with some future enhancement [9],
+indeed more tricky to write).  However, there is a possibility that the
+domain lookup might become a hashtable with some future enhancement [7],
 at which point it would be better to have an explicit commit operation to
 avoid rebuilding the hashtable for every landlock_add_rule().  Having a
 commit operation will likely also make some atomicity properties easier to
 achieve, depending on the supervisor's needs.
 
-I've actually previously implemented [10] a hashtable based ruleset, but
-after benchmarking it I did not find a very significant performance
-improvement (2.2% with 10 dir depth and 10 rules, 8.6% with 29 depth and
-1000 rules) [11] compared with the complexity of the changes required.
-After discussion with Mickaël I've decided to not pursue it for now, but
-I'm open to suggestions.  If Mickaël and Günther are open to taking it, I
-can revive the patch.
+I've actually previously implemented hashtable domains [8], but after
+benchmarking it I did not find a very significant performance improvement
+(2.2% with 10 dir depth and 10 rules, 8.6% with 29 depth and 1000 rules) [9]
+especially considering the complexity of the changes required.  After
+discussion with Mickaël I've decided to not pursue it for now, but I'm
+open to suggestions.  If Mickaël and Günther are open to taking it, I can
+revive the patch.
 
-
-[9]:  https://github.com/landlock-lsm/linux/issues/1
-[10]: https://lore.kernel.org/all/cover.1751814658.git.m@maowtm.org/
-      Note that the benchmark posted here was inaccurate, due to the
-      relatively high cost of kfunc probes compared to the work required
-      to handle one openat().  For a more proper benchmark, refer to the
-      comment below:
-[11]: https://github.com/landlock-lsm/landlock-test-tools/pull/17#issuecomment-3594121269
-      See specifically the collapsed section "parse-microbench.py
-      base-vm.log arraydomain-vm.log"
+[7]: https://github.com/landlock-lsm/linux/issues/1
+[8]: https://lore.kernel.org/all/cover.1751814658.git.m@maowtm.org/
+       Note that the benchmark posted here was inaccurate, due to the
+       relatively high cost of kfunc probes compared to the work required
+       to handle one openat().  For a more proper benchmark, refer to the
+       comment below:
+[9]: https://github.com/landlock-lsm/landlock-test-tools/pull/17#issuecomment-3594121269
+       See specifically the collapsed section "parse-microbench.py
+       base-vm.log arraydomain-vm.log"
 
 
 Proposed implementation
 -----------------------
 
-In order to store additional data and locks for the supervisor, we create a new `struct landlock_supervisor`.
+In order to store additional data and locks for the supervisor, we create
+a new `struct landlock_supervisor`.  Both the supervisor and supervisee
+rulesets, and the landlock_hierarchy of each layer, will point to this
+struct.  (A future revision may optimize on this to reduce pointer chasing
+when needing to check supervisor rulesets of parent layers.)
 
-Since struct landlock_hierarchy already neatly maps to layers, for this implementation we add a `struct landlock_supervisor` pointer for each layer to their corresponding `struct landlock_hierarchy`.  A future revision may optimize on this to reduce pointer chasing, depending on benchmark outcome.  There is also a `struct landlock_supervisor` pointer in the `struct landlock_ruleset`, used only for unmerged rulesets - for the supervisee ruleset this points to the attached landlock_supervisor, on landlock_restrict_self() this is copied to the landlock_hierarchy, and for the supervisor ruleset this is simply the corresponding supervisor struct.  Since we can only return ruleset fds from landlock_create_ruleset, the user-space API does not directly expose a `struct landlock_supervisor` handle, but rather, the supervisor is accessed through the supervisor ruleset's supervisor field.
+One of the main tricky areas of this work is the implementation of
+LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR.  We want two features:
 
-One of the main tricky areas of this work is the implementation of LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR.  We want two features:
-- atomic commit (the supervised program should not "experience" any rule changes until they are committed, and once it is committed it should see all the changes together)
-- lockless access checks (even when the supervisee ruleset does not allow the access, necessitating checking the supervisor rulesets, this should still not involve any locks)
+- atomic commit (the supervised program should not "experience" any rule
+  changes until they are committed, and once it is committed it should see
+  all the changes together)
 
-In order to achieve atomic commit, the supervisor fd cannot actually point to (and thus allow editing) the "live" ruleset.  Instead, when a LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR is requested, a new struct landlock_ruleset is created, the rules are copied over from the existing supervisor ruleset, and the pointer in the landlock_supervisor is swapped.  This process holds both the lock on the "user-accessible" ruleset and the lock on the `struct landlock_supervisor`.
+- lockless access checks (even when the supervisee ruleset does not allow
+  the access, necessitating checking the supervisor rulesets, this should
+  still not involve any locks)
 
-Currently access checks do not take any locks, since the rulesets are immutable, and we want to keep this lockless property.  In order to do this, the live ruleset pointer needs to be RCU-protected, and the freeing of the previously live ruleset needs to be RCU synchronized.  To reduce complexity, this initial implementation uses synchronize_rcu() directly in the calling thread of LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR, and frees the old supervisor ruleset afterwards, but this can be rewritten to use call_rcu() in a future iteration if necessary (which will allow quicker commits).
+In order to achieve atomic commit, the supervisor fd cannot actually point
+to (and thus allow editing) the "live" ruleset.  Instead, when a
+`LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR` is requested, a new `struct
+landlock_ruleset` is created, the rules are copied over from the existing
+supervisor ruleset, and the pointer in the landlock_supervisor is swapped.
 
-During access checks, for each step of the path walk, after landlock_unmask_layers()-ing the supervisee rule, if the access is not already allowed, we check for rules in the supervisor ruleset and call landlock_unmask_layers() on them too.
+In order to keep access checks lockless (as it is currently), the live
+ruleset pointer needs to be RCU-protected.  To reduce complexity, this
+initial implementation uses synchronize_rcu() directly in the calling
+thread of LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR, and frees the old
+supervisor ruleset afterwards, but this can be rewritten to use call_rcu()
+in a future iteration if necessary (which will allow quicker commits).
+
+During access checks, for each step of the path walk, after
+landlock_unmask_layers()-ing the supervisee rule, if the access is not
+already allowed, we check for rules in the supervisor ruleset and
+effectively does landlock_unmask_layers() on them too.
 
 To ensure atomicity of access checks with respect to supervisor commits, we pre-capture the supervisor committed ruleset pointers at the start of the path walk (in `is_access_to_paths_allowed`).  Without this, a race condition could occur:
 
