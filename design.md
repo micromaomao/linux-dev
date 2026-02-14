@@ -450,6 +450,9 @@ The `samples/landlock/supervisor_sandboxer.c` sample has been extended to demons
 
 When the supervisor is killed, the child should have all its pending events denied and should no longer be able to generate notifications, but currently since it has a ref to the supervisor, this is not the case.
 
+Spurious create request when opening already existing files for write with
+O_CREAT due to issue with dcache miss
+
 ## To consider
 
 Supervisor notification: uAPI - new uAPI, fanotify, or seccomp-unotify?
