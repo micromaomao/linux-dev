@@ -10,7 +10,7 @@ To enable removing rules from a ruleset, we also implement the LANDLOCK_ADD_RULE
 
 (For consistency, the LANDLOCK_ADD_RULE_INTERSECT flag will be supported for both supervisor and supervisee (i.e. existing) rulesets, but it is probably only useful for supervisor rulesets.)
 
-There is future work planned to implement a notification and waiting mechanism to allow the supervisor to be asked for a decision when a denied (and not quieted) access happens, but that is out of the scope of this patchset.
+Additionally, a supervisor notification mechanism is implemented (later) that allows the supervisor to be notified when an access is denied by its supervised layer.
 
 ## uAPI example
 
