@@ -1095,9 +1095,6 @@ int main(int argc, char *const argv[], char *const *const envp)
 						log_message = msg_buf;
 						log_path_str = path1str;
 						log_is_ro = false;
-						fprintf(stderr,
-							"Supervisor: %s\n",
-							log_message);
 					} else if (ar &
 						   LANDLOCK_ACCESS_FS_MAKE_DIR) {
 						snprintf(msg_buf, sizeof(msg_buf),
@@ -1106,9 +1103,6 @@ int main(int argc, char *const argv[], char *const *const envp)
 						log_message = msg_buf;
 						log_path_str = path1str;
 						log_is_ro = false;
-						fprintf(stderr,
-							"Supervisor: %s\n",
-							log_message);
 					} else if (ar &
 						   (LANDLOCK_ACCESS_FS_MAKE_REG |
 						    LANDLOCK_ACCESS_FS_MAKE_CHAR |
@@ -1122,9 +1116,6 @@ int main(int argc, char *const argv[], char *const *const envp)
 						log_message = msg_buf;
 						log_path_str = path1str;
 						log_is_ro = false;
-						fprintf(stderr,
-							"Supervisor: %s\n",
-							log_message);
 					} else if (ar &
 						   (LANDLOCK_ACCESS_FS_REMOVE_FILE |
 						    LANDLOCK_ACCESS_FS_REMOVE_DIR)) {
@@ -1134,9 +1125,6 @@ int main(int argc, char *const argv[], char *const *const envp)
 						log_message = msg_buf;
 						log_path_str = path1str;
 						log_is_ro = false;
-						fprintf(stderr,
-							"Supervisor: %s\n",
-							log_message);
 					} else if (ar &
 						   LANDLOCK_ACCESS_FS_READ_FILE) {
 						if (ar &
@@ -1147,9 +1135,6 @@ int main(int argc, char *const argv[], char *const *const envp)
 							log_message = msg_buf;
 							log_path_str = path1str;
 							log_is_ro = false;
-							fprintf(stderr,
-								"Supervisor: %s\n",
-								log_message);
 						} else {
 							snprintf(msg_buf, sizeof(msg_buf),
 								 "read access to %s",
@@ -1157,9 +1142,6 @@ int main(int argc, char *const argv[], char *const *const envp)
 							log_message = msg_buf;
 							log_path_str = path1str;
 							log_is_ro = true;
-							fprintf(stderr,
-								"Supervisor: %s\n",
-								log_message);
 						}
 					} else if (ar &
 						   LANDLOCK_ACCESS_FS_WRITE_FILE) {
@@ -1169,9 +1151,6 @@ int main(int argc, char *const argv[], char *const *const envp)
 						log_message = msg_buf;
 						log_path_str = path1str;
 						log_is_ro = false;
-						fprintf(stderr,
-							"Supervisor: %s\n",
-							log_message);
 					} else if (ar &
 						   LANDLOCK_ACCESS_FS_EXECUTE) {
 						snprintf(msg_buf, sizeof(msg_buf),
@@ -1180,9 +1159,6 @@ int main(int argc, char *const argv[], char *const *const envp)
 						log_message = msg_buf;
 						log_path_str = path1str;
 						log_is_ro = true;
-						fprintf(stderr,
-							"Supervisor: %s\n",
-							log_message);
 					} else if (ar &
 						   LANDLOCK_ACCESS_FS_READ_DIR) {
 						snprintf(msg_buf, sizeof(msg_buf),
@@ -1191,9 +1167,6 @@ int main(int argc, char *const argv[], char *const *const envp)
 						log_message = msg_buf;
 						log_path_str = path1str;
 						log_is_ro = true;
-						fprintf(stderr,
-							"Supervisor: %s\n",
-							log_message);
 					} else {
 						snprintf(msg_buf, sizeof(msg_buf),
 							 "unknown access: %llu on fd1=%s fd2=%s",
@@ -1203,15 +1176,17 @@ int main(int argc, char *const argv[], char *const *const envp)
 						log_message = msg_buf;
 						log_path_str = path1str;
 						log_is_ro = false;
-						fprintf(stderr,
-							"Supervisor: %s\n",
-							log_message);
 					}
 				} else if (evt->hdr.type ==
 					   LANDLOCK_SUPERVISE_EVENT_TYPE_NET_ACCESS) {
 					fprintf(stderr,
 						"Supervisor: network access to port %u\n",
 						(unsigned int)evt->port);
+				}
+
+				/* Print the log message to stderr */
+				if (log_message) {
+					fprintf(stderr, "Supervisor: %s\n", log_message);
 				}
 
 				/* Log the denial to the denials log file */
