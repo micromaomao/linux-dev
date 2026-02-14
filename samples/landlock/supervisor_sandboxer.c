@@ -1226,7 +1226,11 @@ int main(int argc, char *const argv[], char *const *const envp)
 						.cookie = evt->hdr.cookie,
 					};
 					bool added_rule = false;
-					__u64 access_to_grant = ar;
+					__u64 access_to_grant =
+						log_is_ro ?
+							ACCESS_FS_ROUGHLY_READ :
+							(ACCESS_FS_ROUGHLY_READ |
+							 ACCESS_FS_ROUGHLY_WRITE);
 
 					/* For delete operations, we need to grant access to the parent */
 					if (ar & (LANDLOCK_ACCESS_FS_REMOVE_FILE |
