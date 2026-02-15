@@ -370,6 +370,7 @@ also lots of questions at this stage:
   that for rename, the fd1 needs to be the child being moved, which does
   not align with the vfs semantic and how Landlock treat it (i.e. the
   thing being updated here is the parent directory, not the child itself).
+  Same for delete, which currently sends the child as fd1.
 
   But also, in discussion with Mickaël last year, he mentioned that we
   could reuse the fsnotify infrastructure, and perhaps additionally, use
