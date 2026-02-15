@@ -17,7 +17,8 @@ While I would be glad to receive reviews from anyone, Günther, when you
 are not too busy, can you kindly give this a review?  A lot of this has
 already been discussed with Mickaël, in fact a large part of this design
 was from his suggestions.  I apologize in advance for the length of this
-email - please feel free to respond whenever you have time to.
+email - please feel free to respond to any part of it, and whenever you
+have time to.
 
 PoC code used in the above videos are largely generated, somewhat buggy,
 and unreviewed, but they are available:
@@ -31,10 +32,10 @@ The motivations listed in [1] are still relevant, and to add to that, here
 are some additional examples of things we can do with the supervisor
 feature (all from unprivileged applications):
 
-- Implmenting a version of StemJail [2] which does not rely on bind mounts
-  and LD_PRELOAD (for the notification part, not for access control).  Or
-  in fact, any other uses of LD_PRELOAD for the purpose of finding out
-  what files are accessed.
+- Implementing a version of StemJail [2] which does not rely on bind
+  mounts and LD_PRELOAD (for the notification part, not for access
+  control).  Or in fact, any other uses of LD_PRELOAD for the purpose of
+  finding out what files are accessed.
 
 - For island [3], some sort of denial logging tied to the context,
   integrated in the tool itself (rather than through kernel audit) and
@@ -101,13 +102,15 @@ A Landlock supervisor will first create the supervisor ruleset, which
 internally creates a ref-counted landlock_supervisor which the unmerged
 (and in fact, unmergeable, to prevent accidental misuse) landlock_ruleset
 will point to.  Through a new ioctl, the user can get a supervisee ruleset
-with the attached supervisor (this relationship does not necessarily has
+with the attached supervisor (this relationship does not necessarily have
 to be 1-1), which can then be passed to landlock_restrict_self() by a
 child process.  The supervisor can also at any time (before the ioctl,
 before the landlock_restrict_self() call, or after it) modify the
 supervisor ruleset to add or remove (via a new "intersect" flag) rules or
 change access rights, and commit those changes through a flag passed to
-landlock_add_rule(), after which the changes start affecting the child.
+landlock_add_rule() (although maybe this would be better done as an
+ioctl() on the supervisor?), after which the changes start affecting the
+child.
 
 The supervisee ruleset is immutable, it is basically the current
 landlock_ruleset, and internally we continue to "fold" rules from parents
@@ -158,7 +161,7 @@ struct landlock_ruleset_attr attr = {
 
 /* supervisor_fd default to CLOEXEC */
 int supervisor_fd = landlock_create_ruleset(
-    &attr, sizeof(attr), LANDLOCK_CREATE_SUPERVISOR);
+    &attr, sizeof(attr), LANDLOCK_CREATE_RULESET_SUPERVISOR);
 if (supervisor_fd < 0)
     perror("landlock_create_ruleset");
 
@@ -320,6 +323,10 @@ to hear suggestions on how best to mitigate this).  Another effect of this
 on the committed ruleset (and free it at the end of
 is_access_to_paths_allowed).
 
+
+Optional access
+---------------
+
 Optional access (truncate and ioctl) handling is also tricky.  There are
 two possible alternatives:
 
@@ -341,6 +348,11 @@ two possible alternatives:
   which will involve doing a path walk.  This does however means that the
   supervisor can be notified "in the moment" when a truncate (or more
   likely to be relevant - ioctl) is attempted.
+
+The PoC partially implements the second one (but has bugs), but I'm not
+sure which is best.  The second one is most flexible and makes more sense
+to me from a user perspective, but does come with performance
+implications.
 
 
 Supervisor notification
@@ -414,13 +426,12 @@ also lots of questions at this stage:
   semantics of seccomp-unotify).
 
 
-I'm not sure how sensible the above uAPI suggestions are.  Are there any
-immediate reasons, from Landlock's perspective, to rule out either of
-them?  (I will probably wait for at least a first review from the Landlock
-side before directing this explicitly to the fanotify and/or
-seccomp-unotify maintainers, but if somehow a maintainer/reviewer from
-either of those areas are already reading this, feedback would be very
-valuable :D )
+Are there any immediate reasons, from Landlock's perspective, to rule out
+either of them?  (I will probably wait for at least a first review from
+the Landlock side before directing this explicitly to the fanotify and/or
+seccomp-unotify maintainers, in case the plan significantly changes, but
+if somehow a maintainer/reviewer from either of those areas are already
+reading this, feedback would be very valuable :D )
 
 [11]: https://lore.kernel.org/all/cde6bbf0b52710b33170f2787fdcb11538e40813.1741047969.git.m@maowtm.org/#iZ31include:uapi:linux:landlock.h
 [12]: https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?h=v6.15-rc1&id=fd101da676362aaa051b4f5d8a941bd308603041
