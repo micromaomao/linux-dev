@@ -34,7 +34,7 @@
 	LANDLOCK_ACCESS_FS_IOCTL_DEV)
 /* clang-format on */
 
-typedef u16 access_mask_t;
+typedef u32 access_mask_t;
 
 /* Makes sure all filesystem access rights can be stored. */
 static_assert(BITS_PER_TYPE(access_mask_t) >= LANDLOCK_NUM_ACCESS_FS);
@@ -75,6 +75,15 @@ struct layer_access_masks {
 	 */
 	access_mask_t access[LANDLOCK_MAX_NUM_LAYERS];
 };
+
+static inline bool
+layer_access_masks_empty(const struct layer_access_masks *masks)
+{
+	for (size_t i = 0; i < ARRAY_SIZE(masks->access); i++)
+		if (masks->access[i])
+			return false;
+	return true;
+}
 
 /*
  * Tracks domains responsible of a denied access.  This avoids storing in each
