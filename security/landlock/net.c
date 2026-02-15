@@ -6,18 +6,22 @@
  * Copyright © 2022-2025 Microsoft Corporation
  */
 
+#include <linux/errno.h>
 #include <linux/in.h>
 #include <linux/lsm_audit.h>
 #include <linux/net.h>
+#include <linux/sched/signal.h>
 #include <linux/socket.h>
 #include <net/ipv6.h>
 
 #include "audit.h"
 #include "common.h"
 #include "cred.h"
+#include "domain.h"
 #include "limits.h"
 #include "net.h"
 #include "ruleset.h"
+#include "supervisor.h"
 
 int landlock_append_net_rule(struct landlock_ruleset *const ruleset,
 			     const u16 port, access_mask_t access_rights,
@@ -40,6 +44,64 @@ int landlock_append_net_rule(struct landlock_ruleset *const ruleset,
 	mutex_unlock(&ruleset->lock);
 
 	return err;
+}
+
+/**
+ * landlock_check_notify_net - Check if denied net access should trigger notification
+ *
+ * @domain: The domain that denied access.
+ * @layer_masks: Layer masks showing which layers still deny access.
+ * @rule_flags: Collected rule flags for quiet determination.
+ * @access_request: The denied access rights.
+ * @port: The network port being accessed.
+ *
+ * Returns:
+ * - 0 if a notification was queued (caller should return restart_syscall())
+ * - -EACCES if notification cannot be sent (normal denial)
+ */
+static int landlock_check_notify_net(
+	const struct landlock_ruleset *const domain,
+	const struct layer_access_masks *const layer_masks,
+	const struct collected_rule_flags *const rule_flags,
+	const access_mask_t access_request, const __u16 port)
+{
+	ssize_t layer_level;
+	const struct landlock_hierarchy *hierarchy;
+	struct landlock_supervisor *notify_supervisor = NULL;
+	int ret;
+
+	if (!domain || !domain->hierarchy)
+		return -EACCES;
+
+	hierarchy = domain->hierarchy;
+	for (layer_level = domain->num_layers - 1; layer_level >= 0;
+	     layer_level--, hierarchy = hierarchy->parent) {
+		if (!layer_masks->access[layer_level])
+			continue;
+
+		if (rule_flags &&
+		    (rule_flags->quiet_masks & BIT(layer_level)))
+			return -EACCES;
+
+		if (!landlock_supervisor_has_notification(
+			    hierarchy->supervisor))
+			return -EACCES;
+
+		if (!notify_supervisor)
+			notify_supervisor = hierarchy->supervisor;
+	}
+
+	if (!notify_supervisor)
+		return -EACCES;
+
+	ret = landlock_queue_supervisor_notification(
+		notify_supervisor,
+		LANDLOCK_SUPERVISE_EVENT_TYPE_NET_ACCESS, access_request,
+		NULL, NULL, false, false, port);
+	if (ret)
+		return -EACCES;
+
+	return 0;
 }
 
 static int current_check_access_socket(struct socket *const sock,
@@ -214,6 +276,13 @@ static int current_check_access_socket(struct socket *const sock,
 	}
 
 	audit_net.family = address->sa_family;
+
+	/* Check if we should notify a supervisor instead of denying. */
+	if (!landlock_check_notify_net(subject->domain, &layer_masks,
+				       &rule_flags, access_request,
+				       ntohs(port)))
+		return restart_syscall();
+
 	landlock_log_denial(
 		subject,
 		&(struct landlock_request){ .type = LANDLOCK_REQUEST_NET_ACCESS,

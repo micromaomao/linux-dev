@@ -359,3 +359,103 @@ reading this, firstly thanks, and feedback would be very valuable :D )
 
 [12]: https://lore.kernel.org/all/cde6bbf0b52710b33170f2787fdcb11538e40813.1741047969.git.m@maowtm.org/#iZ31include:uapi:linux:landlock.h
 [13]: https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?h=v6.15-rc1&id=fd101da676362aaa051b4f5d8a941bd308603041
+
+
+Supervisor notification
+-----------------------
+
+The supervisor notification mechanism allows a supervisor to receive events when a supervised process is denied access.  This enables interactive decision-making: the supervisor can be told about denied accesses and decide whether to allow them (by updating rules via the mutable domain mechanism) or deny them outright.
+
+### Design Overview
+
+When a supervisor creates its ruleset with the `LANDLOCK_CREATE_SUPERVISOR_NOTIFICATION` flag (in addition to `LANDLOCK_CREATE_RULESET_SUPERVISOR`), the resulting supervisor has notification enabled.  The supervisor reads events from and writes responses to the supervisor ruleset fd directly, using `read()`, `write()`, and `poll()`.
+
+The event flow for a denied access in a supervised layer with notification enabled:
+
+1. A supervised process attempts an access that is denied by its supervisee ruleset and not allowed by the supervisor's committed ruleset either.
+2. For each denying layer (walking from youngest/last to oldest/first):
+   - If the layer's quiet flag is set for this access (via `LANDLOCK_ADD_RULE_QUIET`), the access is denied immediately without notification.
+   - If the layer's supervisor does not have notification enabled, the access is denied immediately (with audit logging).
+3. If all denying layers have notification-enabled supervisors, an event is queued to the youngest denying layer's supervisor.
+4. The LSM hook calls `restart_syscall()`, which sets `TIF_SIGPENDING` and returns `-ERESTARTNOINTR`, causing the kernel to restart the syscall.
+
+To avoid DoS issues from blocking inside LSM hooks while holding inode locks, the notification mechanism does not block in the hook.  Instead:
+1. The event is queued to the supervisor's event queue.
+2. A `task_work` callback is installed on the calling task (via `task_work_add` with `TWA_RESUME`).  This callback will run before the task returns to user space.
+3. The hook returns via `restart_syscall()` to cause the syscall to restart.
+4. Before returning to user space, the `task_work` callback runs and blocks the task (via `wait_var_event`) until the supervisor responds to the event.
+5. The supervisor reads the event, updates rules or sets the quiet flag as desired, then writes a response.
+6. The response wakes up the waiting task (via `wake_up_var`).  The task_work callback completes and the syscall is restarted.
+7. On restart, if the supervisor updated rules to allow the access, the restarted syscall succeeds.  If the supervisor set the quiet flag on the path, the restarted syscall denies without further notification.  If the supervisor did nothing, the event is queued again on the next restart.
+
+The supervisor can directly deny a request or provide a custom return value using `syscall_set_return_value()`.  The response structure includes a `ret_code` field (an `__s64` to match seccomp-unotify's flexibility) and a `flags` field.  When `LANDLOCK_SUPERVISE_RETCODE` is set in `flags`, the syscall return value is set to `ret_code` instead of restarting.  This allows the supervisor maximum flexibility: it can deny with -EPERM, allow by creating resources on behalf of the sandboxed process and returning 0, or return any other appropriate value.
+
+When a supervisor notification is queued:
+1. The LSM hook returns -EPERM immediately (without blocking).
+2. A `task_work` callback is installed to wait for the supervisor response.
+3. Before the task returns to userspace, the `task_work` runs and blocks until the supervisor responds.
+4. Based on the response flags:
+   - If `LANDLOCK_SUPERVISE_RETCODE` is set: `syscall_set_return_value(current, current_pt_regs(), ret_code, 0)` is called to set the return value.
+   - Otherwise: `syscall_set_return_value(current, current_pt_regs(), restart_syscall(), 0)` is called to restart the syscall.
+
+The use of `syscall_set_return_value()` provides an architecture-agnostic way to set the syscall return value from the task_work context, avoiding the complexities of attempting to set return values while holding locks in the LSM hook.  When restarting is needed (the default behavior), `restart_syscall()` is called only at the point where we know we need to restart, which sets the `TIF_SIGPENDING` flag; `syscall_set_return_value()` then ensures the syscall returns -ERESTARTNOINTR.
+
+Only one supervisor is notified at a time.  If multiple layers deny access, the youngest (most recently added) layer's supervisor is notified first.  If it allows access (by updating rules), the next restart of the syscall will check remaining denying layers.
+
+### uAPI
+
+The notification interface reuses the supervisor ruleset file descriptor.  The following operations are supported:
+
+- **`read(supervisor_fd, buf, size)`**: Reads the next pending event from the event queue.  Returns a `struct landlock_supervise_event` containing the event type, access request, accessor PID, and (for FS events) O_PATH file descriptors for the target paths, or (for NET events) port number.  For directory operations (create, delete, rename, link), the fd points to the parent directory and the `destname` field contains the target filename.  Blocks if no events are pending (unless `O_NONBLOCK`).  The caller must close any received file descriptors.
+
+- **`write(supervisor_fd, buf, size)`**: Writes one or more `struct landlock_supervise_response` to respond to previously read events.  Multiple responses can be written in a single write call.  Each response contains the event's cookie, optional flags, and an optional return code.  If `LANDLOCK_SUPERVISE_RETCODE` is set in `flags`, the syscall return value is set to `ret_code`; otherwise, the syscall is restarted (default behavior).
+
+- **`poll(supervisor_fd, ...)`**: Returns `POLLIN` when events are pending.
+
+Event types:
+- `LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS` (1): Filesystem access denial.  For directory operations, the event includes child dentry paths: mkdir/mknod/symlink pass the (new) child dentry; unlink/rmdir pass the existing child dentry.
+- `LANDLOCK_SUPERVISE_EVENT_TYPE_NET_ACCESS` (2): Network access denial.
+
+### Interaction with Quiet Flag
+
+The quiet flag (set via `LANDLOCK_ADD_RULE_QUIET` on rules where `quiet_access_*` is set in the ruleset attributes) serves a dual purpose:
+1. It suppresses audit log entries for denied accesses (its original purpose).
+2. It prevents supervisor notifications for denied accesses on objects marked quiet.
+
+This allows a supervisor to selectively suppress notifications for known-denied paths (e.g., `/proc`) where denials are expected and should not trigger interactive decisions.
+
+If the supervisor wants to deny an access without being notified about it again (and without granting access), it should set the quiet flag on the denied object before responding.
+
+### Implementation Notes
+
+- The `struct landlock_supervisor` is extended with notification state: an event queue, a notified events list, a spinlock, a wait queue for polling, and a `notification_enabled` flag.
+- Events are represented by `struct landlock_supervise_event_kernel` which holds references to paths and PIDs.  Each event has a refcount: one reference for the queue/list, and one for the task_work waiter.
+- When an event is queued, `landlock_queue_supervisor_notification()` installs a `task_work` callback (via `task_work_add` with `TWA_RESUME`) that blocks the calling task using `wait_var_event()` until the event is acknowledged or denied.  This ensures the task does not spin on syscall restart before the supervisor has responded.
+- The supervisor's `fop_supervisor_write()` handler sets the event state and calls `wake_up_var()` to unblock the waiting task.
+- When the supervisor is freed (last reference dropped), all pending/notified events are denied with `wake_up_var()` to unblock any waiting tasks.
+- The notification check logic is implemented in helper functions (`landlock_check_notify_fs` in fs.c and `landlock_check_notify_net` in net.c) that iterate denying layers and queue events.
+- For directory operations, `current_check_access_path` passes the child dentry and `child_is_new` flag to `landlock_check_notify_fs`, which constructs full paths for the supervisor event.
+- Scope-related denials and mount operations do not trigger notifications.
+
+### supervisor_sandboxer Example
+
+The `samples/landlock/supervisor_sandboxer.c` sample has been extended to demonstrate the notification mechanism:
+- Creates the supervisor with `LANDLOCK_CREATE_SUPERVISOR_NOTIFICATION`.
+- Uses `poll()` to monitor both the config file (inotify) and the supervisor fd for events.
+- When a notification event is received, prints access-specific messages (e.g., "create dir /path/child denied", "read access to /path denied", "delete /path/child denied", "rename /path/child to /path2/child2 denied").
+- Acknowledges all notification events (the syscall will be restarted; the supervisor could update rules or set quiet flags before responding to change the outcome).
+- Supports a `quiet` config line (e.g., `quiet /tmp`) that sets the quiet flag on a path, suppressing notifications for that path.  Removing the quiet line from the config removes the quiet flag.
+
+## Problems
+
+When the supervisor is killed, the child should have all its pending events denied and should no longer be able to generate notifications, but currently since it has a ref to the supervisor, this is not the case.
+
+Spurious create request when opening already existing files for write with
+O_CREAT due to issue with dcache miss
+
+## To consider
+
+Supervisor notification: uAPI - new uAPI, fanotify, or seccomp-unotify?
+
+For delete request, should the fd given be the target, or the parent of the target?  The landlock access needs to be on the parent anyway...
+Same for rename request, but in that case we need two destnames.

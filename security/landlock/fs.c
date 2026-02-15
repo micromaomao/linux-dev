@@ -17,6 +17,7 @@
 #include <linux/compiler_types.h>
 #include <linux/dcache.h>
 #include <linux/err.h>
+#include <linux/errno.h>
 #include <linux/falloc.h>
 #include <linux/fs.h>
 #include <linux/init.h>
@@ -1022,8 +1023,126 @@ jump_up:
 	return allowed_parent1 && allowed_parent2;
 }
 
+/**
+ * landlock_check_notify_fs - Check if denied access should trigger notification
+ *
+ * @domain: The domain that denied access.
+ * @layer_masks: Layer masks showing which layers still deny access.
+ * @rule_flags: Collected rule flags for quiet determination.
+ * @path: The directory path being accessed (for FS events).
+ * @access_request: The denied access rights.
+ * @child1: Child dentry for the first target (may be NULL).
+ * @child2: Child dentry for the second target in rename/link (may be NULL).
+ * @child1_is_new: Whether child1 is a new (not-yet-existing) dentry.
+ * @child2_is_new: Whether child2 is a new (not-yet-existing) dentry.
+ *
+ * Iterates denied layers in reverse (youngest first).  If all denying layers
+ * have notification-enabled supervisors (and none are quiet), queues an event
+ * to the youngest layer's supervisor.
+ *
+ * For directory operations (create, delete, link, rename), @child1/@child2
+ * provide the full path to the leaf dentries being accessed.  The paths
+ * passed to the supervisor are constructed from @path->mnt and the child
+ * dentries.
+ *
+ * Returns:
+ * - 0 if a notification was queued (caller should return -EPERM and let
+ *   task_work handle the actual return value)
+ * - -EACCES if notification cannot be sent (normal denial)
+ */
+static int landlock_check_notify_fs(
+	const struct landlock_ruleset *const domain,
+	const struct layer_access_masks *const layer_masks,
+	const struct collected_rule_flags *const rule_flags,
+	const struct path *const path,
+	const access_mask_t access_request,
+	struct dentry *const child1, struct dentry *const child2,
+	const bool child1_is_new, const bool child2_is_new)
+{
+	ssize_t layer_level;
+	const struct landlock_hierarchy *hierarchy;
+	struct landlock_supervisor *notify_supervisor = NULL;
+	struct path path1, path2 = {};
+	bool has_path2 = false;
+	int ret;
+
+	if (!domain || !domain->hierarchy)
+		return -EACCES;
+
+	/*
+	 * Walk the hierarchy chain once from youngest to oldest layer,
+	 * checking each denying layer.
+	 */
+	hierarchy = domain->hierarchy;
+	for (layer_level = domain->num_layers - 1; layer_level >= 0;
+	     layer_level--, hierarchy = hierarchy->parent) {
+		if (!layer_masks->access[layer_level])
+			continue;
+
+		/* This layer denies access. */
+
+		/* Check if quiet flag suppresses notification. */
+		if (rule_flags &&
+		    (rule_flags->quiet_masks & BIT(layer_level)))
+			return -EACCES;
+
+		if (!landlock_supervisor_has_notification(
+			    hierarchy->supervisor))
+			return -EACCES;
+
+		/* Record the youngest denying layer's supervisor. */
+		if (!notify_supervisor)
+			notify_supervisor = hierarchy->supervisor;
+	}
+
+	if (!notify_supervisor)
+		return -EACCES;
+
+	/*
+	 * Build paths for the notification event.  If a child dentry is
+	 * provided, construct a full path from the parent's vfsmount and
+	 * the child dentry.
+	 */
+	if (child1) {
+		path1.mnt = path->mnt;
+		path1.dentry = child1;
+	} else {
+		path1 = *path;
+	}
+	if (child2) {
+		path2.mnt = path->mnt;
+		path2.dentry = child2;
+		has_path2 = true;
+	}
+
+	/* Queue notification to the youngest denying supervisor. */
+	ret = landlock_queue_supervisor_notification(
+		notify_supervisor,
+		LANDLOCK_SUPERVISE_EVENT_TYPE_FS_ACCESS, access_request,
+		&path1, has_path2 ? &path2 : NULL,
+		child1_is_new, child2_is_new, 0);
+	if (ret)
+		return -EACCES;
+
+	return 0;
+}
+
+/**
+ * current_check_access_path - Check access for path-based hooks
+ *
+ * @path: The parent directory path being accessed.
+ * @access_request: The requested access rights.
+ * @child: Child dentry for directory operations (may be NULL).
+ * @child_is_new: Whether @child is a new (not-yet-existing) dentry.
+ *
+ * For directory operations (mkdir, mknod, symlink, unlink, rmdir),
+ * @child is the target child dentry.  For non-directory operations
+ * (truncate, file_open), @child should be NULL.
+ */
 static int current_check_access_path(const struct path *const path,
-				     access_mask_t access_request)
+				     access_mask_t access_request,
+				     struct dentry *const child,
+				     const bool child_is_new)
 {
 	const struct access_masks masks = {
 		.fs = access_request,
@@ -1044,6 +1163,18 @@ static int current_check_access_path(const struct path *const path,
 				       &layer_masks, &rule_flags, &request,
 				       NULL, 0, NULL, NULL, NULL, NULL))
 		return 0;
+
+	/* Check if we should notify a supervisor. */
+	if (!landlock_check_notify_fs(subject->domain, &layer_masks,
+				      &rule_flags, path, access_request,
+				      child, NULL, child_is_new, false)) {
+		/*
+		 * Notification queued. Return -EPERM now; the task_work
+		 * callback will set the appropriate return value (restart
+		 * or custom ret_code) before returning to userspace.
+		 */
+		return -EPERM;
+	}
 
 	request.rule_flags = rule_flags;
 	landlock_log_denial(subject, &request);
@@ -1616,38 +1747,44 @@ static int hook_path_rename(const struct path *const old_dir,
 static int hook_path_mkdir(const struct path *const dir,
 			   struct dentry *const dentry, const umode_t mode)
 {
-	return current_check_access_path(dir, LANDLOCK_ACCESS_FS_MAKE_DIR);
+	return current_check_access_path(dir, LANDLOCK_ACCESS_FS_MAKE_DIR,
+					 dentry, true);
 }
 
 static int hook_path_mknod(const struct path *const dir,
 			   struct dentry *const dentry, const umode_t mode,
 			   const unsigned int dev)
 {
-	return current_check_access_path(dir, get_mode_access(mode));
+	return current_check_access_path(dir, get_mode_access(mode),
+					 dentry, true);
 }
 
 static int hook_path_symlink(const struct path *const dir,
 			     struct dentry *const dentry,
 			     const char *const old_name)
 {
-	return current_check_access_path(dir, LANDLOCK_ACCESS_FS_MAKE_SYM);
+	return current_check_access_path(dir, LANDLOCK_ACCESS_FS_MAKE_SYM,
+					 dentry, true);
 }
 
 static int hook_path_unlink(const struct path *const dir,
 			    struct dentry *const dentry)
 {
-	return current_check_access_path(dir, LANDLOCK_ACCESS_FS_REMOVE_FILE);
+	return current_check_access_path(dir, LANDLOCK_ACCESS_FS_REMOVE_FILE,
+					 dentry, false);
 }
 
 static int hook_path_rmdir(const struct path *const dir,
 			   struct dentry *const dentry)
 {
-	return current_check_access_path(dir, LANDLOCK_ACCESS_FS_REMOVE_DIR);
+	return current_check_access_path(dir, LANDLOCK_ACCESS_FS_REMOVE_DIR,
+					 dentry, false);
 }
 
 static int hook_path_truncate(const struct path *const path)
 {
-	return current_check_access_path(path, LANDLOCK_ACCESS_FS_TRUNCATE);
+	return current_check_access_path(path, LANDLOCK_ACCESS_FS_TRUNCATE,
+					 NULL, false);
 }
 
 /* File hooks */
@@ -1798,6 +1935,19 @@ static int hook_file_open(struct file *const file)
 
 	if (access_mask_subset(open_access_request, allowed_access))
 		return 0;
+
+	/* Check if we should notify a supervisor. */
+	if (!landlock_check_notify_fs(subject->domain, &layer_masks,
+				      &rule_flags, &file->f_path,
+				      open_access_request,
+				      NULL, NULL, false, false)) {
+		/*
+		 * Notification queued. Return -EPERM now; the task_work
+		 * callback will set the appropriate return value (restart
+		 * or custom ret_code) before returning to userspace.
+		 */
+		return -EPERM;
+	}
 
 	/* Sets access to reflect the actual request. */
 	request.access = open_access_request;
