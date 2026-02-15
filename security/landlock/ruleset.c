@@ -857,6 +857,7 @@ bool landlock_check_supervisor_access(
 					     1)] = { 0 };
 	struct landlock_rule *modified_rule =
 		(struct landlock_rule *)single_layer_rule;
+	bool allowed = true;
 
 	if (!domain || !domain->hierarchy || !layer_masks)
 		return false;
@@ -951,12 +952,13 @@ bool landlock_check_supervisor_access(
 
 		/* TODO: extract what's inside the layer for loop in
 		 * landlock_unmask_layers to another function and use that */
-		if (landlock_unmask_layers(modified_rule, layer_masks, rule_flags)) {
-			return true;
-		}
+		if (!landlock_unmask_layers(modified_rule, layer_masks,
+					    rule_flags))
+			allowed = false;
+		/* TODO: double check >1 layer access check works */
 
 		hierarchy = hierarchy->parent;
 	}
 
-	return false;
+	return allowed;
 }
