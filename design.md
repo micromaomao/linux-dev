@@ -1,91 +1,3 @@
-Hi,
-
-Recently I have been continuing work on the previously proposed Landlock
-supervise feature (context below).  While I do have some rough PoCs, and
-I'm aware that sometimes code is better than talk, because of the amount
-of work involved, I would like to get some early feedback on the design
-before continuing.
-
-Scrappy demo (just screencasts):
-
-- user-space implemented "permissive mode":
-    https://fileshare.maowtm.org/landlock-20260214/demo.mp4
-- mutable domains based on a reloadable config file:
-    https://fileshare.maowtm.org/landlock-20260213/demo.mp4
-
-While I would be glad to receive reviews from anyone, Günther, when you
-are not too busy, can you kindly give this a review?  A lot of this has
-already been discussed with Mickaël, in fact a large part of this design
-was from his suggestions.  I apologize in advance for the length of this
-email - please feel free to respond to any part of it, and whenever you
-have time to.
-
-PoC code used in the above videos are largely generated, somewhat buggy,
-and unreviewed, but they are available:
-
-- mutable domains:
-    https://github.com/micromaomao/linux-dev/pull/26/changes
-- supervisor notification:
-    https://github.com/micromaomao/linux-dev/pull/27/changes
-
-The motivations listed in [1] are still relevant, and to add to that, here
-are some additional examples of things we can do with the supervisor
-feature (all from unprivileged applications):
-
-- Implementing a version of StemJail [2] which does not rely on bind
-  mounts and LD_PRELOAD (for the notification part, not for access
-  control).  Or in fact, any other uses of LD_PRELOAD for the purpose of
-  finding out what files are accessed.
-
-- For island [3], some sort of denial logging tied to the context,
-  integrated in the tool itself (rather than through kernel audit) and
-  live config reload.
-
-- Use in a non-security related context, such as automated build
-  dependency tracking.
-
-[1]: https://lore.kernel.org/all/cover.1741047969.git.m@maowtm.org/
-[2]: https://github.com/stemjail/stemjail
-[3]: https://github.com/landlock-lsm/island
-
-
-Background
-----------
-
-A while ago I sent a "Landlock supervise" RFC patch series [1], in which I
-proposed to extend Landlock with additional functionality to support
-"interactive" rule enforcement.  In discussion with Mickaël, we decided to
-split this work into 3 stages:  quiet flag, mutable domains, and finally
-supervisor notification.  Relevant discussions are at [4] and in replies
-to [1].
-
-The patch for quiet flag [5] has gone through multiple review iterations
-already.  It is useful on its own, but it was also motivated by the
-eventual use in controlling supervisor notification.
-
-The next stage is to introduce "mutable domains".  The motivation for this
-is two fold:
-
-1. This allows the supervisor to allow access to (large) file hierarchies
-   without needing to be woken up again for each access.
-2. Because we cannot block within security_path_mknod and other
-   directory-modification related hooks [6], the proposal was to return
-   immediately from those hooks after queuing the supervisor notification,
-   then wait in a separate task_work.  This however means that we cannot
-   directly "allow" access (and even if we can, it may introduce TOCTOU
-   problems).  In order to allow access to requested files, the supervisor
-   has to add additional rules to the (now mutable) domain which will
-   allow the required access.
-
-[1]: https://lore.kernel.org/all/cover.1741047969.git.m@maowtm.org/
-[4]: https://github.com/landlock-lsm/linux/issues/44
-[5]: https://lore.kernel.org/all/cover.1766330134.git.m@maowtm.org/
-[6]: https://lore.kernel.org/all/20250311.Ti7bi9ahshuu@digikod.net/
-
-
-Proposed changes
-----------------
-
 This patchset introduces the concept of "supervisor" and "supervisee"
 rulesets (alternative names for this are "static"/"dynamic",
 "mutable"/"immutable" etc), which are Landlock rulesets that are joined
@@ -324,8 +236,8 @@ on the committed ruleset (and free it at the end of
 is_access_to_paths_allowed).
 
 
-Optional access
----------------
+Optional accesses
+-----------------
 
 Optional access (truncate and ioctl) handling is also tricky.  There are
 two possible alternatives:
@@ -355,6 +267,18 @@ to me from a user perspective, but does come with performance
 implications.
 
 
+(Disallowing) self-supervision
+------------------------------
+
+We should figure out a way to ensure that a process cannot call
+landlock_restrict_self() with a ruleset that has a supervisor for which it
+has access to (i.e. via a supervisor ruleset fd).  This prevents
+accidental misuse, and also prevents deadlocks as discussed in [11].  I'm
+not sure if this will be easy to implement, however.
+
+[11]: https://lore.kernel.org/all/cc3e131f-f9a3-417b-9267-907b45083dc3@maowtm.org/
+
+
 Supervisor notification
 -----------------------
 
@@ -376,7 +300,7 @@ also lots of questions at this stage:
 
 
 - Earlier when implementing the Landlock supervise v1 RFC, I basically
-  came up with an ad-hoc uAPI for the notification [11], and the PoC code
+  came up with an ad-hoc uAPI for the notification [12], and the PoC code
   linked to above also uses this uAPI.  There are of course many problems
   with this as it stands, e.g. it only having one destname, which means
   that for rename, the fd1 needs to be the child being moved, which does
@@ -391,7 +315,7 @@ also lots of questions at this stage:
   mechanism for receiving and replying to events, etc.  We could possibly
   extend it to send Landlock specific notifications via a new kind of mark
   (FAN_MARK_LANDLOCK_DOMAIN ??) and add one or more new corresponding
-  event types.  Mickaël mentioned mount notifications [12] as an example
+  event types.  Mickaël mentioned mount notifications [13] as an example
   of using fanotify to send notifications other than file/dir
   modifications.
 
@@ -431,7 +355,7 @@ either of them?  (I will probably wait for at least a first review from
 the Landlock side before directing this explicitly to the fanotify and/or
 seccomp-unotify maintainers, in case the plan significantly changes, but
 if somehow a maintainer/reviewer from either of those areas are already
-reading this, feedback would be very valuable :D )
+reading this, firstly thanks, and feedback would be very valuable :D )
 
-[11]: https://lore.kernel.org/all/cde6bbf0b52710b33170f2787fdcb11538e40813.1741047969.git.m@maowtm.org/#iZ31include:uapi:linux:landlock.h
-[12]: https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?h=v6.15-rc1&id=fd101da676362aaa051b4f5d8a941bd308603041
+[12]: https://lore.kernel.org/all/cde6bbf0b52710b33170f2787fdcb11538e40813.1741047969.git.m@maowtm.org/#iZ31include:uapi:linux:landlock.h
+[13]: https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?h=v6.15-rc1&id=fd101da676362aaa051b4f5d8a941bd308603041
