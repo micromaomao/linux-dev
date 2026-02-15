@@ -4,7 +4,7 @@ Recently I have been continuing work on the previously proposed Landlock
 supervise feature (context below).  While I do have some rough PoCs, and
 I'm aware that sometimes code is better than talk, because of the amount
 of work involved, I would like to get some early feedback on the design
-(for mutable domains at this stage) before continuing.
+before continuing.
 
 Scrappy demo (just screencasts):
 
@@ -16,7 +16,8 @@ Scrappy demo (just screencasts):
 While I would be glad to receive reviews from anyone, Günther, when you
 are not too busy, can you kindly give this a review?  A lot of this has
 already been discussed with Mickaël, in fact a large part of this design
-was from his suggestions.
+was from his suggestions.  I apologize in advance for the length of this
+email - please feel free to respond whenever you have time to.
 
 PoC code used in the above videos are largely generated, somewhat buggy,
 and unreviewed, but they are available:
@@ -350,12 +351,75 @@ work is to send notification to the supervisor on access denials, so that
 it can decide whether to allow the access or not.  For that, there are
 also lots of questions at this stage:
 
-- Should we in fact implement that first?  This means that the supervisor
-  would only be able to find out about denials, but not allow them without
-  a sandbox restart.  We still eventually want the mutable domains, since
-  that makes this a lot more useful, but I can see some use cases for just
-  the notification part, and I can't see a use case for just mutable
-  domains, aside from live reload of landlock-config (but maybe that's
-  already quite useful?).
 
-Supervisor notification: uAPI - new uAPI or fanotify?
+- Should we in fact implement that first, before mutable domains?  This
+  means that the supervisor would only be able to find out about denials,
+  but not allow them without a sandbox restart.  We still eventually want
+  the mutable domains, since that makes this a lot more useful, but I can
+  see some use cases for just the notification part (e.g. island denial
+  log), and I can't see a likely use case for just mutable domains, aside
+  from live reload of landlock-config (maybe that _is_ useful on its own,
+  considering that you can also find out about denials from the kernel
+  audit log, and add missing rules based on that).
+
+
+- Earlier when implementing the Landlock supervise v1 RFC, I basically
+  came up with an ad-hoc uAPI for the notification [11], and the PoC code
+  linked to above also uses this uAPI.  There are of course many problems
+  with this as it stands, e.g. it only having one destname, which means
+  that for rename, the fd1 needs to be the child being moved, which does
+  not align with the vfs semantic and how Landlock treat it (i.e. the
+  thing being updated here is the parent directory, not the child itself).
+
+  But also, in discussion with Mickaël last year, he mentioned that we
+  could reuse the fsnotify infrastructure, and perhaps additionally, use
+  fanotify to deliver these notifications.  I do think there is some
+  potential here, as fanotify already implements an event header, a
+  mechanism for receiving and replying to events, etc.  We could possibly
+  extend it to send Landlock specific notifications via a new kind of mark
+  (FAN_MARK_LANDLOCK_DOMAIN ??) and add one or more new corresponding
+  event types.  Mickaël mentioned mount notifications [12] as an example
+  of using fanotify to send notifications other than file/dir
+  modifications.
+
+  I'm not sure if directly extending the fanotify uAPI is a good idea tho,
+  considering that Landlock is not a feature specific to the filesystem -
+  we will also have denial events for net_port rules, and perhaps more in
+  the future.  However, Mickaël mentioned that there might be some
+  internal infrastructure which we can re-use (even if we have our own
+  notification uAPI).
+
+
+- The other uAPI alternative which I have been thinking of is to extend
+  seccomp-unotify.  For example, a Landlock denial could result in the
+  syscall being trapped and a `struct seccomp_notif` being sent to the
+  seccomp supervisor (via the existing mechanism), with additional
+  information (mostly, the file(s) / net ports being accessed and access
+  rights requested) attached to the notification _somehow_.  Then the
+  supervisor can use the same kind of responses one would use for
+  seccomp-unotify to cause the syscall to either be retried (possibly via
+  `SECCOMP_USER_NOTIF_FLAG_CONTINUE`) or return with an error code of its
+  choice (or alternatively, carry out the operation on behalf of the
+  child, and pretend that the syscall succeed, which might be useful to
+  implement an "allow file creation but only this file" / "allow `mktemp
+  -d` but not arbitrary create on anything under /tmp").
+
+  Looking at `struct seccomp_notif` and `struct seccomp_data` however, I'm
+  not sure how feasible / doable this extension would be.  Also,
+  seccomp-unotify is supposed to trigger before a syscall is actually
+  executed, whereas if we use it this way, we will want it to trigger
+  after we're already midway through the syscall (in the LSM hook).  This
+  might make it hard to implement (and also twists a bit the uAPI
+  semantics of seccomp-unotify).
+
+
+I'm not sure how sensible the above uAPI suggestions are.  Are there any
+immediate reasons, from Landlock's perspective, to rule out either of
+them?  (I will probably wait for at least a first review from the Landlock
+side before directing this explicitly to the fanotify and/or
+seccomp-unotify maintainers, but if somehow a maintainer/reviewer from
+either of those areas are already reading this, feedback would be very
+valuable :D )
+
+[11]: https://lore.kernel.org/all/cde6bbf0b52710b33170f2787fdcb11538e40813.1741047969.git.m@maowtm.org/#iZ31include:uapi:linux:landlock.h
+[12]: https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?h=v6.15-rc1&id=fd101da676362aaa051b4f5d8a941bd308603041
