@@ -145,8 +145,6 @@ static int current_check_access_socket(struct socket *const sock,
 					.audit.u.net = &audit_net,
 					.access = access_request,
 					.layer_masks = &layer_masks,
-					.layer_masks_size =
-						ARRAY_SIZE(layer_masks),
 				});
 			return -EACCES;
 		} else {
