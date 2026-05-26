@@ -20,7 +20,7 @@ Denied access requests are logged by default for a sandboxed program if `audit`
 is enabled.  This default behavior can be changed with the
 sys_landlock_restrict_self() flags (cf.
 Documentation/userspace-api/landlock.rst), or suppressed on a per-object
-basis by using ``LANDLOCK_ADD_RULE_QUIET`` (ABI 10+).  Landlock logs can
+basis by using ``LANDLOCK_ADD_RULE_QUIET`` (ABI 11+).  Landlock logs can
 also be masked thanks to audit rules.  Landlock can generate 2 audit
 record types.
 
@@ -175,7 +175,7 @@ attack attempt or a bug in the security policy.  We can put in place some
 filters to limit noise with two complementary ways:
 
 - with sys_landlock_restrict_self()'s flags, or
-  ``LANDLOCK_ADD_RULE_QUIET`` (ABI 10+) if we can fix the sandboxed
+  ``LANDLOCK_ADD_RULE_QUIET`` (ABI 11+) if we can fix the sandboxed
   programs,
 - or with audit rules (see :manpage:`auditctl(8)`).
 

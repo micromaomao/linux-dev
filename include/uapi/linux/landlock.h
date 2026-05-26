@@ -40,7 +40,7 @@
  * does not require marking any objects as quiet - if the ruleset is created
  * with any bits set in @quiet_scoped, then denial of such scoped resources will
  * not trigger any log.  These 3 fields are available since Landlock ABI version
- * 10.
+ * 11.
  *
  * @quiet_access_fs, @quiet_access_net and @quiet_scoped must be a subset of
  * @handled_access_fs, @handled_access_net and @scoped respectively.
