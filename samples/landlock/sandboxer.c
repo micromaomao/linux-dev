@@ -360,7 +360,7 @@ static int add_quiet_access(__u64 *const quiet_access,
 	return 0;
 }
 
-#define LANDLOCK_ABI_LAST 10
+#define LANDLOCK_ABI_LAST 11
 
 #define XSTR(s) #s
 #define STR(s) XSTR(s)
@@ -538,7 +538,8 @@ int main(const int argc, char *const argv[], char *const *const envp)
 			~(LANDLOCK_ACCESS_NET_BIND_UDP |
 			  LANDLOCK_ACCESS_NET_CONNECT_SEND_UDP);
 		__attribute__((fallthrough));
-		/* Don't add quiet flags for ABI < 10 later on. */
+	case 10:
+		/* Don't add quiet flags for ABI < 11 later on. */
 		quiet_supported = false;
 
 		/* Must be printed for any ABI < LANDLOCK_ABI_LAST. */
