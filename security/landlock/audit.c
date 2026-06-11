@@ -511,6 +511,13 @@ static bool is_valid_request(const struct landlock_request *const request)
 	if (request->deny_masks) {
 		if (WARN_ON_ONCE(!request->all_existing_optional_access))
 			return false;
+		static_assert(sizeof(request->all_existing_optional_access) ==
+			      sizeof(u32));
+		if (WARN_ON_ONCE(
+			    request->quiet_optional_accesses >=
+			    BIT(hweight32(
+				    request->all_existing_optional_access))))
+			return false;
 	}
 
 	return true;
