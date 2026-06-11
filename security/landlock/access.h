@@ -81,7 +81,7 @@ struct layer_mask {
 	 */
 	access_mask_t quiet : 1;
 #endif /* CONFIG_AUDIT */
-};
+} __packed __aligned(sizeof(access_mask_t));
 
 /*
  * Make sure that we don't increase the size of struct layer_mask when
