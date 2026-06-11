@@ -345,7 +345,7 @@ static int get_path_from_fd(const s32 fd, struct path *const path)
 }
 
 static int add_rule_path_beneath(struct landlock_ruleset *const ruleset,
-				 const void __user *const rule_attr, int flags)
+				 const void __user *const rule_attr, u32 flags)
 {
 	struct landlock_path_beneath_attr path_beneath_attr;
 	struct path path;
@@ -388,7 +388,7 @@ static int add_rule_path_beneath(struct landlock_ruleset *const ruleset,
 }
 
 static int add_rule_net_port(struct landlock_ruleset *ruleset,
-			     const void __user *const rule_attr, int flags)
+			     const void __user *const rule_attr, u32 flags)
 {
 	struct landlock_net_port_attr net_port_attr;
 	int res;

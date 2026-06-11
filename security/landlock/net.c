@@ -21,7 +21,7 @@
 
 int landlock_append_net_rule(struct landlock_ruleset *const ruleset,
 			     const u16 port, access_mask_t access_rights,
-			     const int flags)
+			     const u32 flags)
 {
 	int err;
 	const struct landlock_id id = {

@@ -307,7 +307,7 @@ static void build_check_layer(void)
 /* @ruleset must be locked by the caller. */
 int landlock_insert_rule(struct landlock_ruleset *const ruleset,
 			 const struct landlock_id id,
-			 const access_mask_t access, const int flags)
+			 const access_mask_t access, const u32 flags)
 {
 	struct landlock_layer layers[] = { {
 		.access = access,

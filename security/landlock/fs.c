@@ -325,7 +325,7 @@ retry:
  */
 int landlock_append_fs_rule(struct landlock_ruleset *const ruleset,
 			    const struct path *const path,
-			    access_mask_t access_rights, const int flags)
+			    access_mask_t access_rights, const u32 flags)
 {
 	int err;
 	struct landlock_id id = {
