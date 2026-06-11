@@ -79,7 +79,7 @@ struct layer_mask {
 	 * @quiet: Whether we have encountered a rule with the quiet flag for
 	 * this layer.  Used to control audit logging.
 	 */
-	bool quiet : 1;
+	access_mask_t quiet : 1;
 #endif /* CONFIG_AUDIT */
 };
 
