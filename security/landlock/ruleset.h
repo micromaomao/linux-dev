@@ -39,7 +39,7 @@ struct landlock_layer {
 		 * this rule in this domain.  For filesystem rules, this inherits
 		 * down the file hierarchy.
 		 */
-		bool quiet : 1;
+		u8 quiet : 1;
 	} flags;
 	/**
 	 * @access: Bitfield of allowed actions on the kernel object.  They are
