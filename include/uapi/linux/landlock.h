@@ -33,9 +33,9 @@
  * (and that they have tested with a kernel that supported them all).
  *
  * @quiet_access_fs and @quiet_access_net are bitmasks of actions for which a
- * denial by this layer will not trigger an audit log if the corresponding
- * object (or its children, for filesystem rules) is marked with the "quiet" bit
- * via %LANDLOCK_ADD_RULE_QUIET, even if logging would normally take place per
+ * denial by this layer will not trigger a log if the corresponding object (or
+ * its children, for filesystem rules) is marked with the "quiet" bit via
+ * %LANDLOCK_ADD_RULE_QUIET, even if logging would normally take place per
  * landlock_restrict_self() flags.  @quiet_scoped is similar, except that it
  * does not require marking any objects as quiet - if the ruleset is created
  * with any bits set in @quiet_scoped, then denial of such scoped resources will
@@ -107,8 +107,8 @@ struct landlock_ruleset_attr {
  *     this flag controls whether Landlock will log audit messages when
  *     access to the objects covered by this rule is denied by this layer.
  *
- *     If audit logging is enabled, when Landlock denies an access, it will
- *     suppress the audit log if all of the following are true:
+ *     If logging is enabled, when Landlock denies an access, it will
+ *     suppress the log if all of the following are true:
  *
  *     - this layer is the innermost layer that denied the access;
  *     - all accesses denied by this layer are part of the quiet_* fields
