@@ -159,9 +159,14 @@ get_layer_deny_mask(const access_mask_t all_existing_optional_access,
 
 /**
  * landlock_get_quiet_optional_accesses - Get optional accesses which are
- * "covered" by quiet rule flags.
+ *                                        covered by quiet rule flags.
  *
- * Returns a bitmask of which optional accesses are denied by layers for
+ * @all_existing_optional_access: Bitmask of valid optional accesses.
+ * @deny_masks: Domain layer levels that denied each optional access (the
+ *              deny_masks field on struct landlock_file_security).
+ * @masks: The struct layer_masks collected during the path walk.
+ *
+ * Return: a bitmask of which optional accesses are denied by layers for
  * which the quiet flag was collected during the path walk.
  */
 optional_access_t landlock_get_quiet_optional_accesses(
