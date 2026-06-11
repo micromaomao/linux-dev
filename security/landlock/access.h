@@ -62,14 +62,16 @@ static_assert(sizeof(typeof_member(union access_masks_all, masks)) ==
 	      sizeof(typeof_member(union access_masks_all, all)));
 
 /**
- * struct layer_mask - The unfulfilled access rights and rule flags for
- * a layer.
+ * struct layer_mask - The access rights and rule flags for a layer.
+ *
+ * This has a bit for each access rights and rule flags.  During access
+ * checks, it is used to represent the access rights for each layer which
+ * still need to be fulfilled.  When all bits are 0, the access request is
+ * considered to be fulfilled.
  */
 struct layer_mask {
 	/**
-	 * @access: During access checks, this is used to represent the access
-	 * rights for each layer which still need to be fulfilled.  When all
-	 * bits are 0, the access request is allowed by this layer.
+	 * @access: The unfulfilled access rights for this layer.
 	 */
 	access_mask_t access : LANDLOCK_NUM_ACCESS_MAX;
 #ifdef CONFIG_AUDIT
