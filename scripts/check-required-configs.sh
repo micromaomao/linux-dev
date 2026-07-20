@@ -66,8 +66,17 @@ if [[ ! -r "$config_file" ]]; then
 	exit 1
 fi
 
+if [[ ! -x "$CONFIG_TOOL" ]]; then
+	printf "Error: required helper '%s' is not executable.\n" "$CONFIG_TOOL" >&2
+	exit 1
+fi
+
 for config_name in "${REQUIRED_CONFIGS[@]}"; do
-	state="$("${CONFIG_TOOL}" --file "${config_file}" --state "${config_name}")"
+	if ! state="$("${CONFIG_TOOL}" --file "${config_file}" --state "${config_name}")"; then
+		printf "Error: failed to read '%s' from '%s'.\n" "${config_name}" \
+			"${config_file}" >&2
+		exit 1
+	fi
 
 	case "${state}" in
 	y | m)
