@@ -57,17 +57,17 @@ fi
 config_file=$1
 
 if [[ ! -f "$config_file" ]]; then
-	printf "Error: '%s' is not a readable regular file.\n" "$config_file" >&2
+	printf "Error: '%s' does not exist or is not a regular file.\n" "$config_file" >&2
 	exit 1
 fi
 
 if [[ ! -r "$config_file" ]]; then
-	printf "Error: '%s' is not a readable regular file.\n" "$config_file" >&2
+	printf "Error: '%s' is not readable.\n" "$config_file" >&2
 	exit 1
 fi
 
 for config_name in "${REQUIRED_CONFIGS[@]}"; do
-	state="$(bash "${CONFIG_TOOL}" --file "${config_file}" --state "${config_name}")"
+	state="$("${CONFIG_TOOL}" --file "${config_file}" --state "${config_name}")"
 
 	case "${state}" in
 	y | m)
