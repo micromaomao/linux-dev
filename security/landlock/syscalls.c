@@ -22,6 +22,7 @@
 #include <linux/mount.h>
 #include <linux/path.h>
 #include <linux/sched.h>
+#include <linux/sched/signal.h>
 #include <linux/security.h>
 #include <linux/stddef.h>
 #include <linux/syscalls.h>
@@ -539,6 +540,7 @@ SYSCALL_DEFINE2(landlock_restrict_self, const int, ruleset_fd, const __u32,
 	struct landlock_domain *new_dom = NULL;
 	struct cred *new_cred;
 	struct landlock_cred_security *new_llcred;
+	bool process_wide;
 	bool __maybe_unused log_same_exec, log_new_exec, log_subdomains,
 		prev_log_subdomains;
 
@@ -677,5 +679,14 @@ SYSCALL_DEFINE2(landlock_restrict_self, const int, ruleset_fd, const __u32,
 		}
 	}
 
-	return commit_creds(new_cred);
+	/* Whole process: thread-sync swept siblings, or single-threaded. */
+	process_wide = (flags & LANDLOCK_RESTRICT_SELF_TSYNC) ||
+		       get_nr_threads(current) == 1;
+	commit_creds(new_cred);
+
+	/* The caller commits last, so its event concludes the operation. */
+	if (ruleset)
+		trace_landlock_enforce_domain(new_dom, true, process_wide);
+
+	return 0;
 }
