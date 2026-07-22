@@ -14,6 +14,7 @@
 #include <linux/tracepoint.h>
 
 struct landlock_ruleset;
+struct path;
 
 /* Maps a shared _LANDLOCK_*_NAMES entry to a __print_flags() pair. */
 #define _LANDLOCK_NAME_ENTRY(mask, name) { mask, name }
@@ -63,6 +64,14 @@ struct landlock_ruleset;
  * lockless snapshot instead: a task's comm, and the deny_access_net struct
  * sock (whose network hook holds no socket lock), matching how the sched
  * and signal trace events sample comm.
+ *
+ * Field encoding
+ * ~~~~~~~~~~~~~~
+ *
+ * Fields that mirror the Landlock UAPI use the same C types and endianness
+ * (e.g. network ports are __u64 in host endianness, like
+ * landlock_net_port_attr.port).  Per-event details, such as where a value
+ * is byte-swapped, live in the field's own kdoc.
  */
 
 /**
@@ -84,6 +93,7 @@ TRACE_EVENT(landlock_create_ruleset,
 
 	TP_STRUCT__entry(
 		__field(	__u64,		ruleset_id	)
+		__field(	__u32,		ruleset_version	)
 		__field(	access_mask_t,	handled_fs	)
 		__field(	access_mask_t,	handled_net	)
 		__field(	access_mask_t,	scoped		)
@@ -91,13 +101,14 @@ TRACE_EVENT(landlock_create_ruleset,
 
 	TP_fast_assign(
 		__entry->ruleset_id	= ruleset->id;
+		__entry->ruleset_version = ruleset->version;
 		__entry->handled_fs	= ruleset->handled_masks.fs;
 		__entry->handled_net	= ruleset->handled_masks.net;
 		__entry->scoped		= ruleset->handled_masks.scope;
 	),
 
-	TP_printk("ruleset=%llx handled_fs=%s handled_net=%s scoped=%s",
-		__entry->ruleset_id,
+	TP_printk("ruleset=%llx.%u handled_fs=%s handled_net=%s scoped=%s",
+		__entry->ruleset_id, __entry->ruleset_version,
 		__print_flags(__entry->handled_fs, "|", _LANDLOCK_ACCESS_FS_NAMES),
 		__print_flags(__entry->handled_net, "|", _LANDLOCK_ACCESS_NET_NAMES),
 		__print_flags(__entry->scoped, "|", _LANDLOCK_SCOPE_NAMES))
@@ -122,13 +133,111 @@ TRACE_EVENT(landlock_free_ruleset,
 
 	TP_STRUCT__entry(
 		__field(	__u64,		ruleset_id	)
+		__field(	__u32,		ruleset_version	)
 	),
 
 	TP_fast_assign(
 		__entry->ruleset_id	= ruleset->id;
+		__entry->ruleset_version = ruleset->version;
 	),
 
-	TP_printk("ruleset=%llx", __entry->ruleset_id)
+	TP_printk("ruleset=%llx.%u",
+		__entry->ruleset_id, __entry->ruleset_version)
+);
+
+/**
+ * landlock_add_rule_fs - Filesystem rule added to a ruleset
+ *
+ * @ruleset: Source ruleset (never NULL).
+ * @access_rights: Effective access mask stored in the rule, not the raw
+ *                 sys_landlock_add_rule() argument (unhandled rights
+ *                 added).
+ * @path: Filesystem path for the rule (never NULL).
+ * @pathname: Resolved absolute path string (never NULL; error placeholder
+ *            on resolution failure).
+ *
+ * Emitted by sys_landlock_add_rule() under the modified ruleset's lock, so
+ * the reported ruleset is a stable snapshot that no concurrent writer can
+ * change.
+ */
+TRACE_EVENT(landlock_add_rule_fs,
+
+	TP_PROTO(const struct landlock_ruleset *ruleset,
+		 access_mask_t access_rights, const struct path *path,
+		 const char *pathname),
+
+	TP_ARGS(ruleset, access_rights, path, pathname),
+
+	TP_STRUCT__entry(
+		__field(	__u64,		ruleset_id	)
+		__field(	__u32,		ruleset_version	)
+		__field(	access_mask_t,	access_rights	)
+		__field(	dev_t,		dev		)
+		__field(	ino_t,		ino		)
+		__string(	pathname,	pathname	)
+	),
+
+	TP_fast_assign(
+		lockdep_assert_held(&ruleset->lock);
+		__entry->ruleset_id	= ruleset->id;
+		__entry->ruleset_version = ruleset->version;
+		__entry->access_rights	= access_rights;
+		__entry->dev		= path->dentry->d_sb->s_dev;
+		/*
+		 * The inode number may not be the user-visible one,
+		 * but it will be the same used by audit.
+		 */
+		__entry->ino		= d_backing_inode(path->dentry)->i_ino;
+		__assign_str(pathname);
+	),
+
+	TP_printk("ruleset=%llx.%u access_rights=%s dev=%u:%u ino=%lu path=%s",
+		__entry->ruleset_id, __entry->ruleset_version,
+		__print_flags(__entry->access_rights, "|", _LANDLOCK_ACCESS_FS_NAMES),
+		MAJOR(__entry->dev), MINOR(__entry->dev), __entry->ino,
+		__print_untrusted_str(pathname))
+);
+
+/**
+ * landlock_add_rule_net - Network port rule added to a ruleset
+ *
+ * @ruleset: Source ruleset (never NULL).
+ * @access_rights: Effective access mask stored in the rule, not the raw
+ *                 sys_landlock_add_rule() argument (unhandled rights
+ *                 added).
+ * @port: Network port, the landlock_net_port_attr.port UAPI value
+ *        forwarded directly.
+ *
+ * Emitted by sys_landlock_add_rule() under the modified ruleset's lock, so
+ * the reported ruleset is a stable snapshot that no concurrent writer can
+ * change.
+ */
+TRACE_EVENT(landlock_add_rule_net,
+
+	TP_PROTO(const struct landlock_ruleset *ruleset,
+		 access_mask_t access_rights, __u64 port),
+
+	TP_ARGS(ruleset, access_rights, port),
+
+	TP_STRUCT__entry(
+		__field(	__u64,		ruleset_id	)
+		__field(	__u32,		ruleset_version	)
+		__field(	access_mask_t,	access_rights	)
+		__field(	__u64,		port		)
+	),
+
+	TP_fast_assign(
+		lockdep_assert_held(&ruleset->lock);
+		__entry->ruleset_id	= ruleset->id;
+		__entry->ruleset_version = ruleset->version;
+		__entry->access_rights	= access_rights;
+		__entry->port		= port;
+	),
+
+	TP_printk("ruleset=%llx.%u access_rights=%s port=%llu",
+		__entry->ruleset_id, __entry->ruleset_version,
+		__print_flags(__entry->access_rights, "|", _LANDLOCK_ACCESS_NET_NAMES),
+		__entry->port)
 );
 
 #undef _LANDLOCK_NAME_ENTRY
