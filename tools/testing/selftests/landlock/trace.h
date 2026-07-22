@@ -25,6 +25,8 @@
 	TRACEFS_LANDLOCK_DIR "/landlock_create_ruleset/enable"
 #define TRACEFS_CREATE_DOMAIN_ENABLE \
 	TRACEFS_LANDLOCK_DIR "/landlock_create_domain/enable"
+#define TRACEFS_ENFORCE_DOMAIN_ENABLE \
+	TRACEFS_LANDLOCK_DIR "/landlock_enforce_domain/enable"
 #define TRACEFS_ADD_RULE_FS_ENABLE \
 	TRACEFS_LANDLOCK_DIR "/landlock_add_rule_fs/enable"
 #define TRACEFS_ADD_RULE_NET_ENABLE \
@@ -107,6 +109,13 @@
 	"domain=[0-9a-f]\\+ "      \
 	"parent=[0-9a-f]\\+ "      \
 	"ruleset=[0-9a-f]\\+\\.[0-9]\\+$"
+
+#define REGEX_ENFORCE_DOMAIN(task)  \
+	TRACE_PREFIX(task)          \
+	"landlock_enforce_domain: " \
+	"domain=[0-9a-f]\\+ "       \
+	"complete=[01] "            \
+	"process_wide=[01]$"
 
 #define REGEX_CHECK_RULE_FS(task)  \
 	TRACE_PREFIX(task)         \
