@@ -12,6 +12,7 @@
 #include <sched.h>
 #include <signal.h>
 #include <stddef.h>
+#include <sys/mount.h>
 #include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -23,6 +24,9 @@
 #include "audit.h"
 #include "common.h"
 #include "scoped_common.h"
+#include "trace.h"
+
+#define TRACE_TASK "scoped_abstract"
 
 /* Number of pending connections queue to be hold. */
 const short backlog = 10;
@@ -1203,6 +1207,465 @@ TEST(self_connect)
 	if (WIFSIGNALED(status) || !WIFEXITED(status) ||
 	    WEXITSTATUS(status) != EXIT_SUCCESS)
 		_metadata->exit_code = KSFT_FAIL;
+}
+
+/* Trace tests */
+
+/* clang-format off */
+FIXTURE(trace_unix) {
+	/* clang-format on */
+	int tracefs_ok;
+};
+
+FIXTURE_SETUP(trace_unix)
+{
+	int ret;
+
+	set_cap(_metadata, CAP_SYS_ADMIN);
+	ASSERT_EQ(0, unshare(CLONE_NEWNS));
+	ASSERT_EQ(0, mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL));
+
+	ret = tracefs_fixture_setup();
+	if (ret) {
+		clear_cap(_metadata, CAP_SYS_ADMIN);
+		self->tracefs_ok = 0;
+		SKIP(return, "tracefs not available");
+	}
+	self->tracefs_ok = 1;
+
+	ASSERT_EQ(0, tracefs_enable_event(
+			     TRACEFS_DENY_SCOPE_ABSTRACT_UNIX_SOCKET_ENABLE,
+			     true));
+	ASSERT_EQ(0, tracefs_clear());
+	clear_cap(_metadata, CAP_SYS_ADMIN);
+}
+
+FIXTURE_TEARDOWN(trace_unix)
+{
+	if (!self->tracefs_ok)
+		return;
+
+	set_cap(_metadata, CAP_SYS_ADMIN);
+	tracefs_enable_event(TRACEFS_DENY_SCOPE_ABSTRACT_UNIX_SOCKET_ENABLE,
+			     false);
+	tracefs_fixture_teardown();
+	clear_cap(_metadata, CAP_SYS_ADMIN);
+}
+
+/* clang-format off */
+FIXTURE_VARIANT(trace_unix)
+{
+	/* clang-format on */
+	bool sandbox;
+	bool sandbox_target;
+	int expect_denied;
+};
+
+/* Denied: sandboxed child connects to unsandboxed peer (peer_domain=0). */
+/* clang-format off */
+FIXTURE_VARIANT_ADD(trace_unix, denied) {
+	/* clang-format on */
+	.sandbox = true,
+	.sandbox_target = false,
+	.expect_denied = 1,
+};
+
+/*
+ * Denied: sandboxed child connects to a peer socket owned by a sandboxed
+ * process, so the peer is in a domain and peer_domain= is non-zero.
+ */
+/* clang-format off */
+FIXTURE_VARIANT_ADD(trace_unix, denied_scoped_peer) {
+	/* clang-format on */
+	.sandbox = true,
+	.sandbox_target = true,
+	.expect_denied = 1,
+};
+
+/* Allowed: unsandboxed child connects. */
+/* clang-format off */
+FIXTURE_VARIANT_ADD(trace_unix, allowed) {
+	/* clang-format on */
+	.sandbox = false,
+	.sandbox_target = false,
+	.expect_denied = 0,
+};
+
+TEST_F(trace_unix, deny_scope_unix)
+{
+	struct sockaddr_un addr = {
+		.sun_family = AF_UNIX,
+	};
+	char *buf, field[128], expected_path[64], expected_pid[16];
+	int server_fd, client_fd, count, status;
+	pid_t child;
+
+	if (!self->tracefs_ok)
+		SKIP(return, "tracefs not available");
+
+	/*
+	 * For the non-zero peer_domain case, sandbox the parent before it
+	 * creates the server socket.  The peer domain is read from the server
+	 * socket file's credentials, so the socket carries the parent's domain
+	 * and peer_domain= is non-zero.
+	 */
+	if (variant->sandbox_target)
+		create_scoped_domain(_metadata,
+				     LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET);
+
+	/* Create an abstract unix socket server in the parent. */
+	server_fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+	ASSERT_LE(0, server_fd);
+
+	addr.sun_path[0] = '\0';
+	snprintf(addr.sun_path + 1, sizeof(addr.sun_path) - 1,
+		 "landlock_trace_test_%d", getpid());
+
+	ASSERT_EQ(0, bind(server_fd, (struct sockaddr *)&addr,
+			  offsetof(struct sockaddr_un, sun_path) + 1 +
+				  strlen(addr.sun_path + 1)));
+	ASSERT_EQ(0, listen(server_fd, 1));
+
+	child = fork();
+	ASSERT_LE(0, child);
+
+	if (child == 0) {
+		if (variant->sandbox) {
+			struct landlock_ruleset_attr ruleset_attr = {
+				.scoped = LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET,
+			};
+			int ruleset_fd;
+
+			ruleset_fd = landlock_create_ruleset(
+				&ruleset_attr, sizeof(ruleset_attr), 0);
+			if (ruleset_fd < 0)
+				_exit(1);
+
+			prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+			if (landlock_restrict_self(ruleset_fd, 0)) {
+				close(ruleset_fd);
+				_exit(1);
+			}
+			close(ruleset_fd);
+		}
+
+		client_fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+		if (client_fd < 0)
+			_exit(1);
+
+		if (variant->sandbox) {
+			/* Connect should be denied. */
+			if (connect(client_fd, (struct sockaddr *)&addr,
+				    offsetof(struct sockaddr_un, sun_path) + 1 +
+					    strlen(addr.sun_path + 1)) == 0) {
+				close(client_fd);
+				_exit(2);
+			}
+			if (errno != EPERM) {
+				close(client_fd);
+				_exit(3);
+			}
+		} else {
+			/* No sandbox: connect should succeed. */
+			if (connect(client_fd, (struct sockaddr *)&addr,
+				    offsetof(struct sockaddr_un, sun_path) + 1 +
+					    strlen(addr.sun_path + 1)) != 0) {
+				close(client_fd);
+				_exit(2);
+			}
+		}
+		close(client_fd);
+		_exit(0);
+	}
+
+	ASSERT_EQ(child, waitpid(child, &status, 0));
+	ASSERT_TRUE(WIFEXITED(status));
+	EXPECT_EQ(0, WEXITSTATUS(status));
+	close(server_fd);
+
+	buf = tracefs_read_buf();
+	ASSERT_NE(NULL, buf);
+
+	count = tracefs_count_matches(
+		buf, REGEX_DENY_SCOPE_ABSTRACT_UNIX_SOCKET(TRACE_TASK));
+	if (variant->expect_denied) {
+		EXPECT_EQ(variant->expect_denied, count)
+		{
+			TH_LOG("Expected deny_scope_abstract_unix_socket "
+			       "event, got %d\n%s",
+			       count, buf);
+		}
+
+		/* Verify sun_path (trace skips the leading NUL). */
+		snprintf(expected_path, sizeof(expected_path),
+			 "landlock_trace_test_%d", getpid());
+		ASSERT_EQ(0, tracefs_extract_field(
+				     buf,
+				     REGEX_DENY_SCOPE_ABSTRACT_UNIX_SOCKET(
+					     TRACE_TASK),
+				     "sun_path", field, sizeof(field)));
+		EXPECT_STREQ(expected_path, field);
+
+		/* Verify peer_pid is the parent's PID. */
+		snprintf(expected_pid, sizeof(expected_pid), "%d", getpid());
+		ASSERT_EQ(0, tracefs_extract_field(
+				     buf,
+				     REGEX_DENY_SCOPE_ABSTRACT_UNIX_SOCKET(
+					     TRACE_TASK),
+				     "peer_pid", field, sizeof(field)));
+		EXPECT_STREQ(expected_pid, field);
+
+		/*
+		 * Verify peer_domain: 0 when the peer is unsandboxed, non-zero
+		 * when the peer socket is owned by a domain.
+		 */
+		ASSERT_EQ(0, tracefs_extract_field(
+				     buf,
+				     REGEX_DENY_SCOPE_ABSTRACT_UNIX_SOCKET(
+					     TRACE_TASK),
+				     "peer_domain", field, sizeof(field)));
+		EXPECT_EQ(variant->sandbox_target, strcmp("0", field) != 0)
+		{
+			TH_LOG("Unexpected peer_domain=%s", field);
+		}
+	} else {
+		EXPECT_EQ(0, count)
+		{
+			TH_LOG("Expected 0 deny_scope events, got %d\n%s",
+			       count, buf);
+		}
+	}
+
+	free(buf);
+}
+
+/*
+ * Trace test for the datagram send path (hook_unix_may_send), which reaches the
+ * same landlock_deny_scope_abstract_unix_socket tracepoint as a stream
+ * connect(2) but through sendto(2) on an unconnected datagram socket.
+ */
+
+/* clang-format off */
+FIXTURE(trace_unix_dgram) {
+	/* clang-format on */
+	int tracefs_ok;
+};
+
+FIXTURE_SETUP(trace_unix_dgram)
+{
+	int ret;
+
+	set_cap(_metadata, CAP_SYS_ADMIN);
+	ASSERT_EQ(0, unshare(CLONE_NEWNS));
+	ASSERT_EQ(0, mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL));
+
+	ret = tracefs_fixture_setup();
+	if (ret) {
+		clear_cap(_metadata, CAP_SYS_ADMIN);
+		self->tracefs_ok = 0;
+		SKIP(return, "tracefs not available");
+	}
+	self->tracefs_ok = 1;
+
+	ASSERT_EQ(0, tracefs_enable_event(
+			     TRACEFS_DENY_SCOPE_ABSTRACT_UNIX_SOCKET_ENABLE,
+			     true));
+	ASSERT_EQ(0, tracefs_clear());
+	clear_cap(_metadata, CAP_SYS_ADMIN);
+}
+
+FIXTURE_TEARDOWN(trace_unix_dgram)
+{
+	if (!self->tracefs_ok)
+		return;
+
+	set_cap(_metadata, CAP_SYS_ADMIN);
+	tracefs_enable_event(TRACEFS_DENY_SCOPE_ABSTRACT_UNIX_SOCKET_ENABLE,
+			     false);
+	tracefs_fixture_teardown();
+	clear_cap(_metadata, CAP_SYS_ADMIN);
+}
+
+/* clang-format off */
+FIXTURE_VARIANT(trace_unix_dgram)
+{
+	/* clang-format on */
+	bool sandbox;
+	bool sandbox_target;
+	int expect_denied;
+};
+
+/*
+ * Denied: sandboxed child sends a datagram to an unsandboxed peer
+ * (peer_domain=0).
+ */
+/* clang-format off */
+FIXTURE_VARIANT_ADD(trace_unix_dgram, denied) {
+	/* clang-format on */
+	.sandbox = true,
+	.sandbox_target = false,
+	.expect_denied = 1,
+};
+
+/*
+ * Denied: sandboxed child sends a datagram to a peer socket owned by a
+ * sandboxed process, so the peer is in a domain and peer_domain= is non-zero.
+ */
+/* clang-format off */
+FIXTURE_VARIANT_ADD(trace_unix_dgram, denied_scoped_peer) {
+	/* clang-format on */
+	.sandbox = true,
+	.sandbox_target = true,
+	.expect_denied = 1,
+};
+
+/* Allowed: unsandboxed child sends a datagram. */
+/* clang-format off */
+FIXTURE_VARIANT_ADD(trace_unix_dgram, allowed) {
+	/* clang-format on */
+	.sandbox = false,
+	.sandbox_target = false,
+	.expect_denied = 0,
+};
+
+TEST_F(trace_unix_dgram, deny_scope_unix)
+{
+	struct sockaddr_un addr = {
+		.sun_family = AF_UNIX,
+	};
+	socklen_t addr_len;
+	char *buf, field[128], expected_path[64];
+	int server_fd, client_fd, count, status;
+	pid_t child;
+
+	if (!self->tracefs_ok)
+		SKIP(return, "tracefs not available");
+
+	/*
+	 * For the non-zero peer_domain case, sandbox the parent before it
+	 * creates the server socket.  The peer domain is read from the server
+	 * socket file's credentials, so the socket carries the parent's domain
+	 * and peer_domain= is non-zero.
+	 */
+	if (variant->sandbox_target)
+		create_scoped_domain(_metadata,
+				     LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET);
+
+	/* Create an abstract unix datagram server in the parent. */
+	server_fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+	ASSERT_LE(0, server_fd);
+
+	addr.sun_path[0] = '\0';
+	snprintf(addr.sun_path + 1, sizeof(addr.sun_path) - 1,
+		 "landlock_trace_test_%d", getpid());
+	addr_len = offsetof(struct sockaddr_un, sun_path) + 1 +
+		   strlen(addr.sun_path + 1);
+
+	ASSERT_EQ(0, bind(server_fd, (struct sockaddr *)&addr, addr_len));
+
+	child = fork();
+	ASSERT_LE(0, child);
+
+	if (child == 0) {
+		if (variant->sandbox) {
+			struct landlock_ruleset_attr ruleset_attr = {
+				.scoped = LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET,
+			};
+			int ruleset_fd;
+
+			ruleset_fd = landlock_create_ruleset(
+				&ruleset_attr, sizeof(ruleset_attr), 0);
+			if (ruleset_fd < 0)
+				_exit(1);
+
+			prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+			if (landlock_restrict_self(ruleset_fd, 0)) {
+				close(ruleset_fd);
+				_exit(1);
+			}
+			close(ruleset_fd);
+		}
+
+		client_fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+		if (client_fd < 0)
+			_exit(1);
+
+		if (variant->sandbox) {
+			/* Sending to the abstract peer should be denied. */
+			if (sendto(client_fd, ".", 1, 0,
+				   (struct sockaddr *)&addr, addr_len) == 0) {
+				close(client_fd);
+				_exit(2);
+			}
+			if (errno != EPERM) {
+				close(client_fd);
+				_exit(3);
+			}
+		} else {
+			/* No sandbox: sending should succeed. */
+			if (sendto(client_fd, ".", 1, 0,
+				   (struct sockaddr *)&addr, addr_len) != 1) {
+				close(client_fd);
+				_exit(2);
+			}
+		}
+		close(client_fd);
+		_exit(0);
+	}
+
+	ASSERT_EQ(child, waitpid(child, &status, 0));
+	ASSERT_TRUE(WIFEXITED(status));
+	EXPECT_EQ(0, WEXITSTATUS(status));
+	close(server_fd);
+
+	buf = tracefs_read_buf();
+	ASSERT_NE(NULL, buf);
+
+	count = tracefs_count_matches(
+		buf, REGEX_DENY_SCOPE_ABSTRACT_UNIX_SOCKET(TRACE_TASK));
+	if (variant->expect_denied) {
+		EXPECT_EQ(variant->expect_denied, count)
+		{
+			TH_LOG("Expected deny_scope_abstract_unix_socket "
+			       "event, got %d\n%s",
+			       count, buf);
+		}
+
+		/* Verify sun_path (trace skips the leading NUL). */
+		snprintf(expected_path, sizeof(expected_path),
+			 "landlock_trace_test_%d", getpid());
+		ASSERT_EQ(0, tracefs_extract_field(
+				     buf,
+				     REGEX_DENY_SCOPE_ABSTRACT_UNIX_SOCKET(
+					     TRACE_TASK),
+				     "sun_path", field, sizeof(field)));
+		EXPECT_STREQ(expected_path, field);
+
+		/*
+		 * peer_pid is 0 for a datagram peer (no SO_PEERCRED), so it is
+		 * not asserted here; sun_path is the reliable peer identifier.
+		 *
+		 * Verify peer_domain: 0 when the peer is unsandboxed, non-zero
+		 * when the peer socket is owned by a domain.
+		 */
+		ASSERT_EQ(0, tracefs_extract_field(
+				     buf,
+				     REGEX_DENY_SCOPE_ABSTRACT_UNIX_SOCKET(
+					     TRACE_TASK),
+				     "peer_domain", field, sizeof(field)));
+		EXPECT_EQ(variant->sandbox_target, strcmp("0", field) != 0)
+		{
+			TH_LOG("Unexpected peer_domain=%s", field);
+		}
+	} else {
+		EXPECT_EQ(0, count)
+		{
+			TH_LOG("Expected 0 deny_scope events, got %d\n%s",
+			       count, buf);
+		}
+	}
+
+	free(buf);
 }
 
 TEST_HARNESS_MAIN
