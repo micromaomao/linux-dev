@@ -157,7 +157,7 @@ struct landlock_ruleset {
 		 * section.  This is only used by
 		 * landlock_put_ruleset_deferred() when @usage reaches zero.
 		 * The fields @lock, @usage, @num_rules, @num_layers,
-		 * @quiet_masks and @access_masks are then unused.
+		 * @quiet_access and @access_masks are then unused.
 		 */
 		struct work_struct work_free;
 		struct {
@@ -184,11 +184,11 @@ struct landlock_ruleset {
 			 */
 			u32 num_layers;
 			/**
-			 * @quiet_masks: Stores the quiet flags for an unmerged
+			 * @quiet_access: Stores the quiet flags for an unmerged
 			 * ruleset.  For a merged domain, this is stored in each
 			 * layer's struct landlock_hierarchy instead.
 			 */
-			struct access_masks quiet_masks;
+			struct access_masks quiet_access;
 			/**
 			 * @access_masks: Contains the subset of filesystem and
 			 * network actions that are restricted by a ruleset.

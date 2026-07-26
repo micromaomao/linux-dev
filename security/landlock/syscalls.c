@@ -277,9 +277,9 @@ SYSCALL_DEFINE3(landlock_create_ruleset,
 	if (IS_ERR(ruleset))
 		return PTR_ERR(ruleset);
 
-	ruleset->quiet_masks.fs = ruleset_attr.quiet_access_fs;
-	ruleset->quiet_masks.net = ruleset_attr.quiet_access_net;
-	ruleset->quiet_masks.scope = ruleset_attr.quiet_scoped;
+	ruleset->quiet_access.fs = ruleset_attr.quiet_access_fs;
+	ruleset->quiet_access.net = ruleset_attr.quiet_access_net;
+	ruleset->quiet_access.scope = ruleset_attr.quiet_scoped;
 
 	/* Creates anonymous FD referring to the ruleset. */
 	ruleset_fd = anon_inode_getfd("[landlock-ruleset]", &ruleset_fops,
@@ -372,7 +372,7 @@ static int add_rule_path_beneath(struct landlock_ruleset *const ruleset,
 		return -EINVAL;
 
 	/* Checks for useless quiet flag. */
-	if (flags & LANDLOCK_ADD_RULE_QUIET && !ruleset->quiet_masks.fs)
+	if (flags & LANDLOCK_ADD_RULE_QUIET && !ruleset->quiet_access.fs)
 		return -EINVAL;
 
 	/* Gets and checks the new rule. */
@@ -413,7 +413,7 @@ static int add_rule_net_port(struct landlock_ruleset *ruleset,
 		return -EINVAL;
 
 	/* Checks for useless quiet flag. */
-	if (flags & LANDLOCK_ADD_RULE_QUIET && !ruleset->quiet_masks.net)
+	if (flags & LANDLOCK_ADD_RULE_QUIET && !ruleset->quiet_access.net)
 		return -EINVAL;
 
 	/* Denies inserting a rule with port greater than 65535. */

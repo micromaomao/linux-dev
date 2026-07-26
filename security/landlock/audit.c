@@ -625,7 +625,7 @@ void landlock_log_denial(const struct landlock_cred_security *const subject,
 		 */
 		const access_mask_t quiet_mask =
 			pick_access_mask_for_request_type(
-				request->type, youngest_denied->quiet_masks);
+				request->type, youngest_denied->quiet_access);
 
 		quiet_applicable_to_access = (quiet_mask & missing) == missing;
 	} else {
@@ -634,7 +634,7 @@ void landlock_log_denial(const struct landlock_cred_security *const subject,
 		 * We check request->type to distinguish between the two cases.
 		 */
 		const access_mask_t quiet_mask =
-			youngest_denied->quiet_masks.scope;
+			youngest_denied->quiet_access.scope;
 
 		switch (request->type) {
 		case LANDLOCK_REQUEST_SCOPE_SIGNAL:

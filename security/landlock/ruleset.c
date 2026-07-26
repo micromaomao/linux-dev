@@ -588,7 +588,7 @@ landlock_merge_ruleset(struct landlock_ruleset *const parent,
 		return ERR_PTR(err);
 
 #ifdef CONFIG_AUDIT
-	new_dom->hierarchy->quiet_masks = ruleset->quiet_masks;
+	new_dom->hierarchy->quiet_access = ruleset->quiet_access;
 #endif /* CONFIG_AUDIT */
 
 	return no_free_ptr(new_dom);
