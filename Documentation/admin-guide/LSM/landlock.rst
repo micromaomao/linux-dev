@@ -6,7 +6,7 @@ Landlock: system-wide management
 ================================
 
 :Author: Mickaël Salaün
-:Date: June 2026
+:Date: July 2026
 
 Landlock can leverage the audit framework to log events.
 
@@ -63,14 +63,25 @@ AUDIT_LANDLOCK_ACCESS
         - scope.abstract_unix_socket - Abstract UNIX socket connection denied
         - scope.signal - Signal sending denied
 
+    **perm.*** - Permission restrictions (ABI 11+):
+        - perm.namespace_use - Namespace entry was denied (creation via
+          :manpage:`unshare(2)` / :manpage:`clone(2)` or joining via
+          :manpage:`setns(2)`);
+          ``namespace_type`` indicates the type (hex CLONE_NEW* bitmask),
+          ``namespace_id`` identifies the target namespace for
+          :manpage:`setns(2)` operations
+        - perm.capability_use - Capability use was denied;
+          ``capability`` indicates the capability number
+
     Multiple blockers can appear in a single event (comma-separated) when
     multiple access rights are missing. For example, creating a regular file
     in a directory that lacks both ``make_reg`` and ``refer`` rights would show
     ``blockers=fs.make_reg,fs.refer``.
 
-    The object identification fields (path, dev, ino for filesystem; opid,
-    ocomm for signals) depend on the type of access being blocked and provide
-    context about what resource was involved in the denial.
+    The object identification fields depend on the type of access being blocked:
+    ``path``, ``dev``, ``ino`` for filesystem; ``opid``, ``ocomm`` for signals;
+    ``namespace_type`` and ``namespace_id`` for namespace operations;
+    ``capability`` for capability use.
 
 
 AUDIT_LANDLOCK_DOMAIN
