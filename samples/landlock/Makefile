@@ -3,6 +3,7 @@
 userprogs-always-y := sandboxer
 
 userccflags += -I usr/include
+userldlibs += -lcap
 
 .PHONY: all clean
 
