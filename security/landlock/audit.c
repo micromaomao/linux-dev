@@ -14,6 +14,7 @@
 
 #include "access.h"
 #include "audit.h"
+#include "cap.h"
 #include "common.h"
 #include "cred.h"
 #include "domain.h"
@@ -87,6 +88,10 @@ get_blocker(const enum landlock_request_type type,
 	case LANDLOCK_REQUEST_NAMESPACE:
 		WARN_ON_ONCE(access_bit != -1);
 		return "perm.namespace_use";
+
+	case LANDLOCK_REQUEST_CAPABILITY:
+		WARN_ON_ONCE(access_bit != -1);
+		return "perm.capability_use";
 	}
 
 	WARN_ON_ONCE(1);
@@ -657,6 +662,11 @@ void landlock_log_denial(const struct landlock_cred_security *const subject,
 		 * denying layer's quiet_perm mask.  The member is recovered
 		 * from the audit data recorded by the hook.
 		 */
+		case LANDLOCK_REQUEST_CAPABILITY:
+			quiet_applicable_to_access =
+				!!(youngest_denied->quiet_perm.caps &
+				   landlock_cap_to_bit(request->audit.u.cap));
+			break;
 		case LANDLOCK_REQUEST_NAMESPACE:
 			quiet_applicable_to_access =
 				!!(youngest_denied->quiet_perm.ns &

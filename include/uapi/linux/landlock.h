@@ -228,6 +228,11 @@ enum landlock_rule_type {
 	 * @LANDLOCK_RULE_NAMESPACE: Type of a &struct landlock_namespace_attr .
 	 */
 	LANDLOCK_RULE_NAMESPACE,
+	/**
+	 * @LANDLOCK_RULE_CAPABILITY: Type of a &struct
+	 * landlock_capability_attr .
+	 */
+	LANDLOCK_RULE_CAPABILITY,
 };
 
 /**
@@ -313,6 +318,40 @@ struct landlock_namespace_attr {
 	 * has no runtime effect.
 	 */
 	__u64 quiet_namespace_types;
+};
+
+/**
+ * struct landlock_capability_attr - Capability definition
+ *
+ * Argument of sys_landlock_add_rule() with %LANDLOCK_RULE_CAPABILITY.
+ */
+struct landlock_capability_attr {
+	/**
+	 * @perm: Must be set to %LANDLOCK_PERM_CAPABILITY_USE.
+	 */
+	__u64 perm;
+	/**
+	 * @allowed_capabilities: Bitmask of capabilities (``1ULL << CAP_*``) to
+	 * allow under this rule.  Bits above ``CAP_LAST_CAP`` are silently
+	 * ignored for forward compatibility.
+	 */
+	__u64 allowed_capabilities;
+	/**
+	 * @quiet_capabilities: Bitmask of capabilities (``1ULL << CAP_*``)
+	 * whose denial by this layer should not be logged, even if logging
+	 * would normally take place per landlock_restrict_self() flags.  Only
+	 * denials attributed to this layer are suppressed (see `permission
+	 * flags`_).  Bits also set in @allowed_capabilities have no effect,
+	 * since an allowed capability is never denied.  Bits above
+	 * ``CAP_LAST_CAP`` are silently ignored.
+	 *
+	 * At least one of @allowed_capabilities or @quiet_capabilities must be
+	 * non-zero, otherwise the call returns ``-ENOMSG``.  The non-zero check
+	 * runs on the raw input before unknown-bit masking, so a rule that sets
+	 * only bits unknown to the running kernel (above ``CAP_LAST_CAP``)
+	 * succeeds but has no runtime effect.
+	 */
+	__u64 quiet_capabilities;
 };
 
 /**
@@ -566,9 +605,17 @@ struct landlock_namespace_attr {
  *   process in a Landlock domain that handles this permission is denied
  *   from using namespace types that are not explicitly allowed by a
  *   %LANDLOCK_RULE_NAMESPACE rule.
+ * - %LANDLOCK_PERM_CAPABILITY_USE: Restrict the use of specific Linux
+ *   capabilities.  A process in a Landlock domain that handles this
+ *   permission is denied from exercising capabilities that are not
+ *   explicitly allowed by a %LANDLOCK_RULE_CAPABILITY rule.  This hook
+ *   is purely restrictive: it can deny capabilities that the kernel
+ *   would otherwise grant, but it can never grant capabilities that the
+ *   kernel already denied.
  */
 /* clang-format off */
 #define LANDLOCK_PERM_NAMESPACE_USE			(1ULL << 0)
+#define LANDLOCK_PERM_CAPABILITY_USE			(1ULL << 1)
 /* clang-format on */
 
 #endif /* _UAPI_LINUX_LANDLOCK_H */

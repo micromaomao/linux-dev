@@ -73,6 +73,13 @@ static_assert(sizeof(typeof_member(union access_masks_all, masks)) ==
  */
 struct perm_masks {
 	/**
+	 * @caps: Allowed capabilities.  Each bit corresponds to a ``CAP_*``
+	 * value (e.g. ``CAP_NET_RAW`` = bit 13).  Bits are stored directly
+	 * (sequential mapping) and masked with ``CAP_VALID_MASK`` at rule-add
+	 * time.
+	 */
+	u64 caps : LANDLOCK_NUM_PERM_CAP;
+	/**
 	 * @ns: Allowed namespace types.  Each bit corresponds to a sequential
 	 * index assigned by the ``_LANDLOCK_NS_*`` enum (derived from
 	 * ``FOR_EACH_NS_TYPE``).  Bits are converted from ``CLONE_NEW*`` flags
@@ -83,6 +90,9 @@ struct perm_masks {
 } __packed __aligned(sizeof(u64));
 
 static_assert(sizeof(struct perm_masks) == sizeof(u64));
+/* All perm_masks bitfields must fit in a single u64. */
+static_assert(LANDLOCK_NUM_PERM_CAP + LANDLOCK_NUM_PERM_NS <=
+	      BITS_PER_TYPE(u64));
 
 /**
  * struct layer_config - Per-layer access configuration
@@ -91,10 +101,10 @@ static_assert(sizeof(struct perm_masks) == sizeof(u64));
  * This is the element type of the &struct landlock_ruleset.layers FAM.
  *
  * Unlike filesystem and network access rights, which are tracked per-object in
- * red-black trees, namespace types use a flat bitmask because their keyspace is
- * small and bounded (~8 namespace types).  A single rule adds to the allowed
- * set via bitwise OR; at enforcement time each layer is checked directly (no
- * tree lookup needed).
+ * red-black trees, namespace types and capabilities use flat bitmasks because
+ * their keyspaces are small and bounded (~8 namespace types, 41 capabilities).
+ * A single rule adds to the allowed set via bitwise OR; at enforcement time
+ * each layer is checked directly (no tree lookup needed).
  */
 struct layer_config {
 	/**
