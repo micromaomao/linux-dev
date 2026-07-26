@@ -116,6 +116,12 @@ struct landlock_hierarchy {
 	 * logged) if the related object is marked as quiet.
 	 */
 	struct access_masks quiet_access;
+	/**
+	 * @quiet_perm: Per-member quiet bitmasks for permission types
+	 * (capabilities and namespace types).  A member denied by this layer is
+	 * not logged when its bit is set here.
+	 */
+	struct perm_masks quiet_perm;
 #endif /* CONFIG_AUDIT */
 };
 

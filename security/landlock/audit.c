@@ -18,6 +18,7 @@
 #include "cred.h"
 #include "domain.h"
 #include "limits.h"
+#include "ns.h"
 #include "ruleset.h"
 
 static const char *const fs_access_strings[] = {
@@ -82,6 +83,10 @@ get_blocker(const enum landlock_request_type type,
 	case LANDLOCK_REQUEST_SCOPE_SIGNAL:
 		WARN_ON_ONCE(access_bit != -1);
 		return "scope.signal";
+
+	case LANDLOCK_REQUEST_NAMESPACE:
+		WARN_ON_ONCE(access_bit != -1);
+		return "perm.namespace_use";
 	}
 
 	WARN_ON_ONCE(1);
@@ -645,6 +650,18 @@ void landlock_log_denial(const struct landlock_cred_security *const subject,
 			quiet_applicable_to_access =
 				!!(quiet_mask &
 				   LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET);
+			break;
+		/*
+		 * Capability and namespace denials are per-member (single
+		 * axis): the denied member is quiet when its bit is set in the
+		 * denying layer's quiet_perm mask.  The member is recovered
+		 * from the audit data recorded by the hook.
+		 */
+		case LANDLOCK_REQUEST_NAMESPACE:
+			quiet_applicable_to_access =
+				!!(youngest_denied->quiet_perm.ns &
+				   landlock_ns_type_to_bit(
+					   request->audit.u.ns.ns_type));
 			break;
 		/*
 		 * Leave LANDLOCK_REQUEST_PTRACE and

@@ -78,6 +78,15 @@ struct landlock_ruleset_attr {
 	 * @quiet_scoped: Bitmask of scoped actions which should not be logged.
 	 */
 	__u64 quiet_scoped;
+	/**
+	 * @handled_perm: Bitmask of permissions (cf. `Permission flags`_) that
+	 * this ruleset handles.  Each permission controls a per-category
+	 * operation gated by an enum (CLONE_NEW* for namespace types, CAP_* for
+	 * capabilities); all uses of category members are denied unless
+	 * explicitly allowed by a rule.  See
+	 * Documentation/security/landlock.rst for the rationale.
+	 */
+	__u64 handled_perm;
 };
 
 /**
@@ -215,6 +224,10 @@ enum landlock_rule_type {
 	 * landlock_net_port_attr .
 	 */
 	LANDLOCK_RULE_NET_PORT,
+	/**
+	 * @LANDLOCK_RULE_NAMESPACE: Type of a &struct landlock_namespace_attr .
+	 */
+	LANDLOCK_RULE_NAMESPACE,
 };
 
 /**
@@ -266,6 +279,40 @@ struct landlock_net_port_attr {
 	 * kernel-assigned ephemeral port.
 	 */
 	__u64 port;
+};
+
+/**
+ * struct landlock_namespace_attr - Namespace type definition
+ *
+ * Argument of sys_landlock_add_rule() with %LANDLOCK_RULE_NAMESPACE.
+ */
+struct landlock_namespace_attr {
+	/**
+	 * @perm: Must be set to %LANDLOCK_PERM_NAMESPACE_USE.
+	 */
+	__u64 perm;
+	/**
+	 * @allowed_namespace_types: Bitmask of namespace types (``CLONE_NEW*``
+	 * flags) to allow under this rule.  Unknown bits are silently ignored
+	 * for forward compatibility.
+	 */
+	__u64 allowed_namespace_types;
+	/**
+	 * @quiet_namespace_types: Bitmask of namespace types (``CLONE_NEW*``
+	 * flags) whose denial by this layer should not be logged, even if
+	 * logging would normally take place per landlock_restrict_self() flags.
+	 * Only denials attributed to this layer are suppressed (see `permission
+	 * flags`_).  Bits also set in @allowed_namespace_types have no effect,
+	 * since an allowed type is never denied.  Unknown bits are silently
+	 * ignored.
+	 *
+	 * At least one of @allowed_namespace_types or @quiet_namespace_types
+	 * must be non-zero, otherwise the call returns ``-ENOMSG``.  The
+	 * non-zero check runs on the raw input before unknown-bit masking, so a
+	 * rule that sets only bits unknown to the running kernel succeeds but
+	 * has no runtime effect.
+	 */
+	__u64 quiet_namespace_types;
 };
 
 /**
@@ -491,6 +538,37 @@ struct landlock_net_port_attr {
 /* clang-format off */
 #define LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET		(1ULL << 0)
 #define LANDLOCK_SCOPE_SIGNAL		                (1ULL << 1)
-/* clang-format on*/
+/* clang-format on */
+
+/**
+ * DOC: perm
+ *
+ * Permission flags
+ * ~~~~~~~~~~~~~~~~
+ *
+ * These flags restrict per-category operations gated by enums (CLONE_NEW* for
+ * namespace types, CAP_* for capabilities).  Each flag covers every kernel path
+ * that exercises a member of the category.  Handled permissions that are not
+ * explicitly allowed by a rule are denied by default.  Rule values reference
+ * constants from other kernel subsystems; unknown values are silently accepted
+ * for forward compatibility since the allow-list denies them by default.  See
+ * Documentation/security/landlock.rst for design details.
+ *
+ * When a ruleset handles multiple permissions whose operations overlap (e.g. a
+ * non-user namespace needs both its namespace type and CAP_SYS_ADMIN), the
+ * operation is allowed only if each handled permission independently allows it.
+ * See Documentation/userspace-api/landlock.rst.
+ *
+ * - %LANDLOCK_PERM_NAMESPACE_USE: Restrict the use of specific namespace
+ *   types: creation (:manpage:`unshare(2)`, :manpage:`clone(2)`,
+ *   :manpage:`clone3(2)`), joining (:manpage:`setns(2)`), and acquiring an
+ *   fd reference (:manpage:`open_tree(2)`, :manpage:`fsmount(2)`).  A
+ *   process in a Landlock domain that handles this permission is denied
+ *   from using namespace types that are not explicitly allowed by a
+ *   %LANDLOCK_RULE_NAMESPACE rule.
+ */
+/* clang-format off */
+#define LANDLOCK_PERM_NAMESPACE_USE			(1ULL << 0)
+/* clang-format on */
 
 #endif /* _UAPI_LINUX_LANDLOCK_H */

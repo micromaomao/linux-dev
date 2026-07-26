@@ -157,7 +157,7 @@ struct landlock_ruleset {
 		 * section.  This is only used by
 		 * landlock_put_ruleset_deferred() when @usage reaches zero.
 		 * The fields @lock, @usage, @num_rules, @num_layers,
-		 * @quiet_access and @layers are then unused.
+		 * @quiet_access, @quiet_perm and @layers are then unused.
 		 */
 		struct work_struct work_free;
 		struct {
@@ -190,24 +190,34 @@ struct landlock_ruleset {
 			 */
 			struct access_masks quiet_access;
 			/**
-			 * @layers: Per-layer access configuration.  A domain
-			 * saves all layers of merged rulesets in a stack (FAM),
-			 * starting from the first layer to the last one.  These
-			 * layers are used when merging rulesets, for user space
-			 * backward compatibility (i.e. future-proof), and to
-			 * properly handle merged rulesets without overlapping
-			 * access rights.  These layers are set once and never
-			 * changed for the lifetime of the ruleset.
+			 * @quiet_perm: Per-member quiet bitmasks for permission
+			 * types (capabilities and namespace types) of an
+			 * unmerged ruleset.  A denied member whose bit is set
+			 * here is not logged when this layer is the one that
+			 * denies it.  For a merged domain, this is stored in
+			 * each layer's struct landlock_hierarchy instead.
+			 */
+			struct perm_masks quiet_perm;
+			/**
+			 * @layers: Per-layer access configuration, including
+			 * handled access masks and allowed permission bitmasks.
+			 * A domain saves all layers of merged rulesets in a
+			 * stack (FAM), starting from the first layer to the
+			 * last one.  These layers are used when merging
+			 * rulesets, for user space backward compatibility (i.e.
+			 * future-proof), and to properly handle merged rulesets
+			 * without overlapping access rights.  These layers are
+			 * set once and never changed for the lifetime of the
+			 * ruleset.
 			 */
 			struct layer_config layers[] __counted_by(num_layers);
 		};
 	};
 };
 
-struct landlock_ruleset *
-landlock_create_ruleset(const access_mask_t access_mask_fs,
-			const access_mask_t access_mask_net,
-			const access_mask_t scope_mask);
+struct landlock_ruleset *landlock_create_ruleset(
+	const access_mask_t access_mask_fs, const access_mask_t access_mask_net,
+	const access_mask_t scope_mask, const access_mask_t perm_mask);
 
 void landlock_put_ruleset(struct landlock_ruleset *const ruleset);
 void landlock_put_ruleset_deferred(struct landlock_ruleset *const ruleset);
@@ -315,6 +325,24 @@ landlock_get_scope_mask(const struct landlock_ruleset *const ruleset,
 			const u16 layer_level)
 {
 	return ruleset->layers[layer_level].handled.scope;
+}
+
+static inline void
+landlock_add_perm_mask(struct landlock_ruleset *const ruleset,
+		       const access_mask_t perm_mask, const u16 layer_level)
+{
+	access_mask_t mask = perm_mask & LANDLOCK_MASK_PERM;
+
+	/* Should already be checked in sys_landlock_create_ruleset(). */
+	WARN_ON_ONCE(perm_mask != mask);
+	ruleset->layers[layer_level].handled.perm |= mask;
+}
+
+static inline access_mask_t
+landlock_get_perm_mask(const struct landlock_ruleset *const ruleset,
+		       const u16 layer_level)
+{
+	return ruleset->layers[layer_level].handled.perm;
 }
 
 bool landlock_unmask_layers(const struct landlock_rule *const rule,
