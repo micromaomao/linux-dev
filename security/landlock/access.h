@@ -106,6 +106,9 @@ struct layer_config {
 	 * @supervisor: Pointer to the shared supervisor struct for mutable
 	 * domains.  This is set for both the supervisor and supervisee
 	 * rulesets.
+	 *
+	 * For a landlock domain, this is always NULL.  (TODO: move the per-layer supervisor pointer
+	 * from landlock_hierarchy to here.)
 	 */
 	struct landlock_supervisor *supervisor;
 #endif /* CONFIG_SECURITY_LANDLOCK_SUPERVISE */

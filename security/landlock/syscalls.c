@@ -781,6 +781,7 @@ static int add_rule_capability(struct landlock_ruleset *const ruleset,
  *
  *         - %LANDLOCK_ADD_RULE_QUIET
  *         - %LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR
+ *         - %LANDLOCK_ADD_RULE_INTERSECT
  *
  * This system call enables to define a new rule and add it to an existing
  * ruleset.
@@ -838,7 +839,8 @@ SYSCALL_DEFINE4(landlock_add_rule, const int, ruleset_fd,
 		return -EOPNOTSUPP;
 
 	const u32 valid_flags = LANDLOCK_ADD_RULE_QUIET |
-				LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR;
+				LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR |
+				LANDLOCK_ADD_RULE_INTERSECT;
 
 	if (flags & ~valid_flags)
 		return -EINVAL;

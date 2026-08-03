@@ -25,6 +25,8 @@
 #include "log.h"
 #include "ruleset.h"
 
+struct landlock_supervisor;
+
 enum landlock_log_status {
 	/*
 	 * Hierarchy whose creation event has not been emitted, so it is not yet
@@ -98,6 +100,13 @@ struct landlock_hierarchy {
 	 * domain.
 	 */
 	refcount_t usage;
+	/**
+	 * @supervisor: Pointer to the supervisor for this layer, if any.
+	 * This is set when a supervisee ruleset with an attached supervisor
+	 * is enforced via landlock_restrict_self().  The supervisor allows
+	 * dynamic modification of rules affecting this layer.
+	 */
+	struct landlock_supervisor *supervisor;
 
 #ifdef CONFIG_SECURITY_LANDLOCK_LOG
 	/**
@@ -187,6 +196,12 @@ landlock_get_hierarchy(struct landlock_hierarchy *const hierarchy)
 		refcount_inc(&hierarchy->usage);
 }
 
+/*
+ * Forward declaration for landlock_put_supervisor.
+ * Defined in supervisor.c.
+ */
+void landlock_put_supervisor(struct landlock_supervisor *supervisor);
+
 static inline void landlock_put_hierarchy(struct landlock_hierarchy *hierarchy)
 {
 	while (hierarchy && refcount_dec_and_test(&hierarchy->usage)) {
@@ -194,6 +209,7 @@ static inline void landlock_put_hierarchy(struct landlock_hierarchy *hierarchy)
 
 		landlock_log_free_domain(hierarchy);
 		landlock_free_hierarchy_details(hierarchy);
+		landlock_put_supervisor(hierarchy->supervisor);
 		hierarchy = hierarchy->parent;
 		kfree(freeme);
 	}
@@ -336,6 +352,7 @@ static inline void landlock_get_domain(struct landlock_domain *const domain)
 		refcount_inc(&domain->usage);
 }
 
+// TODO: take in supervisor_committed_cache and check supervisor ruleset's permissions
 /**
  * landlock_permission_is_denied - Check if a permission request is denied
  *

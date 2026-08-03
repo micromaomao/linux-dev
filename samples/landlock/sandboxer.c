@@ -787,6 +787,12 @@ int main(const int argc, char *const argv[], char *const *const envp)
 			"provided by ABI version %d (instead of %d).\n",
 			LANDLOCK_ABI_LAST, abi);
 		__attribute__((fallthrough));
+	case 13:
+		/*
+		 * Supervisor support added in ABI 13 (which is not supported by this
+		 * sandboxer, so no changes needed)
+		 */
+		__attribute__((fallthrough));
 	case LANDLOCK_ABI_LAST:
 		break;
 	default:

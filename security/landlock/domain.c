@@ -35,6 +35,7 @@
 #include "id.h"
 #include "limits.h"
 #include "ruleset.h"
+#include "supervisor.h"
 
 static void build_check_domain(void)
 {
@@ -302,7 +303,7 @@ static int merge_tree(struct landlock_domain *const dst,
 		layers[0].flags = walker_rule->layers[0].flags;
 
 		err = landlock_store_rule(&dst->rules, id, &layers,
-					  ARRAY_SIZE(layers));
+					  ARRAY_SIZE(layers), false);
 		if (err)
 			return err;
 	}
@@ -424,6 +425,12 @@ landlock_merge_ruleset(struct landlock_domain *const parent,
 		return ERR_PTR(-ENOMEM);
 
 	refcount_set(&new_dom->hierarchy->usage, 1);
+
+	/* Copy the supervisor reference from the ruleset to the hierarchy */
+	if (ruleset->layer.supervisor) {
+		landlock_get_supervisor(ruleset->layer.supervisor);
+		new_dom->hierarchy->supervisor = ruleset->layer.supervisor;
+	}
 
 	/* ...as a child of @parent... */
 	err = inherit_ruleset(parent, new_dom);
