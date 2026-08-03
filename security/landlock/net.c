@@ -19,6 +19,7 @@
 #include "log.h"
 #include "net.h"
 #include "ruleset.h"
+#include "supervisor.h"
 
 #include <trace/events/landlock.h>
 
@@ -284,6 +285,18 @@ static int current_check_access_socket(struct socket *const sock,
 	if (unmask_layers_net(subject->domain, id, &layer_masks,
 			      access_request))
 		return 0;
+
+	/*
+	 * Supervisee ruleset denied access.  Check if supervisor rulesets
+	 * for the denying layers allow this access.
+	 * For network checks, we pass NULL for the cache since it's a
+	 * single-point check (no pathwalk), so atomicity is not a concern.
+	 */
+	scoped_guard(rcu) {
+		if (landlock_check_supervisor_access(subject->domain, id,
+						     &layer_masks, NULL))
+			return 0;
+	}
 
 	audit_net.family = address->sa_family;
 	audit_net.sk = sock->sk;

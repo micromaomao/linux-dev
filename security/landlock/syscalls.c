@@ -769,8 +769,12 @@ static int add_rule_capability(struct landlock_ruleset *const ruleset,
  * @rule_type: Identify the structure type pointed to by @rule_attr:
  *             %LANDLOCK_RULE_PATH_BENEATH, %LANDLOCK_RULE_NET_PORT,
  *             %LANDLOCK_RULE_NAMESPACE, or %LANDLOCK_RULE_CAPABILITY.
+ *             When %LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR is set in @flags,
+ *             @rule_type may be 0 to commit without adding a rule, in which
+ *             case @rule_attr is ignored.
  * @rule_attr: Pointer to a rule (matching the @rule_type).
- * @flags: Must be 0 or %LANDLOCK_ADD_RULE_QUIET.
+ * @flags: Must be 0 or a combination of %LANDLOCK_ADD_RULE_QUIET,
+ *         %LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR, and %LANDLOCK_ADD_RULE_INTERSECT.
  *
  * This system call enables to define a new rule and add it to an existing
  * ruleset.
@@ -792,6 +796,8 @@ static int add_rule_capability(struct landlock_ruleset *const ruleset,
  * - %EINVAL: &landlock_net_port_attr.port is greater than 65535;
  * - %EINVAL: LANDLOCK_ADD_RULE_QUIET is passed but the ruleset has no
  *   quiet access bits set for the corresponding rule type.
+ * - %EINVAL: LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR is passed but the ruleset
+ *   is not a supervisor ruleset.
  * - %ENOMSG: Empty accesses (e.g. &landlock_path_beneath_attr.allowed_access is
  *   0) and no flags;
  * - %ENOMSG: &landlock_namespace_attr.permissions is 0, or both
@@ -810,16 +816,23 @@ static int add_rule_capability(struct landlock_ruleset *const ruleset,
  * .. kernel-doc:: include/uapi/linux/landlock.h
  *     :identifiers: landlock_add_rule_flags
  */
+
+#define LANDLOCK_ADD_RULE_VALID_FLAGS                                    \
+	(LANDLOCK_ADD_RULE_QUIET | LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR | \
+	 LANDLOCK_ADD_RULE_INTERSECT)
+
 SYSCALL_DEFINE4(landlock_add_rule, const int, ruleset_fd,
 		const enum landlock_rule_type, rule_type,
-		const void __user *const, rule_attr, const __u32, flags)
+		const void __user *const, rule_attr, __u32, flags)
 {
 	struct landlock_ruleset *ruleset __free(landlock_put_ruleset) = NULL;
+	bool commit_supervisor;
+	int err;
 
 	if (!is_initialized())
 		return -EOPNOTSUPP;
 
-	if (flags && flags != LANDLOCK_ADD_RULE_QUIET)
+	if (flags & ~LANDLOCK_ADD_RULE_VALID_FLAGS)
 		return -EINVAL;
 
 	/* Gets and checks the ruleset. */
@@ -827,18 +840,43 @@ SYSCALL_DEFINE4(landlock_add_rule, const int, ruleset_fd,
 	if (IS_ERR(ruleset))
 		return PTR_ERR(ruleset);
 
-	switch (rule_type) {
-	case LANDLOCK_RULE_PATH_BENEATH:
-		return add_rule_path_beneath(ruleset, rule_attr, flags);
-	case LANDLOCK_RULE_NET_PORT:
-		return add_rule_net_port(ruleset, rule_attr, flags);
-	case LANDLOCK_RULE_NAMESPACE:
-		return add_rule_namespace(ruleset, rule_attr, flags);
-	case LANDLOCK_RULE_CAPABILITY:
-		return add_rule_capability(ruleset, rule_attr, flags);
-	default:
+	commit_supervisor = !!(flags & LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR);
+	flags = flags & ~LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR;
+
+	if (commit_supervisor && !ruleset->layer.supervisor)
+		return -EINVAL;
+
+	if (rule_type) {
+		switch (rule_type) {
+		case LANDLOCK_RULE_PATH_BENEATH:
+			err = add_rule_path_beneath(ruleset, rule_attr, flags);
+			break;
+		case LANDLOCK_RULE_NET_PORT:
+			err = add_rule_net_port(ruleset, rule_attr, flags);
+			break;
+		case LANDLOCK_RULE_NAMESPACE:
+			err = add_rule_namespace(ruleset, rule_attr, flags);
+			break;
+		case LANDLOCK_RULE_CAPABILITY:
+			err = add_rule_capability(ruleset, rule_attr, flags);
+			break;
+		default:
+			return -EINVAL;
+		}
+		if (err)
+			return err;
+	} else if (!commit_supervisor) {
+		/*
+		 * rule_type == 0 is only valid when committing a supervisor
+		 * ruleset change.
+		 */
 		return -EINVAL;
 	}
+
+	if (commit_supervisor)
+		return landlock_commit_supervisor(ruleset);
+
+	return 0;
 }
 
 /* Enforcement */

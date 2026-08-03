@@ -139,10 +139,26 @@ struct landlock_ruleset_attr {
  *     allowed_access in the passed in rule_attr.  When this flag is
  *     present, the caller is also allowed to pass in an empty
  *     allowed_access.
+ *
+ * %LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR
+ *     Commit pending changes to the supervisor ruleset.  This flag must be
+ *     used with supervisor rulesets created with %LANDLOCK_CREATE_RULESET_SUPERVISOR.
+ *     Without this flag, changes to supervisor rules do not take effect.
+ *     The rule_attr argument may be NULL when only committing changes.
+ *     The current task must not be under (either directly or as a descendant)
+ *     a Landlock domain that uses this supervisor ruleset.
+ *
+ * %LANDLOCK_ADD_RULE_INTERSECT
+ *     Instead of adding to the existing access rights for a rule, intersect
+ *     the existing access rights with the specified access rights.  If the
+ *     result is zero, the rule is removed.  This can be used to remove rules
+ *     or reduce access rights on supervisor rulesets.
  */
 
 /* clang-format off */
-#define LANDLOCK_ADD_RULE_QUIET			(1U << 0)
+#define LANDLOCK_ADD_RULE_QUIET				(1U << 0)
+#define LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR		(1U << 1)
+#define LANDLOCK_ADD_RULE_INTERSECT			(1U << 2)
 /* clang-format on */
 
 /**
@@ -651,7 +667,9 @@ struct landlock_capability_attr {
  *     The supervisor ruleset must have been created with
  *     %LANDLOCK_CREATE_RULESET_SUPERVISOR.  The returned supervisee ruleset
  *     can be passed to landlock_restrict_self() to enforce it on the calling
- *     thread.
+ *     thread.  The supervisor can then modify the supervisor ruleset and
+ *     commit changes using %LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR, which will
+ *     affect all domains using this supervisor.
  *
  *     Usage: int supervisee_fd = ioctl(supervisor_fd,
  *                                      LANDLOCK_IOCTL_GET_SUPERVISEE_RULESET, 0);
