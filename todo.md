@@ -1,0 +1,1 @@
+- handle perms: the supervisor domain should be able to allow additional namespaces and caps, and supervisor notifications on denials too later if perm is handled.
