@@ -334,7 +334,8 @@ static size_t count_additional_threads(const struct tsync_works *works)
 
 	caller = current;
 
-	guard(rcu)();
+	guard(rcu)
+		();
 
 	for_each_thread(caller, thread) {
 		/* Skip current, since it is initiating the sync. */
@@ -375,7 +376,8 @@ static bool schedule_task_work(struct tsync_works *works,
 
 	caller = current;
 
-	guard(rcu)();
+	guard(rcu)
+		();
 
 	for_each_thread(caller, thread) {
 		/* Skip current, since it is initiating the sync. */

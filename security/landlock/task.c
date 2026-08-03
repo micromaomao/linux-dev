@@ -140,7 +140,8 @@ static int hook_ptrace_traceme(struct task_struct *const parent)
 
 	child_dom = landlock_get_current_domain();
 
-	guard(rcu)();
+	guard(rcu)
+		();
 	parent_subject = landlock_cred(__task_cred(parent));
 	err = domain_ptrace(parent_subject->domain, child_dom);
 
