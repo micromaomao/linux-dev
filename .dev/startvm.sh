@@ -218,36 +218,83 @@ qemuFlags=(
     "
 )
 
-echo "mkdir -p /linux" >> "$ROOTFS_DIR/_runtime_init.sh"
+virtiofsd_pids=()
+
+function add_host_dir_fs () {
+    local source=$1
+    local dest=$2
+    local access=$3
+    local tag=$4
+    local virtiofs_mount_opts=$5
+    local v9fs_mount_opts=$6
+    local virtiofsd_flags=$7
+    local qemu_virtfs_flags=$8
+
+    if [[ $access != "rw" && $access != "ro" ]]; then
+        echo "Invalid access mode '$access' for host filesystem '$tag'"
+        exit 1
+    fi
+    if [[ ! $tag =~ ^[A-Za-z][A-Za-z0-9_.-]*$ ]]; then
+        echo "Invalid host filesystem tag '$tag'"
+        exit 1
+    fi
+
+    if [[ $fs_type == "9pfs" || $access == "ro" ]]; then
+        local readonly=off
+        local mount_opts=trans=virtio
+        local virtfs_config="local,path=$source,mount_tag=$tag"
+        if [[ $access == "ro" ]]; then
+            readonly=on
+        fi
+        if [[ -n $v9fs_mount_opts ]]; then
+            mount_opts+=",$v9fs_mount_opts"
+        fi
+        virtfs_config+=",readonly=$readonly"
+        if [[ -n $qemu_virtfs_flags ]]; then
+            virtfs_config+=",$qemu_virtfs_flags"
+        fi
+        qemuFlags+=(
+            -virtfs "$virtfs_config"
+        )
+        printf 'mount --mkdir -t 9p -o %q %q %q\n' "$mount_opts" "$tag" "$dest" >> "$ROOTFS_DIR/_runtime_init.sh"
+        return
+    fi
+
+    local chardev_id="${tag}_virtiofs"
+    local socket_path
+    local -a virtiofs_options
+    socket_path=$(mktemp -u "/tmp/${tag}-virtiofs-XXXXXXXXXXX.sock")
+    read -r -a virtiofs_options <<< "$virtiofsd_flags"
+    sudo "$VIRTIOFSD_LOCATION" --socket-path="$socket_path" --shared-dir="$source" "${virtiofs_options[@]}" &
+    virtiofsd_pids+=("$!")
+    qemuFlags+=(
+        -chardev "socket,id=$chardev_id,path=$socket_path"
+        -device "vhost-user-fs-pci,queue-size=1024,chardev=$chardev_id,tag=$tag"
+    )
+    if [[ -n $virtiofs_mount_opts ]]; then
+        printf 'mount --mkdir -t virtiofs -o %q %q %q\n' "$virtiofs_mount_opts" "$tag" "$dest" >> "$ROOTFS_DIR/_runtime_init.sh"
+    else
+        printf 'mount --mkdir -t virtiofs %q %q\n' "$tag" "$dest" >> "$ROOTFS_DIR/_runtime_init.sh"
+    fi
+}
+
+add_host_dir_fs "$LINUX_SOURCE_DIR" /linux ro linuxsrc \
+    "" "" "--inode-file-handles=prefer" "security_model=passthrough"
+
 if [[ $fs_type == "9pfs" ]]; then
     qemuFlags+=(
         -virtfs "local,path=$ROOTFS_DIR,mount_tag=root,security_model=passthrough,readonly=off"
     )
-    qemuFlags+=(
-        -virtfs "local,path=$LINUX_SOURCE_DIR,mount_tag=linuxsrc,security_model=passthrough,readonly=on"
-    )
-    echo "mount -t 9p -o trans=virtio linuxsrc /linux" >> "$ROOTFS_DIR/_runtime_init.sh"
 elif [[ $fs_type == "virtiofs" ]]; then
     virtiofs_socket_path=$(mktemp -u /tmp/virtiosock-XXXXXXXXXXX)
     sudo $VIRTIOFSD_LOCATION --socket-path="$virtiofs_socket_path" --shared-dir="$ROOTFS_DIR" --inode-file-handles=prefer &
-    virtiofsd_pid=$!
+    virtiofsd_pids+=("$!")
     qemuFlags+=(
         -chardev "socket,id=virtiofs,path=$virtiofs_socket_path"
         -device "vhost-user-fs-pci,queue-size=1024,chardev=virtiofs,tag=rootfs"
-    )
-fi
-
-if [[ $fs_type != "9pfs" ]]; then
-    linuxsrc_virtiofs_socket_path=$(mktemp -u /tmp/virtiosock-XXXXXXXXXXX)
-    sudo $VIRTIOFSD_LOCATION --socket-path="$linuxsrc_virtiofs_socket_path" --shared-dir="$LINUX_SOURCE_DIR" --inode-file-handles=prefer &
-    linuxsrc_virtiofsd_pid=$!
-    qemuFlags+=(
-        -chardev "socket,id=linuxsrc_virtiofs,path=$linuxsrc_virtiofs_socket_path"
-        -device "vhost-user-fs-pci,queue-size=1024,chardev=linuxsrc_virtiofs,tag=linuxsrc"
         -object "memory-backend-file,id=mem,size=$memory,mem-path=/dev/shm,share=on"
         -numa "node,memdev=mem"
     )
-    echo "mount --mkdir -t virtiofs linuxsrc /linux" >> "$ROOTFS_DIR/_runtime_init.sh"
 fi
 
 if [[ $network == 1 ]]; then
@@ -330,10 +377,10 @@ sudo chown $(id -u):$(id -g) "$DISK"
 } &
 
 function exit_function {
-    if [[ $fs_type == "virtiofs" ]]; then
-        kill $virtiofsd_pid
-        kill $linuxsrc_virtiofsd_pid
-    elif [[ $fs_type == "vhd" ]]; then
+    if [[ ${#virtiofsd_pids[@]} -gt 0 ]]; then
+        kill "${virtiofsd_pids[@]}"
+    fi
+    if [[ $fs_type == "vhd" ]]; then
         mnt_point="$(mktemp -d /tmp/mnt-XXXXXXXXXX)"
         set +ex
         sudo mount "$DISK" "$mnt_point"
