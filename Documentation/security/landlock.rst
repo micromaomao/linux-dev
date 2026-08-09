@@ -171,10 +171,29 @@ of a ruleset provided by the task.
 The definition of a subject is implicit for a task sandboxing itself, which
 makes the reasoning much easier and helps avoid pitfalls.
 
+Note: When a supervisor ruleset is used (see below), the supervisor can
+dynamically update rules that affect the sandboxed domain.
+
 .. kernel-doc:: security/landlock/ruleset.h
     :identifiers:
 
 .. kernel-doc:: security/landlock/domain.h
+    :identifiers:
+
+Supervisor
+----------
+
+A supervisor enables trusted processes to dynamically update the access rules
+of sandboxed processes after enforcement.  This is achieved through a special
+supervisor ruleset that maintains an RCU-protected committed ruleset.  When a
+supervisee ruleset is enforced on a task, the associated supervisor's committed
+rules are consulted during access checks.
+
+The supervisor structure uses RCU to allow lockless reads of the committed
+ruleset during access checks while allowing atomic updates from the supervisor
+process.
+
+.. kernel-doc:: security/landlock/supervisor.h
     :identifiers:
 
 Additional documentation
