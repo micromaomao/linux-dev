@@ -177,6 +177,19 @@ void landlock_trace_denial(
 				request->other_domain_id,
 				request->audit.u.net->sk);
 		break;
+	case LANDLOCK_REQUEST_NAMESPACE:
+		if (trace_landlock_deny_namespace_enabled())
+			trace_landlock_deny_namespace(
+				youngest_denied, same_exec, logged,
+				request->audit.u.ns.ns_type,
+				request->audit.u.ns.ns_id);
+		break;
+	case LANDLOCK_REQUEST_CAPABILITY:
+		if (trace_landlock_deny_capability_enabled())
+			trace_landlock_deny_capability(
+				youngest_denied, same_exec, logged,
+				request->audit.u.cap);
+		break;
 	default:
 		WARN_ONCE(1, "Unhandled Landlock request type %d",
 			  request->type);

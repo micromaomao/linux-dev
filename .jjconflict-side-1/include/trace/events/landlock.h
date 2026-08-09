@@ -784,6 +784,79 @@ TRACE_EVENT(landlock_deny_access_net,
 );
 
 /**
+ * landlock_deny_capability - Capability use denied by a Landlock domain
+ *
+ * @hierarchy: Denying domain's hierarchy node (never NULL); its id is the
+ *             domain field.
+ * @same_exec: Whether the current task entered the denying domain itself.
+ * @logged: The domain's audit-logging decision for this denial.
+ * @capability: Denied CAP_* number.
+ */
+TRACE_EVENT(landlock_deny_capability,
+
+	TP_PROTO(const struct landlock_hierarchy *hierarchy, bool same_exec,
+		 bool logged, int capability),
+
+	TP_ARGS(hierarchy, same_exec, logged, capability),
+
+	TP_STRUCT__entry(
+		__field(	__u64,		domain_id	)
+		__field(	bool,		same_exec	)
+		__field(	bool,		logged		)
+		__field(	int,		capability	)
+	),
+
+	TP_fast_assign(
+		__entry->domain_id	= hierarchy->id;
+		__entry->same_exec	= same_exec;
+		__entry->logged		= logged;
+		__entry->capability	= capability;
+	),
+
+	TP_printk("domain=%llx same_exec=%d logged=%d capability=%d",
+		__entry->domain_id, __entry->same_exec, __entry->logged,
+		__entry->capability)
+);
+
+/**
+ * landlock_deny_namespace - Namespace use denied by a Landlock domain
+ *
+ * @hierarchy: Denying domain's hierarchy node (never NULL); its id is the
+ *             domain field.
+ * @same_exec: Whether the current task entered the denying domain itself.
+ * @logged: The domain's audit-logging decision for this denial.
+ * @namespace_type: Denied CLONE_NEW* namespace type.
+ * @namespace_id: Namespace identifier, or 0 during namespace creation.
+ */
+TRACE_EVENT(landlock_deny_namespace,
+
+	TP_PROTO(const struct landlock_hierarchy *hierarchy, bool same_exec,
+		 bool logged, unsigned long namespace_type, u64 namespace_id),
+
+	TP_ARGS(hierarchy, same_exec, logged, namespace_type, namespace_id),
+
+	TP_STRUCT__entry(
+		__field(	__u64,		domain_id	)
+		__field(	bool,		same_exec	)
+		__field(	bool,		logged		)
+		__field(	unsigned long,	namespace_type	)
+		__field(	__u64,		namespace_id	)
+	),
+
+	TP_fast_assign(
+		__entry->domain_id	= hierarchy->id;
+		__entry->same_exec	= same_exec;
+		__entry->logged		= logged;
+		__entry->namespace_type = namespace_type;
+		__entry->namespace_id	= namespace_id;
+	),
+
+	TP_printk("domain=%llx same_exec=%d logged=%d namespace_type=0x%lx namespace_id=%llu",
+		__entry->domain_id, __entry->same_exec, __entry->logged,
+		__entry->namespace_type, __entry->namespace_id)
+);
+
+/**
  * landlock_deny_ptrace - Ptrace access denied by a Landlock domain
  *
  * @hierarchy: Denying domain's hierarchy node (never NULL); its id is the
