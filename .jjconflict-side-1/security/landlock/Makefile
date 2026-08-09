@@ -9,6 +9,8 @@ landlock-y := \
 	task.o \
 	fs.o \
 	tsync.o \
+	ns.o \
+	cap.o \
 	domain.o
 
 landlock-$(CONFIG_INET) += net.o

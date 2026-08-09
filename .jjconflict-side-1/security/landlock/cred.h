@@ -138,7 +138,7 @@ landlock_get_applicable_subject(const struct cred *const cred,
 	for (layer_level = domain->num_layers - 1; layer_level >= 0;
 	     layer_level--) {
 		union access_masks_all layer = {
-			.masks = domain->handled_masks[layer_level],
+			.masks = domain->layers[layer_level].handled,
 		};
 
 		if (layer.all & masks_all.all) {
@@ -150,6 +150,59 @@ landlock_get_applicable_subject(const struct cred *const cred,
 	}
 
 	return NULL;
+}
+
+/**
+ * landlock_perm_is_denied - Check if a permission bitmask request is denied
+ *
+ * @domain: The enforced domain.
+ * @perm_bit: The LANDLOCK_PERM_* flag to check.  Must have exactly one
+ *            bit set.
+ * @request_value: Compact bitmask to look for (e.g. result of
+ *                 `landlock_ns_type_to_bit(CLONE_NEWNET)`).  Must have
+ *                 exactly one bit set.
+ *
+ * Iterate from the youngest layer to the oldest.  For each layer that handles
+ * @perm_bit, check whether @request_value is present in the layer's allowed
+ * bitmask.  Return on the first (youngest) denying layer.
+ *
+ * Return: The youngest denying layer + 1, or 0 if allowed.
+ */
+static inline size_t
+landlock_perm_is_denied(const struct landlock_domain *const domain,
+			const access_mask_t perm_bit, const u64 request_value)
+{
+	ssize_t layer;
+
+	BUILD_BUG_ON(sizeof(perm_bit) > sizeof(u32));
+
+	if (WARN_ON_ONCE(hweight32(perm_bit) != 1) ||
+	    WARN_ON_ONCE(hweight64(request_value) != 1))
+		return domain->num_layers;
+
+	for (layer = domain->num_layers - 1; layer >= 0; layer--) {
+		u64 allowed;
+
+		if (!(domain->layers[layer].handled.perm & perm_bit))
+			continue;
+
+		switch (perm_bit) {
+		case LANDLOCK_PERM_NAMESPACE_USE:
+			allowed = domain->layers[layer].allowed.ns;
+			break;
+		case LANDLOCK_PERM_CAPABILITY_USE:
+			allowed = domain->layers[layer].allowed.caps;
+			break;
+		default:
+			WARN_ONCE(1, "Unknown permission %u\n",
+				  (unsigned int)perm_bit);
+			return layer + 1;
+		}
+
+		if (!(allowed & request_value))
+			return layer + 1;
+	}
+	return 0;
 }
 
 __init void landlock_add_cred_hooks(void);

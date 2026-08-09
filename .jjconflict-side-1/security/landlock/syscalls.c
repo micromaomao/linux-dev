@@ -20,6 +20,7 @@
 #include <linux/fs.h>
 #include <linux/limits.h>
 #include <linux/mount.h>
+#include <linux/ns/ns_common_types.h>
 #include <linux/path.h>
 #include <linux/sched.h>
 #include <linux/sched/signal.h>
@@ -30,11 +31,13 @@
 #include <linux/uaccess.h>
 #include <uapi/linux/landlock.h>
 
+#include "cap.h"
 #include "cred.h"
 #include "domain.h"
 #include "fs.h"
 #include "limits.h"
 #include "net.h"
+#include "ns.h"
 #include "ruleset.h"
 #include "setup.h"
 #include "tsync.h"
@@ -98,7 +101,10 @@ static void build_check_abi(void)
 	struct landlock_ruleset_attr ruleset_attr;
 	struct landlock_path_beneath_attr path_beneath_attr;
 	struct landlock_net_port_attr net_port_attr;
+	struct landlock_namespace_attr namespace_attr;
+	struct landlock_capability_attr capability_attr;
 	size_t ruleset_size, path_beneath_size, net_port_size;
+	size_t namespace_size, capability_size;
 
 	/*
 	 * For each user space ABI structures, first checks that there is no
@@ -111,8 +117,9 @@ static void build_check_abi(void)
 	ruleset_size += sizeof(ruleset_attr.quiet_access_fs);
 	ruleset_size += sizeof(ruleset_attr.quiet_access_net);
 	ruleset_size += sizeof(ruleset_attr.quiet_scoped);
+	ruleset_size += sizeof(ruleset_attr.handled_perm);
 	BUILD_BUG_ON(sizeof(ruleset_attr) != ruleset_size);
-	BUILD_BUG_ON(sizeof(ruleset_attr) != 48);
+	BUILD_BUG_ON(sizeof(ruleset_attr) != 56);
 
 	path_beneath_size = sizeof(path_beneath_attr.allowed_access);
 	path_beneath_size += sizeof(path_beneath_attr.parent_fd);
@@ -123,6 +130,18 @@ static void build_check_abi(void)
 	net_port_size += sizeof(net_port_attr.port);
 	BUILD_BUG_ON(sizeof(net_port_attr) != net_port_size);
 	BUILD_BUG_ON(sizeof(net_port_attr) != 16);
+
+	namespace_size = sizeof(namespace_attr.perm);
+	namespace_size += sizeof(namespace_attr.allowed_namespace_types);
+	namespace_size += sizeof(namespace_attr.quiet_namespace_types);
+	BUILD_BUG_ON(sizeof(namespace_attr) != namespace_size);
+	BUILD_BUG_ON(sizeof(namespace_attr) != 24);
+
+	capability_size = sizeof(capability_attr.perm);
+	capability_size += sizeof(capability_attr.allowed_capabilities);
+	capability_size += sizeof(capability_attr.quiet_capabilities);
+	BUILD_BUG_ON(sizeof(capability_attr) != capability_size);
+	BUILD_BUG_ON(sizeof(capability_attr) != 24);
 }
 
 /* Ruleset handling */
@@ -273,16 +292,22 @@ SYSCALL_DEFINE3(landlock_create_ruleset,
 	    ruleset_attr.scoped)
 		return -EINVAL;
 
+	/* Checks permission content (and 32-bits cast). */
+	if ((ruleset_attr.handled_perm | LANDLOCK_MASK_PERM) !=
+	    LANDLOCK_MASK_PERM)
+		return -EINVAL;
+
 	/* Checks arguments and transforms to kernel struct. */
 	ruleset = landlock_create_ruleset(ruleset_attr.handled_access_fs,
 					  ruleset_attr.handled_access_net,
-					  ruleset_attr.scoped);
+					  ruleset_attr.scoped,
+					  ruleset_attr.handled_perm);
 	if (IS_ERR(ruleset))
 		return PTR_ERR(ruleset);
 
-	ruleset->quiet_masks.fs = ruleset_attr.quiet_access_fs;
-	ruleset->quiet_masks.net = ruleset_attr.quiet_access_net;
-	ruleset->quiet_masks.scope = ruleset_attr.quiet_scoped;
+	ruleset->quiet_access.fs = ruleset_attr.quiet_access_fs;
+	ruleset->quiet_access.net = ruleset_attr.quiet_access_net;
+	ruleset->quiet_access.scope = ruleset_attr.quiet_scoped;
 
 	/*
 	 * Emits before anon_inode_getfd() installs the file descriptor, while
@@ -377,12 +402,12 @@ static int add_rule_path_beneath(struct landlock_ruleset *const ruleset,
 		return -ENOMSG;
 
 	/* Checks that allowed_access matches the @ruleset constraints. */
-	mask = ruleset->handled_masks.fs;
+	mask = ruleset->layer.handled.fs;
 	if ((path_beneath_attr.allowed_access | mask) != mask)
 		return -EINVAL;
 
 	/* Checks for useless quiet flag. */
-	if (flags & LANDLOCK_ADD_RULE_QUIET && !ruleset->quiet_masks.fs)
+	if (flags & LANDLOCK_ADD_RULE_QUIET && !ruleset->quiet_access.fs)
 		return -EINVAL;
 
 	/* Gets and checks the new rule. */
@@ -418,12 +443,12 @@ static int add_rule_net_port(struct landlock_ruleset *ruleset,
 		return -ENOMSG;
 
 	/* Checks that allowed_access matches the @ruleset constraints. */
-	mask = ruleset->handled_masks.net;
+	mask = ruleset->layer.handled.net;
 	if ((net_port_attr.allowed_access | mask) != mask)
 		return -EINVAL;
 
 	/* Checks for useless quiet flag. */
-	if (flags & LANDLOCK_ADD_RULE_QUIET && !ruleset->quiet_masks.net)
+	if (flags & LANDLOCK_ADD_RULE_QUIET && !ruleset->quiet_access.net)
 		return -EINVAL;
 
 	/* Denies inserting a rule with port greater than 65535. */
@@ -435,13 +460,84 @@ static int add_rule_net_port(struct landlock_ruleset *ruleset,
 					net_port_attr.allowed_access, flags);
 }
 
+static int add_rule_namespace(struct landlock_ruleset *const ruleset,
+			      const void __user *const rule_attr,
+			      const u32 flags)
+{
+	struct landlock_namespace_attr ns_attr;
+	int res;
+
+	if (flags)
+		return -EINVAL;
+
+	res = copy_from_user(&ns_attr, rule_attr, sizeof(ns_attr));
+	if (res)
+		return -EFAULT;
+	if (!ns_attr.perm)
+		return -ENOMSG;
+	if (ns_attr.perm != LANDLOCK_PERM_NAMESPACE_USE)
+		return -EINVAL;
+	if (!(landlock_get_perm_mask(ruleset) &
+	      LANDLOCK_PERM_NAMESPACE_USE))
+		return -EINVAL;
+	if (!ns_attr.allowed_namespace_types && !ns_attr.quiet_namespace_types)
+		return -ENOMSG;
+
+	mutex_lock(&ruleset->lock);
+	ruleset->layer.allowed.ns |= landlock_ns_types_to_bits(
+		ns_attr.allowed_namespace_types & CLONE_NS_ALL);
+	ruleset->quiet_perm.ns |= landlock_ns_types_to_bits(
+		ns_attr.quiet_namespace_types & CLONE_NS_ALL);
+#ifdef CONFIG_TRACEPOINTS
+	ruleset->version++;
+#endif /* CONFIG_TRACEPOINTS */
+	mutex_unlock(&ruleset->lock);
+	return 0;
+}
+
+static int add_rule_capability(struct landlock_ruleset *const ruleset,
+			       const void __user *const rule_attr,
+			       const u32 flags)
+{
+	struct landlock_capability_attr cap_attr;
+	int res;
+
+	if (flags)
+		return -EINVAL;
+
+	res = copy_from_user(&cap_attr, rule_attr, sizeof(cap_attr));
+	if (res)
+		return -EFAULT;
+	if (!cap_attr.perm)
+		return -ENOMSG;
+	if (cap_attr.perm != LANDLOCK_PERM_CAPABILITY_USE)
+		return -EINVAL;
+	if (!(landlock_get_perm_mask(ruleset) &
+	      LANDLOCK_PERM_CAPABILITY_USE))
+		return -EINVAL;
+	if (!cap_attr.allowed_capabilities && !cap_attr.quiet_capabilities)
+		return -ENOMSG;
+
+	mutex_lock(&ruleset->lock);
+	ruleset->layer.allowed.caps |= landlock_caps_to_bits(
+		cap_attr.allowed_capabilities & CAP_VALID_MASK);
+	ruleset->quiet_perm.caps |= landlock_caps_to_bits(
+		cap_attr.quiet_capabilities & CAP_VALID_MASK);
+#ifdef CONFIG_TRACEPOINTS
+	ruleset->version++;
+#endif /* CONFIG_TRACEPOINTS */
+	mutex_unlock(&ruleset->lock);
+	return 0;
+}
+
 /**
  * sys_landlock_add_rule - Add a new rule to a ruleset
  *
  * @ruleset_fd: File descriptor tied to the ruleset that should be extended
  *		with the new rule.
  * @rule_type: Identify the structure type pointed to by @rule_attr:
- *             %LANDLOCK_RULE_PATH_BENEATH or %LANDLOCK_RULE_NET_PORT.
+ *             %LANDLOCK_RULE_PATH_BENEATH, %LANDLOCK_RULE_NET_PORT,
+ *             %LANDLOCK_RULE_NAMESPACE, or %LANDLOCK_RULE_CAPABILITY.
  * @rule_attr: Pointer to a rule (matching the @rule_type).
  * @flags: Must be 0 or %LANDLOCK_ADD_RULE_QUIET.
  *
@@ -495,6 +591,10 @@ SYSCALL_DEFINE4(landlock_add_rule, const int, ruleset_fd,
 		return add_rule_path_beneath(ruleset, rule_attr, flags);
 	case LANDLOCK_RULE_NET_PORT:
 		return add_rule_net_port(ruleset, rule_attr, flags);
+	case LANDLOCK_RULE_NAMESPACE:
+		return add_rule_namespace(ruleset, rule_attr, flags);
+	case LANDLOCK_RULE_CAPABILITY:
+		return add_rule_capability(ruleset, rule_attr, flags);
 	default:
 		return -EINVAL;
 	}

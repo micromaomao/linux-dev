@@ -11,11 +11,13 @@
 
 #include "access.h"
 #include "audit.h"
+#include "cap.h"
 #include "common.h"
 #include "cred.h"
 #include "domain.h"
 #include "limits.h"
 #include "log.h"
+#include "ns.h"
 #include "ruleset.h"
 #include "trace.h"
 
@@ -435,7 +437,7 @@ is_denial_quieted(const struct landlock_request *const request,
 	if (object_quiet_flag) {
 		const access_mask_t quiet_mask =
 			pick_access_mask_for_request_type(
-				request->type, youngest_denied->quiet_masks);
+				request->type, youngest_denied->quiet_access);
 
 		return (quiet_mask & missing) == missing;
 	}
@@ -446,11 +448,17 @@ is_denial_quieted(const struct landlock_request *const request,
 	 */
 	switch (request->type) {
 	case LANDLOCK_REQUEST_SCOPE_SIGNAL:
-		return !!(youngest_denied->quiet_masks.scope &
+		return !!(youngest_denied->quiet_access.scope &
 			  LANDLOCK_SCOPE_SIGNAL);
 	case LANDLOCK_REQUEST_SCOPE_ABSTRACT_UNIX_SOCKET:
-		return !!(youngest_denied->quiet_masks.scope &
+		return !!(youngest_denied->quiet_access.scope &
 			  LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET);
+	case LANDLOCK_REQUEST_CAPABILITY:
+		return !!(youngest_denied->quiet_perm.caps &
+			  landlock_cap_to_bit(request->audit.u.cap));
+	case LANDLOCK_REQUEST_NAMESPACE:
+		return !!(youngest_denied->quiet_perm.ns &
+			  landlock_ns_type_to_bit(request->audit.u.ns.ns_type));
 	/*
 	 * Leave LANDLOCK_REQUEST_PTRACE and LANDLOCK_REQUEST_FS_CHANGE_TOPOLOGY
 	 * unhandled for now - they are never quiet.

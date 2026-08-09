@@ -73,6 +73,14 @@ get_blocker(const enum landlock_request_type type,
 	case LANDLOCK_REQUEST_SCOPE_SIGNAL:
 		WARN_ON_ONCE(access_bit != -1);
 		return scope_strings[BIT_INDEX(LANDLOCK_SCOPE_SIGNAL)];
+
+	case LANDLOCK_REQUEST_NAMESPACE:
+		WARN_ON_ONCE(access_bit != -1);
+		return "perm.namespace_use";
+
+	case LANDLOCK_REQUEST_CAPABILITY:
+		WARN_ON_ONCE(access_bit != -1);
+		return "perm.capability_use";
 	}
 
 	WARN_ON_ONCE(1);
@@ -102,6 +110,10 @@ blocker_prefix(const enum landlock_request_type type)
 	case LANDLOCK_REQUEST_SCOPE_ABSTRACT_UNIX_SOCKET:
 	case LANDLOCK_REQUEST_SCOPE_SIGNAL:
 		return "scope.";
+
+	case LANDLOCK_REQUEST_NAMESPACE:
+	case LANDLOCK_REQUEST_CAPABILITY:
+		return "";
 	}
 
 	WARN_ON_ONCE(1);

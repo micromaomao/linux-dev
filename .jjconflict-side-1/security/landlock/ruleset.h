@@ -181,22 +181,26 @@ struct landlock_ruleset {
 #endif /* CONFIG_TRACEPOINTS */
 
 	/**
-	 * @quiet_masks: Stores the quiet flags for an unmerged ruleset.  For a
+	 * @quiet_access: Stores the quiet flags for an unmerged ruleset.  For a
 	 * merged domain, this is stored in each layer's struct
 	 * landlock_hierarchy instead.
 	 */
-	struct access_masks quiet_masks;
+	struct access_masks quiet_access;
 	/**
-	 * @handled_masks: Contains the subset of filesystem and network actions
-	 * that are handled by this ruleset.
+	 * @quiet_perm: Per-member quiet bitmasks for permission types.  For a
+	 * merged domain, this is stored in the corresponding hierarchy node.
 	 */
-	struct access_masks handled_masks;
+	struct perm_masks quiet_perm;
+	/**
+	 * @layer: Access configuration for this unmerged ruleset.
+	 */
+	struct layer_config layer;
 };
 
-struct landlock_ruleset *
-landlock_create_ruleset(const access_mask_t access_mask_fs,
-			const access_mask_t access_mask_net,
-			const access_mask_t scope_mask);
+struct landlock_ruleset *landlock_create_ruleset(
+	const access_mask_t access_mask_fs,
+	const access_mask_t access_mask_net, const access_mask_t scope_mask,
+	const access_mask_t perm_mask);
 
 void landlock_put_ruleset(struct landlock_ruleset *const ruleset);
 
@@ -245,6 +249,12 @@ static inline void landlock_get_ruleset(struct landlock_ruleset *const ruleset)
 {
 	if (ruleset)
 		refcount_inc(&ruleset->usage);
+}
+
+static inline access_mask_t
+landlock_get_perm_mask(const struct landlock_ruleset *const ruleset)
+{
+	return ruleset->layer.handled.perm;
 }
 
 #endif /* _SECURITY_LANDLOCK_RULESET_H */
