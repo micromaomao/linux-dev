@@ -629,8 +629,9 @@ int main(const int argc, char *const argv[], char *const *const envp)
 				LANDLOCK_PERM_NAMESPACE_USE,
 	};
 	bool quiet_supported = true;
-	int supported_restrict_flags = LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON;
-	int set_restrict_flags = 0;
+	int supported_restrict_flags = LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON |
+				       LANDLOCK_RESTRICT_SELF_NO_NEW_PRIVS;
+	int set_restrict_flags = LANDLOCK_RESTRICT_SELF_NO_NEW_PRIVS;
 
 	if (argc < 2) {
 		fprintf(stderr, help, argv[0]);
@@ -723,6 +724,10 @@ int main(const int argc, char *const argv[], char *const *const envp)
 		quiet_supported = false;
 		__attribute__((fallthrough));
 	case 10:
+		/* Removes LANDLOCK_RESTRICT_SELF_NO_NEW_PRIVS for ABI < 11 */
+		supported_restrict_flags &=
+			~LANDLOCK_RESTRICT_SELF_NO_NEW_PRIVS;
+		set_restrict_flags &= ~LANDLOCK_RESTRICT_SELF_NO_NEW_PRIVS;
 		/* Removes LANDLOCK_PERM_* for ABI < 11 */
 		ruleset_attr.handled_perm &= ~(LANDLOCK_PERM_NAMESPACE_USE |
 					       LANDLOCK_PERM_CAPABILITY_USE);
@@ -867,7 +872,8 @@ int main(const int argc, char *const argv[], char *const *const envp)
 	if (populate_ruleset_ns(ENV_NS_NAME, ENV_NS_QUIET_NAME, ruleset_fd))
 		goto err_close_ruleset;
 
-	if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) {
+	if (!(set_restrict_flags & LANDLOCK_RESTRICT_SELF_NO_NEW_PRIVS) &&
+	    prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) {
 		perror("Failed to restrict privileges");
 		goto err_close_ruleset;
 	}
