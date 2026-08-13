@@ -111,6 +111,7 @@ while [ "${1:-}" != '' ]; do
     shift
 done
 
+set +e
 VIRTIOFSD_LOCATION=$(which virtiofsd 2>/dev/null)
 if [ $? -ne 0 ] && [[ $fs_type == "virtiofs" ]]; then
     if [ -e "/usr/lib/virtiofsd" ]; then
