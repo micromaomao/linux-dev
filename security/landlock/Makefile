@@ -19,6 +19,9 @@ landlock-$(CONFIG_SECURITY_LANDLOCK_LOG) += \
 	id.o \
 	log.o
 
+landlock-$(CONFIG_SECURITY_LANDLOCK_SUPERVISE) += \
+	supervisor.o
+
 landlock-$(CONFIG_AUDIT) += audit.o
 
 landlock-$(CONFIG_TRACEPOINTS) += trace.o
