@@ -96,10 +96,20 @@ struct landlock_ruleset_attr {
  *
  * %LANDLOCK_CREATE_RULESET_ERRATA
  *     Get a bitmask of fixed issues for the current Landlock ABI version.
+ *
+ * %LANDLOCK_CREATE_RULESET_SUPERVISOR
+ *     Create a supervisor ruleset.  A supervisor ruleset is used to create
+ *     mutable domains where a supervisor process can modify Landlock rules
+ *     in the domain even after it is applied to other processes.  The
+ *     returned file descriptor cannot be passed to
+ *     landlock_restrict_self() directly, but can be used to obtain a
+ *     supervisee ruleset via the %LANDLOCK_IOCTL_GET_SUPERVISEE_RULESET
+ *     ioctl, which can then be passed to landlock_restrict_self().
  */
 /* clang-format off */
 #define LANDLOCK_CREATE_RULESET_VERSION			(1U << 0)
 #define LANDLOCK_CREATE_RULESET_ERRATA			(1U << 1)
+#define LANDLOCK_CREATE_RULESET_SUPERVISOR		(1U << 2)
 /* clang-format on */
 
 /**
@@ -129,10 +139,18 @@ struct landlock_ruleset_attr {
  *     allowed_access in the passed in rule_attr.  When this flag is
  *     present, the caller is also allowed to pass in an empty
  *     allowed_access.
+ *
+ * %LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR
+ *     Commit pending changes (including this one) to the supervisor
+ *     ruleset.  This flag must be used with supervisor rulesets created
+ *     with %LANDLOCK_CREATE_RULESET_SUPERVISOR.  Without this flag,
+ *     changes to supervisor rules do not take effect.  The rule_attr
+ *     argument may be NULL when only committing changes.
  */
 
 /* clang-format off */
 #define LANDLOCK_ADD_RULE_QUIET			(1U << 0)
+#define LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR	(1U << 1)
 /* clang-format on */
 
 /**
@@ -630,5 +648,21 @@ struct landlock_capability_attr {
  */
 #define LANDLOCK_PERMISSION_NAMESPACE_USE			(1ULL << 0)
 #define LANDLOCK_PERMISSION_CAPABILITY_USE			(1ULL << 1)
+
+/**
+ * DOC: landlock_ioctls
+ *
+ * Landlock ioctls
+ * ~~~~~~~~~~~~~~~
+ *
+ * %LANDLOCK_IOCTL_GET_SUPERVISEE_RULESET
+ *     Get a supervisee ruleset file descriptor from a supervisor ruleset.
+ *     The supervisor ruleset must have been created with
+ *     %LANDLOCK_CREATE_RULESET_SUPERVISOR.  The returned supervisee ruleset
+ *     can be passed to landlock_restrict_self() to enforce it on the calling
+ *     thread.
+ */
+#define LANDLOCK_IOC_MAGIC			'L'
+#define LANDLOCK_IOCTL_GET_SUPERVISEE_RULESET	_IO(LANDLOCK_IOC_MAGIC, 0x20)
 
 #endif /* _UAPI_LINUX_LANDLOCK_H */
