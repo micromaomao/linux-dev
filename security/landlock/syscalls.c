@@ -40,6 +40,7 @@
 #include "ns.h"
 #include "ruleset.h"
 #include "setup.h"
+#include "supervisor.h"
 #include "tsync.h"
 
 #include <trace/events/landlock.h>
@@ -182,6 +183,123 @@ static const struct file_operations ruleset_fops = {
 	.write = fop_dummy_write,
 };
 
+#ifdef CONFIG_SECURITY_LANDLOCK_SUPERVISE
+
+static long fop_supervisor_ioctl(struct file *filp, unsigned int cmd,
+				 unsigned long arg);
+
+static const struct file_operations supervisor_ruleset_fops = {
+	.release = fop_ruleset_release,
+	.read = fop_dummy_read,
+	.write = fop_dummy_write,
+	.unlocked_ioctl = fop_supervisor_ioctl,
+	/* We don't take pointer argument, so no need to compat_ptr_ioctl */
+	.compat_ioctl = fop_supervisor_ioctl,
+};
+#endif /* CONFIG_SECURITY_LANDLOCK_SUPERVISE */
+
+/**
+ * Emit the landlock_create_ruleset event for the given ruleset and
+ * install an anonymous FD for the ruleset.
+ *
+ * @ruleset: The ruleset to trace and install
+ * @is_supervisor: Whether the ruleset is a supervisor ruleset, in which
+ *                 case the fd installed will be a supervisor ruleset fd.
+ */
+static int trace_and_create_ruleset_fd(struct landlock_ruleset *ruleset,
+				       bool is_supervisor)
+{
+	/*
+	 * Emits before anon_inode_getfd() installs the file descriptor, while
+	 * the ruleset is still private to this thread: no lock is needed, and
+	 * the event cannot race a concurrent close() freeing the ruleset under
+	 * the tracepoint's BTF read.  This is the last point at which the
+	 * ruleset is guaranteed alive and unshared.
+	 */
+	trace_landlock_create_ruleset(ruleset);
+
+#ifdef CONFIG_SECURITY_LANDLOCK_SUPERVISE
+	if (is_supervisor) {
+		return anon_inode_getfd("[landlock-supervisor-ruleset]",
+					&supervisor_ruleset_fops, ruleset,
+					O_RDWR | O_CLOEXEC);
+	}
+#else
+	WARN_ON_ONCE(is_supervisor);
+#endif /* CONFIG_SECURITY_LANDLOCK_SUPERVISE */
+
+	return anon_inode_getfd("[landlock-ruleset]", &ruleset_fops, ruleset,
+				O_RDWR | O_CLOEXEC);
+}
+
+#ifdef CONFIG_SECURITY_LANDLOCK_SUPERVISE
+
+/**
+ * fop_supervisor_ioctl - Handle ioctl calls on supervisor rulesets
+ *
+ * @filp: The supervisor ruleset file.
+ * @cmd: The ioctl command.
+ * @arg: The ioctl argument (flags, must be 0).
+ *
+ * Handles the LANDLOCK_IOCTL_GET_SUPERVISEE_RULESET ioctl, which returns
+ * a new file descriptor for a supervisee ruleset that can be passed to
+ * landlock_restrict_self().
+ */
+static long fop_supervisor_ioctl(struct file *filp, unsigned int cmd,
+				 unsigned long arg)
+{
+	struct landlock_ruleset *supervisor_ruleset;
+	struct landlock_ruleset *supervisee_ruleset;
+	struct landlock_supervisor *supervisor;
+	int supervisee_fd;
+
+	if (cmd != LANDLOCK_IOCTL_GET_SUPERVISEE_RULESET)
+		return -ENOTTY;
+
+	/* flags argument must be 0 */
+	if (arg != 0)
+		return -EINVAL;
+
+	if (!(filp->f_mode & FMODE_READ))
+		return -EINVAL;
+
+	supervisor_ruleset = filp->private_data;
+	if (WARN_ON_ONCE(!supervisor_ruleset) ||
+	    WARN_ON_ONCE(!supervisor_ruleset->layer.supervisor))
+		return -EINVAL;
+
+	supervisor = supervisor_ruleset->layer.supervisor;
+
+	/*
+	 * Create a new supervisee ruleset with the same handled and quieted
+	 * accesses as the supervisee ruleset.  Allowed and quieted permissions
+	 * are dynamically updatable and separate between the supervisee and
+	 * supervisor rulesets, and thus are not copied.
+	 */
+	supervisee_ruleset = landlock_create_ruleset(
+		supervisor_ruleset->layer.handled.fs,
+		supervisor_ruleset->layer.handled.net,
+		supervisor_ruleset->layer.handled.scope,
+		supervisor_ruleset->layer.handled.permissions);
+	if (IS_ERR(supervisee_ruleset))
+		return PTR_ERR(supervisee_ruleset);
+
+	/* Copy quiet masks. */
+	supervisee_ruleset->quiet_access = supervisor_ruleset->quiet_access;
+
+	/* Attach the supervisor to the supervisee ruleset */
+	landlock_get_supervisor(supervisor);
+	supervisee_ruleset->layer.supervisor = supervisor;
+
+	/* Create a file descriptor for the supervisee ruleset */
+	supervisee_fd = trace_and_create_ruleset_fd(supervisee_ruleset, false);
+	if (supervisee_fd < 0)
+		landlock_put_ruleset(supervisee_ruleset);
+
+	return supervisee_fd;
+}
+#endif /* CONFIG_SECURITY_LANDLOCK_SUPERVISE */
+
 /*
  * The Landlock ABI version should be incremented for each new Landlock-related
  * user space visible change (e.g. Landlock syscalls).  This version should
@@ -191,7 +309,7 @@ static const struct file_operations ruleset_fops = {
  * If the change involves a fix that requires userspace awareness, also update
  * the errata documentation in Documentation/userspace-api/landlock.rst .
  */
-const int landlock_abi_version = 12;
+const int landlock_abi_version = 13;
 
 /**
  * sys_landlock_create_ruleset - Create a new ruleset
@@ -204,6 +322,7 @@ const int landlock_abi_version = 12;
  *
  *         - %LANDLOCK_CREATE_RULESET_VERSION
  *         - %LANDLOCK_CREATE_RULESET_ERRATA
+ *         - %LANDLOCK_CREATE_RULESET_SUPERVISOR
  *
  * This system call enables to create a new Landlock ruleset.
  *
@@ -234,6 +353,10 @@ SYSCALL_DEFINE3(landlock_create_ruleset,
 	struct landlock_ruleset_attr ruleset_attr;
 	struct landlock_ruleset *ruleset;
 	int err, ruleset_fd;
+	bool is_supervisor;
+#ifdef CONFIG_SECURITY_LANDLOCK_SUPERVISE
+	struct landlock_supervisor *supervisor = NULL;
+#endif /* CONFIG_SECURITY_LANDLOCK_SUPERVISE */
 
 	/* Build-time checks. */
 	build_check_abi();
@@ -241,18 +364,28 @@ SYSCALL_DEFINE3(landlock_create_ruleset,
 	if (!is_initialized())
 		return -EOPNOTSUPP;
 
-	if (flags) {
+	if (flags == LANDLOCK_CREATE_RULESET_VERSION) {
 		if (attr || size)
 			return -EINVAL;
-
-		if (flags == LANDLOCK_CREATE_RULESET_VERSION)
-			return landlock_abi_version;
-
-		if (flags == LANDLOCK_CREATE_RULESET_ERRATA)
-			return landlock_errata;
-
-		return -EINVAL;
+		return landlock_abi_version;
 	}
+
+	if (flags == LANDLOCK_CREATE_RULESET_ERRATA) {
+		if (attr || size)
+			return -EINVAL;
+		return landlock_errata;
+	}
+
+	/* For ruleset creation, any other flag is invalid */
+	if (flags & ~LANDLOCK_CREATE_RULESET_SUPERVISOR)
+		return -EINVAL;
+
+	is_supervisor = !!(flags & LANDLOCK_CREATE_RULESET_SUPERVISOR);
+
+#ifndef CONFIG_SECURITY_LANDLOCK_SUPERVISE
+	if (is_supervisor)
+		return -ENOSYS;
+#endif /* CONFIG_SECURITY_LANDLOCK_SUPERVISE */
 
 	/* Copies raw user space buffer. */
 	err = copy_min_struct_from_user(&ruleset_attr, sizeof(ruleset_attr),
@@ -308,18 +441,19 @@ SYSCALL_DEFINE3(landlock_create_ruleset,
 	ruleset->quiet_access.net = ruleset_attr.quiet_access_net;
 	ruleset->quiet_access.scope = ruleset_attr.quiet_scoped;
 
-	/*
-	 * Emits before anon_inode_getfd() installs the file descriptor, while
-	 * the ruleset is still private to this thread: no lock is needed, and
-	 * the event cannot race a concurrent close() freeing the ruleset under
-	 * the tracepoint's BTF read.  This is the last point at which the
-	 * ruleset is guaranteed alive and unshared.
-	 */
-	trace_landlock_create_ruleset(ruleset);
+#ifdef CONFIG_SECURITY_LANDLOCK_SUPERVISE
+	/* Create supervisor if requested */
+	if (is_supervisor) {
+		supervisor = landlock_create_supervisor();
+		if (IS_ERR(supervisor)) {
+			landlock_put_ruleset(ruleset);
+			return PTR_ERR(supervisor);
+		}
+		ruleset->layer.supervisor = supervisor;
+	}
+#endif /* CONFIG_SECURITY_LANDLOCK_SUPERVISE */
 
-	/* Creates anonymous FD referring to the ruleset. */
-	ruleset_fd = anon_inode_getfd("[landlock-ruleset]", &ruleset_fops,
-				      ruleset, O_RDWR | O_CLOEXEC);
+	ruleset_fd = trace_and_create_ruleset_fd(ruleset, is_supervisor);
 	if (ruleset_fd < 0)
 		landlock_put_ruleset(ruleset);
 	return ruleset_fd;
@@ -328,19 +462,37 @@ SYSCALL_DEFINE3(landlock_create_ruleset,
 /*
  * Returns an owned ruleset from a FD. It is thus needed to call
  * landlock_put_ruleset() on the return value.
+ *
+ * This function accepts both supervisor and supervisee rulesets (both
+ * references a ruleset, and rules can be added to each end separately).
+ * Caller can optionally pass in a pointer to a boolean to determine if the
+ * ruleset is a supervisor ruleset.
  */
-static struct landlock_ruleset *get_ruleset_from_fd(const int fd,
-						    const fmode_t mode)
+static struct landlock_ruleset *
+get_ruleset_from_fd(const int fd, const fmode_t mode, bool *const is_supervisor)
 {
 	CLASS(fd, ruleset_f)(fd);
 	struct landlock_ruleset *ruleset;
+	const struct file_operations *f_op;
 
 	if (fd_empty(ruleset_f))
 		return ERR_PTR(-EBADF);
 
-	/* Checks FD type and access right. */
-	if (fd_file(ruleset_f)->f_op != &ruleset_fops)
+	f_op = fd_file(ruleset_f)->f_op;
+	/* Check fd type */
+	if (f_op == &ruleset_fops) {
+		if (is_supervisor)
+			*is_supervisor = false;
+#ifdef CONFIG_SECURITY_LANDLOCK_SUPERVISE
+	} else if (f_op == &supervisor_ruleset_fops) {
+		if (is_supervisor)
+			*is_supervisor = true;
+#endif /* CONFIG_SECURITY_LANDLOCK_SUPERVISE */
+	} else {
 		return ERR_PTR(-EBADFD);
+	}
+
+	/* Check access */
 	if (!(fd_file(ruleset_f)->f_mode & mode))
 		return ERR_PTR(-EPERM);
 	ruleset = fd_file(ruleset_f)->private_data;
@@ -617,8 +769,12 @@ static int add_rule_capability(struct landlock_ruleset *const ruleset,
  * @rule_type: Identify the structure type pointed to by @rule_attr:
  *             %LANDLOCK_RULE_PATH_BENEATH, %LANDLOCK_RULE_NET_PORT,
  *             %LANDLOCK_RULE_NAMESPACE, or %LANDLOCK_RULE_CAPABILITY.
+ *             When %LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR is set in @flags,
+ *             @rule_type may be 0 to commit without adding a rule, in which
+ *             case @rule_attr is ignored.
  * @rule_attr: Pointer to a rule (matching the @rule_type).
- * @flags: Must be 0 or %LANDLOCK_ADD_RULE_QUIET.
+ * @flags: Must be 0 or a combination of %LANDLOCK_ADD_RULE_QUIET,
+ *         %LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR, and %LANDLOCK_ADD_RULE_INTERSECT.
  *
  * This system call enables to define a new rule and add it to an existing
  * ruleset.
@@ -640,6 +796,8 @@ static int add_rule_capability(struct landlock_ruleset *const ruleset,
  * - %EINVAL: &landlock_net_port_attr.port is greater than 65535;
  * - %EINVAL: LANDLOCK_ADD_RULE_QUIET is passed but the ruleset has no
  *   quiet access bits set for the corresponding rule type.
+ * - %EINVAL: LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR is passed but the ruleset
+ *   is not a supervisor ruleset.
  * - %ENOMSG: Empty accesses (e.g. &landlock_path_beneath_attr.allowed_access is
  *   0) and no flags;
  * - %ENOMSG: &landlock_namespace_attr.permissions is 0, or both
@@ -658,35 +816,67 @@ static int add_rule_capability(struct landlock_ruleset *const ruleset,
  * .. kernel-doc:: include/uapi/linux/landlock.h
  *     :identifiers: landlock_add_rule_flags
  */
+
+#define LANDLOCK_ADD_RULE_VALID_FLAGS                                    \
+	(LANDLOCK_ADD_RULE_QUIET | LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR | \
+	 LANDLOCK_ADD_RULE_INTERSECT)
+
 SYSCALL_DEFINE4(landlock_add_rule, const int, ruleset_fd,
 		const enum landlock_rule_type, rule_type,
-		const void __user *const, rule_attr, const __u32, flags)
+		const void __user *const, rule_attr, __u32, flags)
 {
 	struct landlock_ruleset *ruleset __free(landlock_put_ruleset) = NULL;
+	bool commit_supervisor;
+	int err;
 
 	if (!is_initialized())
 		return -EOPNOTSUPP;
 
-	if (flags && flags != LANDLOCK_ADD_RULE_QUIET)
+	if (flags & ~LANDLOCK_ADD_RULE_VALID_FLAGS)
 		return -EINVAL;
 
 	/* Gets and checks the ruleset. */
-	ruleset = get_ruleset_from_fd(ruleset_fd, FMODE_CAN_WRITE);
+	ruleset = get_ruleset_from_fd(ruleset_fd, FMODE_CAN_WRITE, NULL);
 	if (IS_ERR(ruleset))
 		return PTR_ERR(ruleset);
 
-	switch (rule_type) {
-	case LANDLOCK_RULE_PATH_BENEATH:
-		return add_rule_path_beneath(ruleset, rule_attr, flags);
-	case LANDLOCK_RULE_NET_PORT:
-		return add_rule_net_port(ruleset, rule_attr, flags);
-	case LANDLOCK_RULE_NAMESPACE:
-		return add_rule_namespace(ruleset, rule_attr, flags);
-	case LANDLOCK_RULE_CAPABILITY:
-		return add_rule_capability(ruleset, rule_attr, flags);
-	default:
+	commit_supervisor = !!(flags & LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR);
+	flags = flags & ~LANDLOCK_ADD_RULE_COMMIT_SUPERVISOR;
+
+	if (commit_supervisor && !ruleset->layer.supervisor)
+		return -EINVAL;
+
+	if (rule_type) {
+		switch (rule_type) {
+		case LANDLOCK_RULE_PATH_BENEATH:
+			err = add_rule_path_beneath(ruleset, rule_attr, flags);
+			break;
+		case LANDLOCK_RULE_NET_PORT:
+			err = add_rule_net_port(ruleset, rule_attr, flags);
+			break;
+		case LANDLOCK_RULE_NAMESPACE:
+			err = add_rule_namespace(ruleset, rule_attr, flags);
+			break;
+		case LANDLOCK_RULE_CAPABILITY:
+			err = add_rule_capability(ruleset, rule_attr, flags);
+			break;
+		default:
+			return -EINVAL;
+		}
+		if (err)
+			return err;
+	} else if (!commit_supervisor) {
+		/*
+		 * rule_type == 0 is only valid when committing a supervisor
+		 * ruleset change.
+		 */
 		return -EINVAL;
 	}
+
+	if (commit_supervisor)
+		return landlock_commit_supervisor(ruleset);
+
+	return 0;
 }
 
 /* Enforcement */
@@ -774,7 +964,7 @@ SYSCALL_DEFINE2(landlock_restrict_self, const int, ruleset_fd, const __u32,
 	      (flags & ~LANDLOCK_RESTRICT_SELF_TSYNC) ==
 		      LANDLOCK_RESTRICT_SELF_LOG_SUBDOMAINS_OFF)) {
 		/* Gets and checks the ruleset. */
-		ruleset = get_ruleset_from_fd(ruleset_fd, FMODE_CAN_READ);
+		ruleset = get_ruleset_from_fd(ruleset_fd, FMODE_CAN_READ, NULL);
 		if (IS_ERR(ruleset))
 			return PTR_ERR(ruleset);
 	}

@@ -218,7 +218,7 @@ int landlock_insert_rule(struct landlock_ruleset *const ruleset,
 int landlock_store_rule(struct landlock_rules *const rules,
 			const struct landlock_id id,
 			const struct landlock_layer (*layers)[],
-			const size_t num_layers);
+			const size_t num_layers, bool intersect);
 
 void landlock_free_rules(struct landlock_rules *const rules);
 

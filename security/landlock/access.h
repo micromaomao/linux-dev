@@ -102,6 +102,17 @@ struct layer_config {
 	 * restricted) by this layer.
 	 */
 	struct access_masks handled;
+#ifdef CONFIG_SECURITY_LANDLOCK_SUPERVISE
+	/**
+	 * @supervisor: Pointer to the shared supervisor struct for mutable
+	 * domains.  This is set for both the supervisor and supervisee
+	 * rulesets.
+	 *
+	 * For a landlock domain, this is always NULL.  (TODO: move the per-layer supervisor pointer
+	 * from landlock_hierarchy to here.)
+	 */
+	struct landlock_supervisor *supervisor;
+#endif
 };
 
 #define _LANDLOCK_LAYER_MASK_PADDING                              \
