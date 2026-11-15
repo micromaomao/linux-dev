@@ -28,6 +28,7 @@
 #include "limits.h"
 #include "object.h"
 #include "ruleset.h"
+#include "supervisor.h"
 
 #include <trace/events/landlock.h>
 
@@ -418,6 +419,9 @@ static void free_ruleset(struct landlock_ruleset *const ruleset)
 	might_sleep();
 	trace_landlock_free_ruleset(ruleset);
 	landlock_free_rules(&ruleset->rules);
+#ifdef CONFIG_SECURITY_LANDLOCK_SUPERVISE
+	landlock_put_supervisor(ruleset->layer.supervisor);
+#endif /* CONFIG_SECURITY_LANDLOCK_SUPERVISE */
 	kfree(ruleset);
 }
 

@@ -159,6 +159,8 @@ struct landlock_ruleset {
 	/**
 	 * @lock: Protects against concurrent modifications of @rules, if @usage
 	 * is greater than zero.
+	 *
+	 * For a supervisor ruleset, this also synchronizes committing of rules.
 	 */
 	struct mutex lock;
 	/**
