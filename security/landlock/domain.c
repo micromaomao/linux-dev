@@ -346,37 +346,6 @@ static int merge_ruleset(struct landlock_domain *const dst,
 	return 0;
 }
 
-static int inherit_tree(struct landlock_domain *const parent,
-			struct landlock_domain *const child,
-			const enum landlock_key_type key_type)
-{
-	struct landlock_rule *walker_rule, *next_rule;
-	struct rb_root *parent_root;
-	int err = 0;
-
-	might_sleep();
-
-	parent_root = landlock_get_rule_root(&parent->rules, key_type);
-	if (IS_ERR(parent_root))
-		return PTR_ERR(parent_root);
-
-	/* Copies the @parent inode or network tree. */
-	rbtree_postorder_for_each_entry_safe(walker_rule, next_rule,
-					     parent_root, node) {
-		const struct landlock_id id = {
-			.key = walker_rule->key,
-			.type = key_type,
-		};
-
-		err = landlock_store_rule(&child->rules, id,
-					  &walker_rule->layers,
-					  walker_rule->num_layers);
-		if (err)
-			return err;
-	}
-	return err;
-}
-
 static int inherit_ruleset(struct landlock_domain *const parent,
 			   struct landlock_domain *const child)
 {
@@ -386,17 +355,9 @@ static int inherit_ruleset(struct landlock_domain *const parent,
 	if (!parent)
 		return 0;
 
-	/* Copies the @parent inode tree. */
-	err = inherit_tree(parent, child, LANDLOCK_KEY_INODE);
+	err = landlock_copy_rules(&child->rules, &parent->rules);
 	if (err)
 		return err;
-
-#if IS_ENABLED(CONFIG_INET)
-	/* Copies the @parent network port tree. */
-	err = inherit_tree(parent, child, LANDLOCK_KEY_NET_PORT);
-	if (err)
-		return err;
-#endif /* IS_ENABLED(CONFIG_INET) */
 
 	if (WARN_ON_ONCE(child->num_layers <= parent->num_layers))
 		return -EINVAL;

@@ -220,6 +220,9 @@ int landlock_store_rule(struct landlock_rules *const rules,
 			const struct landlock_layer (*layers)[],
 			const size_t num_layers);
 
+int landlock_copy_rules(struct landlock_rules *const dst,
+			struct landlock_rules *const src);
+
 void landlock_free_rules(struct landlock_rules *const rules);
 
 /**

@@ -333,6 +333,70 @@ int landlock_insert_rule(struct landlock_ruleset *const ruleset,
 	return err;
 }
 
+static int copy_tree(struct landlock_rules *const dst,
+		     struct landlock_rules *const src,
+		     const enum landlock_key_type key_type)
+{
+	struct landlock_rule *walker_rule, *next_rule;
+	struct rb_root *src_root;
+	int err = 0;
+
+	might_sleep();
+
+	src_root = landlock_get_rule_root(src, key_type);
+	if (IS_ERR(src_root))
+		return PTR_ERR(src_root);
+
+	rbtree_postorder_for_each_entry_safe(walker_rule, next_rule, src_root,
+					     node) {
+		const struct landlock_id id = {
+			.key = walker_rule->key,
+			.type = key_type,
+		};
+
+		err = landlock_store_rule(dst, id, &walker_rule->layers,
+					  walker_rule->num_layers);
+		if (err)
+			return err;
+	}
+	return err;
+}
+
+/**
+ * landlock_copy_rules - Copy all rules from @src into @dst
+ *
+ * @dst: Empty rule storage to copy into.
+ * @src: Rule storage to copy.
+ *
+ * Insert a copy of each rule in @src into @dst.  References to underlying
+ * landlock objects are acquired for @dst.  On failure, the caller must
+ * still free any partially copied rules.
+ *
+ * The caller must ensure no concurrent modifications is possible on either
+ * @src or @dst.  In the case where @src is contained within a ruleset, the
+ * caller must hold the ruleset lock.
+ *
+ * Return: 0 on success, -errno on failure.
+ */
+int landlock_copy_rules(struct landlock_rules *const dst,
+			struct landlock_rules *const src)
+{
+	int err;
+
+	might_sleep();
+	err = copy_tree(dst, src, LANDLOCK_KEY_INODE);
+	if (err)
+		return err;
+
+#if IS_ENABLED(CONFIG_INET)
+	err = copy_tree(dst, src, LANDLOCK_KEY_NET_PORT);
+	if (err)
+		return err;
+#endif /* IS_ENABLED(CONFIG_INET) */
+
+	return 0;
+}
+
 void landlock_free_rules(struct landlock_rules *const rules)
 {
 	struct landlock_rule *freeme, *next;
